@@ -71,6 +71,9 @@ api_token: "paste-the-output-of-openssl-rand-hex-32-here"
 # VM auto-reboot every N minutes (flushes DWM/VirtIO-GPU state). 0 = disable.
 reboot_interval: 30
 
+# Default Strategy Tester timeout. POST /backtest can override per job.
+backtest_timeout: "6h"
+
 tailscale:
   auth_key: ""       # tskey-auth-... — empty disables the tailscale sidecar
   login_server: ""   # Headscale URL; empty = Tailscale cloud
@@ -96,27 +99,32 @@ terminals:
     account: main
     port: 6542
     utc_offset: "3h"
+    symbol_suffix: ""
   - broker: roboforex
     account: demo
     port: 6543
     utc_offset: "3h"
+    symbol_suffix: ""
   - broker: roboforex
     account: tester
     port: 6544
     utc_offset: "3h"
     mode: backtest    # don't auto-launch terminal64.exe; reserved for /backtest jobs
+    symbol_suffix: ".r"  # optional explicit suffix for tester symbol remap
 ```
 
 Per-field notes:
 
 - **`api_token`** — if set, every endpoint requires `Authorization: Bearer <token>`. Empty = open. Generate with `openssl rand -hex 32`.
 - **`reboot_interval`** — minutes between scheduled VM reboots. `0` disables.
+- **`backtest_timeout`** — default Strategy Tester timeout for `POST /backtest`. Accepts the same duration grammar as `utc_offset`: `"6h"`, `"30m"`, `"3h30m"`, `"90m"`, or a bare number interpreted as hours. Per-request form field `timeout` overrides it.
 - **`tailscale.auth_key`** / **`tailscale.login_server`** — see [Tailscale](#tailscale-optional). Empty `auth_key` skips the sidecar.
 - **`requirements`** — additional pip packages installed in the VM on every boot.
 - **`accounts.<broker>.<account>`** — `broker` must match the installer name (`mt5setup-<broker>.exe`) and the `broker` field in `terminals[]`. `account` must match the `account` field in `terminals[]`.
 - **`terminals[].port`** — container-internal port for this terminal's HTTP API. Only nginx and the mt5 container talk to it; not exposed to the host.
 - **`terminals[].utc_offset`** — broker server's UTC offset, used to normalize all timestamps to real UTC on the wire (see [Broker time vs real UTC](#broker-time-vs-real-utc) below). Optional — defaults to `0`. Accepts `"3h"`, `"3h30m"`, `"-2h"`, `"90m"`, or a bare number (interpreted as hours). Common values: RoboForex/FTMO `"3h"`, TeleTrade `"2h"`.
 - **`terminals[].mode`** — `live` (default) or `backtest`. `live` keeps `terminal64.exe` running so the MT5 SDK stays initialized for live trading endpoints. `backtest` prepares the same portable directory but does **not** launch `terminal64.exe`, leaving the data dir free for the Strategy Tester subprocess to grab — see [Backtest](#backtest). MT5 is single-instance per portable data dir, so a backtest cannot run against a `live` terminal.
+- **`terminals[].symbol_suffix`** — optional explicit symbol suffix for Strategy Tester remaps. If set, mt5-httpapi appends it when `[Tester].Symbol` does not already end with that suffix. Examples: `"p"`, `".p"`, `"-mini"`. Use `""` for no suffix.
 
 Each terminal installs to `<broker>/base/` and gets copied to `<broker>/<account>/` at startup so multiple accounts of the same broker don't step on each other.
 
@@ -701,6 +709,10 @@ for the tester. Pick the broker/account namespace whose credentials you want
 injected into the run's `[Common]` section — e.g. a dedicated
 `darwinex/tester` entry next to your live `darwinex/main`.
 
+If your broker uses suffixed symbols like `EURUSDp` or `EURUSD.p`, set
+`terminals[].symbol_suffix` on that backtest terminal. If the broker uses plain
+symbols, set `symbol_suffix: ""` explicitly.
+
 Two-stage flow:
 
 1. `POST /backtest/build-ini` — turns a small JSON spec into a fully formed
@@ -761,6 +773,7 @@ Multipart form fields:
 | `expert_name`  | one of   | filename in `assets/experts/`                                  |
 | `set`          | no       | `.set` upload                                                  |
 | `set_name`     | no       | filename in `assets/sets/`                                     |
+| `timeout`      | no       | Duration string override (`"30m"`, `"6h"`, `"3h30m"`). Defaults to `backtest_timeout` from `config.yaml`, then hardcoded `6h`. |
 
 Responds `202 Accepted` with `Retry-After` header and the queued job payload:
 
