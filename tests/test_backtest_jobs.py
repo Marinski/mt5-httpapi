@@ -58,6 +58,7 @@ def test_sweep_no_directory(monkeypatch, tmp_path):
 def test_summary_parser_returns_all_keys_for_empty_html():
     summary = jobs.parse_report_summary("")
     expected_keys = {
+        "bars", "ticks", "symbols",
         "netProfit", "grossProfit", "grossLoss", "profitFactor",
         "recoveryFactor", "expectedPayoff", "sharpeRatio",
         "maxDrawdown", "maxDrawdownAbsolute", "maxEquityDrawdown",
