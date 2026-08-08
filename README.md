@@ -160,11 +160,29 @@ make status            # see whether the whole contraption is alive
 make test              # run all the tests, including integration + Go race
 make lint              # lint the PowerShell and shell shit
 make format            # format the shell scripts
+make verify-binaries   # check every vendored executable against the manifest
 make logs              # watch the logs scream
 make down              # stop only this project's stack
 ```
 
 Run `make help` when you forget the rest. The [operations guide](docs/operations.md#make-targets) explains what the targets actually do.
+
+### Vendored binaries
+
+Every executable tracked in this repo is declared in
+[`assets/binaries.lock.json`](assets/binaries.lock.json) with its SHA-256, size,
+upstream URL and the state of its code signature. `make verify-binaries` — which
+`make test` runs first, so CI enforces it on every pull request — fails the
+build on an undeclared binary, on one whose bytes changed, or on a signature
+that degrades.
+
+Nobody can read a binary. A reviewer skims thousands of lines of source and
+waves through the `.exe` beside it because there is nothing to skim, and that is
+the shape every serious supply-chain compromise has taken. If you need to add
+one: verify the download yourself against the vendor's published hash, then
+record it in the manifest with where it came from. If it cannot be verified, say
+so in its `note` — the gate will keep warning about it on every run, which is
+the point.
 
 ## Project layout
 

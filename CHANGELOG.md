@@ -6,6 +6,17 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.12.1] — 2026-08-08
+
+Documentation. No code changed.
+
+- The README documented the make targets but never mentioned
+  `make verify-binaries`, even though `make test` runs it first, so the
+  binary-manifest gate was invisible to anyone reading the docs to find out what
+  CI enforces. Added to the target list and given a short section explaining
+  `assets/binaries.lock.json` — what it records, and what to do when a new
+  executable has to be vendored.
+
 ## [v4.12.0] — 2026-08-06
 
 Most of what this stack does is now tested in CI, and every vendored binary has
