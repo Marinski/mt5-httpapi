@@ -19,9 +19,13 @@ import time
 from datetime import datetime, timezone
 
 from mt5api.config import (
+    ACCOUNT,
     BACKTEST_JOB_DIR,
     BACKTEST_JOB_RETENTION_SECONDS,
     BACKTEST_SWEEP_LOOKBACK_SECONDS,
+    BROKER,
+    INSTANCE,
+    normalize_instance,
 )
 from mt5api.logger import log
 
@@ -157,8 +161,29 @@ def public_payload(job: dict) -> dict:
     return payload
 
 
+def owns_job(job: dict) -> bool:
+    """Is this job ours, rather than a sibling terminal's?
+
+    Every backtest API on a host shares one job directory, so the sweep sees
+    every terminal's jobs. A job that does not name a terminal is treated as
+    ours: that is what a single-terminal install writes, and what every job
+    written before this field existed looks like, so the previous behaviour is
+    preserved exactly where there is nothing to distinguish.
+    """
+    broker = job.get("broker")
+    if broker is not None and broker != BROKER:
+        return False
+    account = job.get("account")
+    if account is not None and account != ACCOUNT:
+        return False
+    instance = job.get("instance")
+    if instance is not None and normalize_instance(instance) != normalize_instance(INSTANCE):
+        return False
+    return True
+
+
 def sweep_orphans(lookback_seconds: int | None = None) -> int:
-    """Mark any queued/running jobs on disk as failed.
+    """Mark this terminal's queued/running jobs on disk as failed.
 
     Called at API startup. Only state files touched within the last
     ``lookback_seconds`` are considered: a live job rewrites its file on every
@@ -167,6 +192,11 @@ def sweep_orphans(lookback_seconds: int | None = None) -> int:
     parsed tens of thousands of files on every boot — and because every backtest
     API on a VM shares the same job directory, that full scan repeated once per
     process. Returns the number of jobs swept.
+
+    Only jobs belonging to THIS terminal are swept. The directory is shared, so
+    sweeping everything meant restarting one terminal's API failed every other
+    terminal's in-flight backtest with "API restarted before completion" —
+    silently, and while those runs went on to finish perfectly well.
     """
     if lookback_seconds is None:
         lookback_seconds = SWEEP_LOOKBACK_SECONDS
@@ -197,6 +227,8 @@ def sweep_orphans(lookback_seconds: int | None = None) -> int:
             log.warning("backtest sweep: cannot read %s: %s", name, exc)
             continue
         if job.get("status") not in ACTIVE_STATUSES:
+            continue
+        if not owns_job(job):
             continue
         job["status"] = "failed"
         job["error"] = "API restarted before completion"

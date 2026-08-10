@@ -140,6 +140,29 @@ def _run_backtest_startup_cleanup():
         swept = backtest_jobs.sweep_orphans()
         if swept:
             log.warning("Backtest sweep marked %d orphaned job(s) as failed.", swept)
+
+        # Any tester process still running for this terminal is a leftover: we
+        # are the only thing that launches one here, and we have only just
+        # started. It holds this terminal's localhost agent ports, so leaving it
+        # makes every subsequent run fail with "bind error [10048]" until the
+        # host is rebooted.
+        #
+        # Deliberately not conditional on the sweep having found anything. A run
+        # whose state file predates the sweep lookback — an API killed while a
+        # long test was live — is never swept, and gating the kill on `swept`
+        # would leave exactly that process holding the ports.
+        #
+        # Backtest mode only: this cleanup thread runs in every mode, and in
+        # live mode the terminal is meant to stay up.
+        if MODE == "backtest":
+            from mt5api.backtest.handler import kill_terminal_processes
+
+            killed = kill_terminal_processes()
+            if killed:
+                log.warning(
+                    "Backtest startup killed %d leftover tester process(es).", killed
+                )
+
         pruned = backtest_jobs.prune_old_jobs()
         if pruned:
             log.info("Backtest retention retired %d old job(s).", pruned)
