@@ -10,6 +10,20 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 Remote EA deployment: attach Expert Advisors to charts with set files over the HTTP API, no RDP and no terminal restart.
 
+### Fixed
+
+- **The host-side per-VM health filter never ran.** `check_health.py` imports
+  `_vm_group_filter`/`_in_group` from `scripts/config_helper.py`, but neither
+  name was ever implemented there, so the import always hit its permissive
+  fallback and the `start.bat` status loop probed every port in `config.yaml` —
+  the same permanently-unhealthy multi-VM behaviour the container healthcheck
+  (the awk filter in `healthcheck.sh`) already scopes. Both hooks are now
+  implemented, mirroring the awk contract: they read the same per-VM group
+  file (`config/vm-group.txt`) docker-compose bind-mounts, treat a missing or
+  empty file as "no filter" so single-VM installs are unchanged, and match
+  broker/account/instance the same way the `vm_group` writer emits them. The
+  strict `xfail` that recorded the gap is replaced with behavioral tests.
+
 ## [v4.12.1] — 2026-08-08
 
 Documentation. No code changed.
