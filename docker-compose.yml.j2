@@ -72,6 +72,20 @@ services:
       LOG_LEVEL: INFO
       MAX_BARS: "5000"
       MIN_BARS: "50"
+    volumes:
+      - ./scripts/wickworks-healthcheck.py:/wickworks-healthcheck.py:ro
+    # netns-shared sidecars are NOT re-joined when the owning VM container is
+    # recreated: Docker leaves wickworks running in the old, now-orphaned
+    # network namespace, where its own loopback healthcheck still passes while
+    # the VM can no longer reach it (every TA call then 502s). This healthcheck
+    # detects the orphan and kills wickworks so `restart: unless-stopped`
+    # recreates it into the current mt5 netns. See scripts/wickworks-healthcheck.py.
+    healthcheck:
+      test: ["CMD", "python", "/wickworks-healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     depends_on:
       - {{ vm.service }}
 

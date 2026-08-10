@@ -20,6 +20,23 @@ TWO_VMS = [
     {"name": "bulk", "service": "mt5-b", "container_name": "mt5-b", "novnc_port": 8007},
 ]
 
+TWO_VMS_WITH_WICKWORKS = [
+    {
+        "name": "fast",
+        "service": "mt5",
+        "container_name": "mt5",
+        "novnc_port": 8006,
+        "wickworks_service": "wickworks",
+    },
+    {
+        "name": "bulk",
+        "service": "mt5-b",
+        "container_name": "mt5-b",
+        "novnc_port": 8007,
+        "wickworks_service": "wickworks-b",
+    },
+]
+
 
 def _load_config_helper_module():
     module_path = Path(__file__).resolve().parents[1] / "scripts" / "config_helper.py"
@@ -242,3 +259,35 @@ def test_generate_compose_emits_one_service_per_vm(tmp_path, monkeypatch):
         port for name in ("mt5", "mt5-b") for port in (services[name].get("ports") or [])
     ]
     assert len(set(host_ports)) == len(host_ports), f"VMs share a host port: {host_ports}"
+
+
+def test_generate_compose_gives_wickworks_a_self_healing_healthcheck(
+    tmp_path, monkeypatch
+):
+    """The wickworks TA sidecar shares the mt5 netns. When the mt5 container is
+    recreated it is orphaned in the old netns while its own loopback healthcheck
+    still passes, so the generated compose must mount and run the self-heal
+    healthcheck that detects the orphan and forces a restart.
+    """
+    helper = _load_config_helper_module()
+    config_path = _write_config(
+        tmp_path, [{"broker": "acme", "account": "main", "port": 5001}]
+    )
+    vms_path = _write_vms(tmp_path, TWO_VMS_WITH_WICKWORKS)
+    outpath = tmp_path / "docker-compose.yml"
+    template_path = Path(__file__).resolve().parents[1] / "docker-compose.yml.j2"
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(helper, "VMS_PATH", str(vms_path))
+    monkeypatch.setattr(helper, "COMPOSE_TEMPLATE_PATH", str(template_path))
+    monkeypatch.setattr(helper, "COMPOSE_OUTPUT_PATH", str(outpath))
+    monkeypatch.setattr("sys.argv", ["config_helper.py", "generate_compose"])
+
+    helper.main()
+
+    services = yaml.safe_load(outpath.read_text(encoding="utf-8"))["services"]
+    for name in ("wickworks", "wickworks-b"):
+        svc = services[name]
+        assert svc["network_mode"] == "service:" + {"wickworks": "mt5", "wickworks-b": "mt5-b"}[name]
+        assert "./scripts/wickworks-healthcheck.py:/wickworks-healthcheck.py:ro" in svc["volumes"]
+        hc = svc["healthcheck"]["test"]
+        assert hc == ["CMD", "python", "/wickworks-healthcheck.py"]
