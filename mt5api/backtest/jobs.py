@@ -25,6 +25,7 @@ from mt5api.config import (
     BACKTEST_SWEEP_LOOKBACK_SECONDS,
     BROKER,
     INSTANCE,
+    load_yaml_config,
     normalize_instance,
 )
 from mt5api.logger import log
@@ -161,14 +162,32 @@ def public_payload(job: dict) -> dict:
     return payload
 
 
+def _configured_terminals(broker: str, account: str) -> int:
+    """How many terminals in config.yaml target this broker/account.
+
+    Reads the real terminal list so the ownership decision reflects how the
+    install is actually configured, not just this API process's own identity.
+    """
+    terms = load_yaml_config().get("terminals") or []
+    return sum(
+        1
+        for t in terms
+        if t.get("broker") == broker and t.get("account", "") == account
+    )
+
+
 def owns_job(job: dict) -> bool:
     """Is this job ours, rather than a sibling terminal's?
 
     Every backtest API on a host shares one job directory, so the sweep sees
-    every terminal's jobs. A job that does not name a terminal is treated as
-    ours: that is what a single-terminal install writes, and what every job
-    written before this field existed looks like, so the previous behaviour is
-    preserved exactly where there is nothing to distinguish.
+    every terminal's jobs. A job that names a terminal is ours only if that
+    terminal is this one. A job that does not name a terminal is ambiguous and
+    is claimed ONLY when this broker/account has a single configured terminal —
+    that is the shape a single-terminal install writes, and what every job
+    written before the instance field existed looks like. In a multi-clone
+    install, an un-instanced job belongs to no clone in particular, and claiming
+    it here would reproduce the cross-terminal failure this sweep exists to
+    prevent.
     """
     broker = job.get("broker")
     if broker is not None and broker != BROKER:
@@ -177,9 +196,9 @@ def owns_job(job: dict) -> bool:
     if account is not None and account != ACCOUNT:
         return False
     instance = job.get("instance")
-    if instance is not None and normalize_instance(instance) != normalize_instance(INSTANCE):
-        return False
-    return True
+    if instance is not None:
+        return normalize_instance(instance) == normalize_instance(INSTANCE)
+    return _configured_terminals(BROKER, ACCOUNT) <= 1
 
 
 def sweep_orphans(lookback_seconds: int | None = None) -> int:

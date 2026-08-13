@@ -305,6 +305,19 @@ def _tail_terminal_log(lines=20):
 TESTER_PROCESS_NAMES = frozenset({"terminal64.exe", "metatester64.exe"})
 
 
+def _in_terminal_dir(exe):
+    """True when ``exe`` lives inside THIS terminal directory.
+
+    Compared by normalized path components, not by substring: a sibling at
+    ``...\\a2\\terminal64.exe`` must never match a terminal at ``...\\a``.
+    """
+    if not exe:
+        return False
+    base = TERMINAL_DIR.replace("\\", "/").lower().rstrip("/")
+    path = exe.replace("\\", "/").lower().rstrip("/")
+    return path == base or path.startswith(base + "/")
+
+
 def _terminal_processes(names=TESTER_PROCESS_NAMES):
     """Processes of the given names running from THIS terminal directory.
 
@@ -318,7 +331,7 @@ def _terminal_processes(names=TESTER_PROCESS_NAMES):
             if (proc.info.get("name") or "").lower() not in names:
                 continue
             exe = proc.info.get("exe") or ""
-            if exe and TERMINAL_DIR.lower() in exe.lower():
+            if _in_terminal_dir(exe):
                 yield proc
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue

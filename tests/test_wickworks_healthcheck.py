@@ -60,6 +60,65 @@ def hc():
     return _load()
 
 
+class _SlowSock:
+    """connect_ex sleeps before refusing, as an unreachable host would."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def settimeout(self, t):
+        pass
+
+    def connect_ex(self, addr):
+        import time as _time
+        _time.sleep(0.4)
+        return 111
+
+    def close(self):
+        pass
+
+
+def test_gateway_probes_run_concurrently(hc):
+    """The all-unreachable orphan path must be bounded by one probe timeout,
+    not len(GATEWAY_PORTS) * PROBE_TIMEOUT — Docker kills this healthcheck
+    after its compose timeout, so a serial sweep could outlive it and the
+    self-heal would never fire exactly when orphaned.
+    """
+    import time
+
+    hc.GATEWAY_PORTS = [445, 139, 5900, 5700]
+    hc.PROBE_TIMEOUT = 5
+    with patch("socket.socket", _SlowSock):
+        start = time.monotonic()
+        result = hc._shares_live_mt5_netns()
+        elapsed = time.monotonic() - start
+    assert result is False
+    # Four serial 0.4s probes would take ~1.6s; concurrent takes ~0.4s.
+    assert elapsed < 1.0, f"gateway sweep took {elapsed:.2f}s — probes are serial"
+
+
+def test_script_worst_case_fits_inside_the_compose_timeout(hc):
+    """The rendered wickworks healthcheck timeout must exceed the script's
+    worst-case runtime (self-health probe + concurrent gateway sweep), or
+    Docker would abort the orphan path before it can kill the process.
+    """
+    import re
+    from pathlib import Path
+
+    j2 = Path(__file__).resolve().parents[1] / "docker-compose.yml.j2"
+    match = re.search(
+        r"wickworks-healthcheck\.py.*?\btimeout:\s+(\d+)s",
+        j2.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert match, "wickworks healthcheck timeout not found in docker-compose.yml.j2"
+    compose_timeout = int(match.group(1))
+    worst_case = hc.PROBE_TIMEOUT + hc.PROBE_TIMEOUT
+    assert (
+        compose_timeout > worst_case
+    ), f"compose timeout {compose_timeout}s does not exceed worst case {worst_case}s"
+
+
 def test_healthy_when_self_and_gateway_reachable(hc):
     with patch("urllib.request.urlopen", return_value=_Resp(200)), \
          patch("socket.socket", _fake_sock(True)), \

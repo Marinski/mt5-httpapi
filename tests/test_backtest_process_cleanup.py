@@ -65,6 +65,22 @@ def test_never_touches_a_sibling_terminals_processes(monkeypatch, terminal_dir):
     assert not theirs.terminated and not theirs_agent.terminated
 
 
+def test_never_touches_a_sibling_whose_dir_shares_our_prefix(monkeypatch, terminal_dir):
+    # `a` is a component boundary: a sibling at `a2` or `aa` sorts/prefixes
+    # after us but is a different terminal directory. A substring match would
+    # terminate theirs too.
+    for suffix in ("2", "a"):
+        sibling = terminal_dir + suffix
+        theirs = FakeProc("terminal64.exe", f"{sibling}\\terminal64.exe")
+        theirs_agent = FakeProc("metatester64.exe", f"{sibling}\\metatester64.exe")
+        mine = FakeProc("terminal64.exe", f"{terminal_dir}\\terminal64.exe")
+        _install(monkeypatch, [mine, theirs, theirs_agent])
+
+        assert handler.kill_terminal_processes() == 1
+        assert mine.terminated
+        assert not theirs.terminated and not theirs_agent.terminated
+
+
 def test_ignores_unrelated_processes(monkeypatch, terminal_dir):
     noise = FakeProc("chrome.exe", f"{terminal_dir}\\chrome.exe")
     _install(monkeypatch, [noise])

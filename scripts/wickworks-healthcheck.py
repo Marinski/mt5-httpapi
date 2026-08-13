@@ -17,7 +17,9 @@ This healthcheck therefore does two things beyond the image's loopback probe:
    the dockurr gateway services (20.20.20.1:445/139/5900/5700) that only
    exist while sharing the current mt5 netns. When the mt5 container is
    recreated, those services move to the new netns and become unreachable
-   here, which is the earliest detectable sign of orphaning.
+   here, which is the earliest detectable sign of orphaning. The probes run
+   concurrently so the all-unreachable (orphan) path is bounded by one probe
+   timeout, keeping the whole check inside Docker's healthcheck timeout.
 
 2. When orphaning is detected it kills the container's main uvicorn process
    (PID 1 is ``sh``; ``kill 1`` from an exec'd healthcheck is not delivered,
@@ -33,6 +35,7 @@ import os
 import signal
 import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # dockurr gateway services that only exist while sharing the LIVE mt5 netns.
 # The SMB/VNC/dockurr ports are bound by the mt5 container's own processes,
@@ -56,22 +59,32 @@ def _self_healthy():
         return False
 
 
+def _probe(port):
+    """One gateway probe. Returns True when the port answers."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(PROBE_TIMEOUT)
+    try:
+        return sock.connect_ex((GATEWAY_HOST, port)) == 0
+    finally:
+        sock.close()
+
+
 def _shares_live_mt5_netns():
     """True when any dockurr gateway service answers through the shared netns.
 
     These services are owned by the mt5 container's processes. When the mt5
     container is recreated, they live in the new netns, so a refused/unrouted
     connection here means this sidecar has been orphaned.
+
+    Probes run concurrently: a serial sweep would take up to
+    ``len(GATEWAY_PORTS) * PROBE_TIMEOUT`` seconds when every port is down,
+    and Docker kills this healthcheck after its compose ``timeout`` — so the
+    orphan path (where every probe fails) must complete well within that
+    window or the self-heal never fires. Parallel probing bounds the sweep at
+    one ``PROBE_TIMEOUT`` regardless of how many ports there are.
     """
-    for port in GATEWAY_PORTS:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(PROBE_TIMEOUT)
-        try:
-            if sock.connect_ex((GATEWAY_HOST, port)) == 0:
-                return True
-        finally:
-            sock.close()
-    return False
+    with ThreadPoolExecutor(max_workers=len(GATEWAY_PORTS)) as pool:
+        return any(pool.map(_probe, GATEWAY_PORTS))
 
 
 def _kill_main_process():
