@@ -185,22 +185,134 @@ def test_check_health_probes_only_this_vms_terminals(vm_grouped_terminals_config
     assert bulk_out == ["ictrading demo", "fxcm live"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="config_helper does not implement _vm_group_filter/_in_group, so "
-    "check_health.py's import always falls back to permissive no-ops and "
-    "the per-VM filter never runs. Pre-existing bug, production fix is "
-    "outside this test-only chunk's lane.",
-)
 def test_config_helper_exposes_check_health_filter_hooks():
     """check_health.py imports _in_group/_vm_group_filter from config_helper and
-    degrades to no-op stand-ins on ImportError, so a missing implementation is
-    silent at runtime. strict xfail keeps the suite green today and flips to a
-    loud XPASS the moment someone implements them, forcing this marker off.
+    degrades to no-op stand-ins on ImportError. Both names must exist so the
+    host-side start.bat status loop can apply the same per-VM scope as the
+    container healthcheck (see test_config_helper_group_filter_* below for the
+    behavioural contract).
     """
     helper = _load_config_helper_module()
     assert hasattr(helper, "_vm_group_filter")
     assert hasattr(helper, "_in_group")
+
+
+def _write_group_file(tmp_path, content):
+    shared = tmp_path / "shared"
+    config = shared / "config"
+    config.mkdir(parents=True)
+    if content is not None:
+        (config / "vm-group.txt").write_text(content, encoding="utf-8")
+    return shared
+
+
+def test_config_helper_group_filter_missing_group_file_selects_everything(
+    tmp_path, monkeypatch
+):
+    """No group file (single-VM install) means no filter: every terminal is in
+    scope, matching the awk fallback in healthcheck.sh.
+    """
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, None)
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    allowed = helper._vm_group_filter()
+
+    assert allowed is None
+    assert helper._in_group({"broker": "darwinex", "account": "live"}, allowed)
+    assert helper._in_group({"broker": "fxcm", "account": "demo"}, allowed)
+
+
+def test_config_helper_group_filter_empty_group_file_selects_everything(
+    tmp_path, monkeypatch
+):
+    """An existing-but-empty group file must NOT mean "select nothing" — the
+    same trap the awk program documents (an empty group file has no valid
+    `broker account` line, so it degrades to no-filter).
+    """
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, "")
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    allowed = helper._vm_group_filter()
+
+    assert allowed is None
+    assert helper._in_group({"broker": "darwinex", "account": "live"}, allowed)
+
+
+def test_config_helper_group_filter_ignores_comments_and_blank_lines(
+    tmp_path, monkeypatch
+):
+    """Comment lines and blank lines in the group file must not be
+    misinterpreted as broker/account entries.
+    """
+    helper = _load_config_helper_module()
+    shared = _write_group_file(
+        tmp_path, "# comment\n\ndarwinex demo\n# another\n\nfxcm live\n"
+    )
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    allowed = helper._vm_group_filter()
+
+    assert helper._in_group({"broker": "darwinex", "account": "demo"}, allowed)
+    assert helper._in_group({"broker": "fxcm", "account": "live"}, allowed)
+    assert not helper._in_group({"broker": "ictrading", "account": "live"}, allowed)
+
+
+def test_config_helper_group_filter_selects_only_matching_terminals(
+    tmp_path, monkeypatch
+):
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, "darwinex demo\nfxcm live\n")
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    allowed = helper._vm_group_filter()
+
+    assert helper._in_group({"broker": "darwinex", "account": "demo"}, allowed)
+    assert helper._in_group({"broker": "fxcm", "account": "live"}, allowed)
+    assert not helper._in_group({"broker": "darwinex", "account": "live"}, allowed)
+    assert not helper._in_group({"broker": "ictrading", "account": "demo"}, allowed)
+
+
+def test_config_helper_group_filter_group_line_without_instance_matches_default(
+    tmp_path, monkeypatch
+):
+    """A group line with no instance field (`broker account`) maps to the
+    literal key "default" and selects only the terminal that also has no
+    instance set — not a sibling with an explicit instance.
+    """
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, "darwinex live\n")
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    allowed = helper._vm_group_filter()
+
+    assert helper._in_group({"broker": "darwinex", "account": "live"}, allowed)
+    assert not helper._in_group(
+        {"broker": "darwinex", "account": "live", "instance": "a"}, allowed
+    )
+
+
+def test_config_helper_group_filter_group_line_with_instance_matches_only_it(
+    tmp_path, monkeypatch
+):
+    """Two terminals share broker+account and are distinguished only by
+    instance; a `broker account instance` group line must select just the one
+    whose instance matches.
+    """
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, "darwinex live a\n")
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    allowed = helper._vm_group_filter()
+
+    assert helper._in_group(
+        {"broker": "darwinex", "account": "live", "instance": "a"}, allowed
+    )
+    assert not helper._in_group(
+        {"broker": "darwinex", "account": "live", "instance": "b"}, allowed
+    )
+    assert not helper._in_group({"broker": "darwinex", "account": "live"}, allowed)
 
 
 def test_container_healthcheck_probes_only_this_vms_ports():
