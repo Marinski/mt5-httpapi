@@ -134,46 +134,29 @@ def test_unhealthy_when_self_down_no_restart(hc):
         kill.assert_not_called()
 
 
-def test_orphan_kills_main_process(hc):
-    """Gateway unreachable + self up => orphaned => kill uvicorn, exit 1."""
+def test_orphan_detected_without_self_kill(hc):
+    """Gateway unreachable + self up => orphaned => exit 1, and the process is
+    NOT killed. The healthcheck is detection-only: killing the sidecar makes
+    compose restart it into a netns that no longer exists (the binding is
+    immutable NetworkMode=container:<old-owner-id>), so the self-heal claim was
+    not just ineffective but harmful. Recovery is compose-level: recreate the
+    VM together with its sidecar.
+    """
     with patch("urllib.request.urlopen", return_value=_Resp(200)), \
          patch("socket.socket", _fake_sock(False)), \
-         patch("os.listdir", return_value=["1", "7", "self"]), \
-         patch("builtins.open", create=True) as mock_open:
-        # os.listdir drives the /proc scan in _kill_main_process.
-        def fake_open(path, *args, **kwargs):
-            if str(path).startswith("/proc/7/cmdline"):
-                fh = type("FH", (), {"__enter__": lambda s: s, "__exit__": lambda *a: False})()
-                fh.read = lambda: b"/opt/venv/bin/python /opt/venv/bin/uvicorn wickworks.server:app"
-                return fh
-            raise FileNotFoundError(path)
-
-        mock_open.side_effect = fake_open
-        with patch("os.kill") as kill:
-            assert hc.main() == 1
-            # One kill call: the uvicorn main process (pid 7).
-            assert kill.call_count == 1
-            assert kill.call_args[0][0] == 7
+         patch("os.kill") as kill, \
+         patch("os.listdir") as listdir:
+        assert hc.main() == 1
+        kill.assert_not_called()
+        listdir.assert_not_called()
 
 
-def test_orphan_skips_uvicorn_workers(hc):
-    """Only the uvicorn MAIN process is killed, not a --multiprocessing-fork
-    worker, so the worker-set shutdown path is untouched."""
-    with patch("urllib.request.urlopen", return_value=_Resp(200)), \
-         patch("socket.socket", _fake_sock(False)), \
-         patch("os.listdir", return_value=["1", "9"]), \
-         patch("builtins.open", create=True) as mock_open:
-        def fake_open(path, *args, **kwargs):
-            if str(path).startswith("/proc/9/cmdline"):
-                fh = type("FH", (), {"__enter__": lambda s: s, "__exit__": lambda *a: False})()
-                fh.read = lambda: b"python -B -c from multiprocessing.spawn import spawn_main ... --multiprocessing-fork"
-                return fh
-            raise FileNotFoundError(path)
+def test_gateway_ports_override_from_env(monkeypatch):
+    """WICKWORKS_GATEWAY_PORTS replaces the default dockurr port set, so the
+    integration lifecycle test can probe unprivileged ports.
+    """
+    import os
 
-        mock_open.side_effect = fake_open
-        with patch("os.kill") as kill:
-            assert hc.main() == 1
-            # Worker is skipped; fallback SIGTERM to PID 1 happens instead.
-            assert kill.call_count == 1
-            assert kill.call_args[0][0] == 1
-            assert kill.call_args[0][1] == 15
+    monkeypatch.setenv("WICKWORKS_GATEWAY_PORTS", "8011,8012")
+    reloaded = _load()
+    assert reloaded.GATEWAY_PORTS == [8011, 8012]

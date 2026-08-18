@@ -3,36 +3,47 @@
 
 The sidecar shares the mt5 VM container's network namespace via compose's
 ``network_mode: service:mt5``. Docker resolves that namespace once, at
-container start. When the mt5 container is later restarted or recreated (a
-VM reboot, a manual ``docker restart mt5``, a compose recreate), Docker gives
-the mt5 container a FRESH network namespace and leaves this sidecar running
-in the old, now-orphaned one. The sidecar's own health endpoint on loopback
-still answers, so the image's built-in healthcheck stays green while the
-Windows VM can no longer reach wickworks at all — every ``/rates/ta`` call
-then fails with ``connection refused`` and the API surfaces a 502.
+container start. When the mt5 container is later recreated (not merely
+restarted), Docker gives the mt5 container a FRESH network namespace and a
+fresh container ID, and leaves this sidecar running in the old, now-orphaned
+one. The sidecar's own health endpoint on loopback still answers, so the
+image's built-in healthcheck stays green while the Windows VM can no longer
+reach wickworks at all — every ``/rates/ta`` call then fails with
+``connection refused`` and the API surfaces a 502.
 
-This healthcheck therefore does two things beyond the image's loopback probe:
+This healthcheck therefore reports whether the sidecar is still attached to a
+LIVE mt5 netns, beyond what the image's loopback probe knows:
 
-1. It confirms the sidecar is still attached to a LIVE mt5 netns by probing
-   the dockurr gateway services (20.20.20.1:445/139/5900/5700) that only
-   exist while sharing the current mt5 netns. When the mt5 container is
-   recreated, those services move to the new netns and become unreachable
-   here, which is the earliest detectable sign of orphaning. The probes run
-   concurrently so the all-unreachable (orphan) path is bounded by one probe
-   timeout, keeping the whole check inside Docker's healthcheck timeout.
+- It confirms the sidecar is still attached to a LIVE mt5 netns by probing
+  the dockurr gateway services (20.20.20.1:445/139/5900/5700) that only
+  exist while sharing the current mt5 netns. When the mt5 container is
+  recreated, those services move to the new netns and become unreachable
+  here, which is the earliest detectable sign of orphaning. The probes run
+  concurrently so the all-unreachable (orphan) path is bounded by one probe
+  timeout, keeping the whole check inside Docker's healthcheck timeout.
 
-2. When orphaning is detected it kills the container's main uvicorn process
-   (PID 1 is ``sh``; ``kill 1`` from an exec'd healthcheck is not delivered,
-   but killing the uvicorn child makes ``sh`` exit cleanly), so the compose
-   ``restart: unless-stopped`` policy recreates the container and it rejoins
-   the current mt5 netns.
+It is deliberately DETECTION ONLY — it never kills the sidecar process. A
+healthcheck inside a stale namespace cannot repair its own immutable
+``NetworkMode=container:<old-owner-id>`` binding: killing the process makes
+compose restart the sidecar, and Docker refuses that restart ("cannot join
+network namespace of container ... is restarting / No such container"). The
+sidecar would exit permanently instead of staying up as a healthy-loopback /
+orphaned diagnostic. Recovery is a Compose-level lifecycle operation:
 
-Exit codes: 0 = healthy, 1 = unhealthy. When unhealthy due to orphaning the
-process also terminates itself so the restart policy can actually fire.
+- Recreating the owner VM together with its sidecar
+  (``docker compose up -d --force-recreate <vm> <wickworks>``) gives the
+  sidecar a fresh ``NetworkMode=container:<new-owner-id>``. This is the
+  reliable operation (verified: ``depends_on`` does NOT rejoin sidecars on
+  owner recreate, and restarting the owner alone also strands the sidecar's
+  network in this runtime).
+- ``./scripts/recreate-vm.sh <vm>`` wraps that compose command and discovers
+  each VM's sidecars from the generated docker-compose.yml.
+
+Exit codes: 0 = healthy (still sharing the live mt5 netns), 1 = unhealthy
+(service itself down, or orphaned from the mt5 netns).
 """
 
 import os
-import signal
 import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -41,11 +52,13 @@ from concurrent.futures import ThreadPoolExecutor
 # The SMB/VNC/dockurr ports are bound by the mt5 container's own processes,
 # so they are present when the namespaces are shared and gone when orphaned.
 GATEWAY_HOST = os.environ.get("WICKWORKS_GATEWAY_HOST", "20.20.20.1")
-GATEWAY_PORTS = [445, 139, 5900, 5700]
-PROBE_TIMEOUT = 2
+GATEWAY_PORTS = [
+    int(p) for p in os.environ.get("WICKWORKS_GATEWAY_PORTS", "445,139,5900,5700").split(",") if p.strip()
+]
+PROBE_TIMEOUT = int(os.environ.get("WICKWORKS_PROBE_TIMEOUT", "2"))
 
 # Loopback health endpoint of the wickworks service itself.
-SELF_HEALTH_URL = "http://127.0.0.1:8000/health"
+SELF_HEALTH_URL = os.environ.get("WICKWORKS_SELF_HEALTH_URL", "http://127.0.0.1:8000/health")
 
 
 def _self_healthy():
@@ -80,61 +93,32 @@ def _shares_live_mt5_netns():
     ``len(GATEWAY_PORTS) * PROBE_TIMEOUT`` seconds when every port is down,
     and Docker kills this healthcheck after its compose ``timeout`` — so the
     orphan path (where every probe fails) must complete well within that
-    window or the self-heal never fires. Parallel probing bounds the sweep at
-    one ``PROBE_TIMEOUT`` regardless of how many ports there are.
+    window. Parallel probing bounds the sweep at one ``PROBE_TIMEOUT``
+    regardless of how many ports there are.
     """
     with ThreadPoolExecutor(max_workers=len(GATEWAY_PORTS)) as pool:
         return any(pool.map(_probe, GATEWAY_PORTS))
 
 
-def _kill_main_process():
-    """Kill the uvicorn process so PID 1 (sh) exits and the container stops.
-
-    ``kill 1`` from a Docker exec'd healthcheck is not delivered to the
-    container's init in this runtime, so targeting the uvicorn child (the
-    process whose death makes ``sh -c uvicorn ...`` return) is what actually
-    terminates the container. The ``sh -c`` wrapper is deliberately skipped:
-    its cmdline also contains ``uvicorn``, and signalling it is the one thing
-    that does not work.
-    """
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit() or entry == "1":
-            continue
-        try:
-            with open(f"/proc/{entry}/cmdline", "rb") as fh:
-                cmdline = fh.read().decode("utf-8", errors="replace")
-        except OSError:
-            continue
-        if "uvicorn" in cmdline and "--multiprocessing-fork" not in cmdline:
-            try:
-                os.kill(int(entry), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            return
-    # Fallback: no uvicorn found — kill whatever is PID 1 via the signal that
-    # does get delivered from an exec'd process.
-    try:
-        os.kill(1, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
 def main():
     if not _self_healthy():
-        # The service itself is down — unhealthy without trying to restart;
-        # a dead uvicorn already causes the container to stop on its own.
+        # The service itself is down — unhealthy. No restart attempt: a dead
+        # uvicorn already causes the container to stop on its own.
         return 1
     if _shares_live_mt5_netns():
         # Still inside the live mt5 netns — normal healthy state.
         return 0
-    # Orphaned: the mt5 container was recreated under a new netns. Kill the
-    # main process so the restart policy recreates us into the current netns.
+    # Orphaned: the mt5 container was recreated under a new netns. Report
+    # unhealthy so operators can see it. Do NOT kill the process — a healthcheck
+    # cannot repair its own immutable NetworkMode binding, and killing the
+    # sidecar makes compose restart it into a netns that no longer exists.
+    # Recovery: recreate the VM together with its sidecar, or restart the VM
+    # (owner ID unchanged keeps this sidecar attached).
     print(
         "wickworks orphaned from the live mt5 netns; "
-        "killing main process so the restart policy rejoins it",
+        "recreate the VM together with this sidecar to rejoin",
         file=sys.stderr,
     )
-    _kill_main_process()
     return 1
 
 

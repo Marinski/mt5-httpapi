@@ -78,14 +78,23 @@ services:
     # recreated: Docker leaves wickworks running in the old, now-orphaned
     # network namespace, where its own loopback healthcheck still passes while
     # the VM can no longer reach it (every TA call then 502s). This healthcheck
-    # detects the orphan and kills wickworks so `restart: unless-stopped`
-    # recreates it into the current mt5 netns. See scripts/wickworks-healthcheck.py.
+    # DETECTS the orphan and reports unhealthy. It deliberately does NOT kill
+    # the process: a healthcheck cannot repair its own immutable
+    # NetworkMode=container:<old-owner-id> binding, and killing the sidecar
+    # makes compose restart it into a netns that no longer exists.
+    # Recovery is a Compose-level operation: recreate the VM together with its
+    # sidecar so it gets a fresh NetworkMode binding:
+    #       docker compose up -d --force-recreate {{ vm.service }} {{ vm.wickworks_service }}
+    #     (or ./scripts/recreate-vm.sh {{ vm.service }})
+    # Restarting the VM alone is NOT a reliable recovery: the owner ID survives
+    # a restart, but the sidecar's netns does not (verified in the lifecycle
+    # integration test). See scripts/wickworks-healthcheck.py.
     healthcheck:
       test: ["CMD", "python", "/wickworks-healthcheck.py"]
       interval: 15s
       # Must exceed the script's worst case (self-health probe + concurrent
-      # gateway sweep, each up to 2s), or Docker aborts the check before the
-      # orphan path can kill the process and the self-heal never fires.
+      # gateway sweep, each up to 2s), or Docker aborts the orphan-detection
+      # check before it can report.
       timeout: 12s
       start_period: 30s
       retries: 3
