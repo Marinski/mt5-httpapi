@@ -222,6 +222,60 @@ Knock-on effects you'll observe:
 
 If you see persistent 503/504 from a single terminal, check `data/shared/logs/api-<broker>-<account>.log` for `mt5.* TIMEOUT` lines — that's the SDK call that wedged.
 
+## Auto-recovery
+
+The Windows VM(s) run inside  containers with a Docker healthcheck
+(`scripts/healthcheck.sh`) that probes every terminal port this VM owns. A crash
+inside the guest — an unexpected shutdown (Event 6008), a wedged terminal, an
+OOM — leaves the **container** up while the **API** is dead, so
+`restart: unless-stopped` never fires and nothing recovers it on its own.
+
+### VM crash watchdog
+
+`vm-watchdog` is a Compose-managed sidecar for exactly that case. It is part of
+the project (`docker compose up -d` brings it up with everything else) — no
+host cron, no systemd unit, no machine-specific checkout path. It polls Docker
+health through the mounted unix socket and uses Docker's own
+`State.Health.FailingStreak` as the source of truth.
+
+Behavior:
+
+- Scopes itself to this Compose project (`com.docker.compose.project`,
+  discovered from its own container labels) and to the  VM
+  image, so it only ever restarts the VM containers — never nginx, wickworks,
+  the log rotator, or other sidecars.
+- Restarts a container **only** after its Docker health has stayed 
+  for  consecutive healthcheck failures (default
+  `10`, i.e. ~5 minutes at the default 30s interval). A container that is
+  healthy or still starting is never touched, so running backtests on a working
+  VM are never interrupted — the healthcheck stays green the whole time a
+  terminal is serving.
+- Keeps a tiny state record per container on a named volume
+  (`/state/<container-id>.json`): last restart, attempt count, and when the VM
+  was last observed healthy.
+- Enforces exponential backoff between recovery attempts
+  (`WATCHDOG_BACKOFF_ATTEMPTS`, default `300,900,3600` — 5m → 15m → 1h), so a
+  VM that crashes again immediately after recovery is not restarted into a
+  loop.
+- Stops after  consecutive failed recoveries (default
+  `3`) and logs loudly, instead of threshing forever.
+- Resets the attempt budget only after the VM has stayed healthy for
+  `WATCHDOG_RESET_SECONDS` (default `1800`), so a VM that recovered then crashed
+  later gets a fresh budget.
+- `WATCHDOG_DRY_RUN=1` (or `--dry-run`) prints what it would do without
+  touching any container.
+
+Environment overrides: , ,
+, , ,
+, , ,
+`WATCHDOG_DOCKER_SOCKET`, `WATCHDOG_DRY_RUN`. It uses  (not
+recreate), so the VM's container ID — and therefore a wickworks sidecar's netns
+attachment — is preserved.
+
+This complements the in-VM `MT5AutoReboot` scheduled task, which reboots on a
+fixed timer and can interrupt long-running backtests; operators who disable that
+task still get crash recovery from the watchdog.
+
 ## VM recreate and the wickworks sidecar
 
 The wickworks TA sidecar shares a VM's network namespace via compose

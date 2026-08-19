@@ -36,22 +36,6 @@ services:
   # ONLY from the mt5 container (and from the Windows VM via the dockurr
   # gateway 20.20.20.1:8000). No ports published; nothing else on the
   # docker network can talk to it.
-  #
-  # netns-shared sidecars are NOT re-joined when the owning VM container is
-  # recreated: Docker leaves wickworks running in the old, now-orphaned
-  # network namespace, where its own loopback healthcheck still passes while
-  # the VM can no longer reach it (every TA call then 502s). This healthcheck
-  # DETECTS the orphan and reports unhealthy. It deliberately does NOT kill
-  # the process: a healthcheck cannot repair its own immutable
-  # NetworkMode=container:<old-owner-id> binding, and killing the sidecar
-  # makes compose restart it into a netns that no longer exists.
-  # Recovery is a Compose-level operation: recreate the VM together with its
-  # sidecar so it gets a fresh NetworkMode binding:
-  #       docker compose up -d --force-recreate mt5 wickworks
-  #     (or ./scripts/recreate-vm.sh mt5)
-  # Restarting the VM alone is NOT a reliable recovery: the owner ID survives
-  # a restart, but the sidecar's netns does not (verified in the lifecycle
-  # integration test). See scripts/wickworks-healthcheck.py.
   wickworks:
     image: psyb0t/wickworks:v0.3.1
     restart: unless-stopped
@@ -60,17 +44,6 @@ services:
       LOG_LEVEL: INFO
       MAX_BARS: "5000"
       MIN_BARS: "50"
-    volumes:
-      - ./scripts/wickworks-healthcheck.py:/wickworks-healthcheck.py:ro
-    healthcheck:
-      test: ["CMD", "python", "/wickworks-healthcheck.py"]
-      interval: 15s
-      # Must exceed the script's worst case (self-health probe + concurrent
-      # gateway sweep, each up to 2s), or Docker aborts the orphan-detection
-      # check before it can report.
-      timeout: 12s
-      start_period: 30s
-      retries: 3
     depends_on:
       - mt5
 
@@ -90,6 +63,30 @@ services:
       - ./data/shared/logs:/logs
       - ./scripts/rotate-logs.sh:/rotate.sh:ro
     command: ["sh", "/rotate.sh"]
+
+  # VM crash watchdog. dockurr/windows keeps the container up while the
+  # Windows guest may have crashed internally, so restart: unless-stopped
+  # never fires and every terminal API in that VM stays dead. This sidecar
+  # polls Docker health through the socket and restarts a VM only after its
+  # health has stayed unhealthy for a sustained FailingStreak, with
+  # exponential backoff and bounded retries; state lives on a named volume.
+  # Runs inside the compose project (docker compose up -d), no host cron.
+  # See scripts/vm-watchdog.py.
+  vm-watchdog:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "-u", "/vm-watchdog.py"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/vm-watchdog.py:/vm-watchdog.py:ro
+      - vm-watchdog-state:/state
+    environment:
+      WATCHDOG_STATE_DIR: /state
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # nginx is the single entry point for all terminal APIs. Routes
   # /<broker>/<account>/... to mt5:<terminal_port> (per-terminal Python
@@ -198,3 +195,8 @@ services:
   #     - NET_RAW
   #   depends_on:
   #     - nginx
+
+volumes:
+  # Persistent per-container watchdog state (last restart, attempts,
+  # healthy-since) so backoff survives the watchdog's own restarts.
+  vm-watchdog-state:
