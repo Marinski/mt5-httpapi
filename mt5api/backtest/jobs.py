@@ -19,9 +19,14 @@ import time
 from datetime import datetime, timezone
 
 from mt5api.config import (
+    ACCOUNT,
     BACKTEST_JOB_DIR,
     BACKTEST_JOB_RETENTION_SECONDS,
     BACKTEST_SWEEP_LOOKBACK_SECONDS,
+    BROKER,
+    INSTANCE,
+    load_yaml_config,
+    normalize_instance,
 )
 from mt5api.logger import log
 
@@ -157,8 +162,47 @@ def public_payload(job: dict) -> dict:
     return payload
 
 
+def _configured_terminals(broker: str, account: str) -> int:
+    """How many terminals in config.yaml target this broker/account.
+
+    Reads the real terminal list so the ownership decision reflects how the
+    install is actually configured, not just this API process's own identity.
+    """
+    terms = load_yaml_config().get("terminals") or []
+    return sum(
+        1
+        for t in terms
+        if t.get("broker") == broker and t.get("account", "") == account
+    )
+
+
+def owns_job(job: dict) -> bool:
+    """Is this job ours, rather than a sibling terminal's?
+
+    Every backtest API on a host shares one job directory, so the sweep sees
+    every terminal's jobs. A job that names a terminal is ours only if that
+    terminal is this one. A job that does not name a terminal is ambiguous and
+    is claimed ONLY when this broker/account has a single configured terminal —
+    that is the shape a single-terminal install writes, and what every job
+    written before the instance field existed looks like. In a multi-clone
+    install, an un-instanced job belongs to no clone in particular, and claiming
+    it here would reproduce the cross-terminal failure this sweep exists to
+    prevent.
+    """
+    broker = job.get("broker")
+    if broker is not None and broker != BROKER:
+        return False
+    account = job.get("account")
+    if account is not None and account != ACCOUNT:
+        return False
+    instance = job.get("instance")
+    if instance is not None:
+        return normalize_instance(instance) == normalize_instance(INSTANCE)
+    return _configured_terminals(BROKER, ACCOUNT) <= 1
+
+
 def sweep_orphans(lookback_seconds: int | None = None) -> int:
-    """Mark any queued/running jobs on disk as failed.
+    """Mark this terminal's queued/running jobs on disk as failed.
 
     Called at API startup. Only state files touched within the last
     ``lookback_seconds`` are considered: a live job rewrites its file on every
@@ -167,6 +211,11 @@ def sweep_orphans(lookback_seconds: int | None = None) -> int:
     parsed tens of thousands of files on every boot — and because every backtest
     API on a VM shares the same job directory, that full scan repeated once per
     process. Returns the number of jobs swept.
+
+    Only jobs belonging to THIS terminal are swept. The directory is shared, so
+    sweeping everything meant restarting one terminal's API failed every other
+    terminal's in-flight backtest with "API restarted before completion" —
+    silently, and while those runs went on to finish perfectly well.
     """
     if lookback_seconds is None:
         lookback_seconds = SWEEP_LOOKBACK_SECONDS
@@ -197,6 +246,8 @@ def sweep_orphans(lookback_seconds: int | None = None) -> int:
             log.warning("backtest sweep: cannot read %s: %s", name, exc)
             continue
         if job.get("status") not in ACTIVE_STATUSES:
+            continue
+        if not owns_job(job):
             continue
         job["status"] = "failed"
         job["error"] = "API restarted before completion"

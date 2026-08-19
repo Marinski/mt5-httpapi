@@ -222,6 +222,36 @@ Knock-on effects you'll observe:
 
 If you see persistent 503/504 from a single terminal, check `data/shared/logs/api-<broker>-<account>.log` for `mt5.* TIMEOUT` lines — that's the SDK call that wedged.
 
+## VM recreate and the wickworks sidecar
+
+The wickworks TA sidecar shares a VM's network namespace via compose
+`network_mode: service:<vm>`. Docker resolves that binding once, at container
+start, into an immutable `NetworkMode=container:<owner-id>`.
+
+**Recreating the VM alone orphans the sidecar.** `docker compose up -d
+--force-recreate <vm>` gives the VM a new ID and a fresh netns, but leaves the
+sidecar pointed at the deleted owner. Its healthcheck detects the orphan and
+reports unhealthy, but cannot repair the binding itself. Restarting the VM is
+not a reliable alternative either: the owner ID survives a restart, but the
+sidecar's netns does not.
+
+The correct recreate operation names the VM together with its sidecar:
+
+```bash
+docker compose up -d --force-recreate mt5 wickworks
+```
+
+or, with the sidecar list discovered from the generated compose file:
+
+```bash
+./scripts/recreate-vm.sh mt5            # recreate mt5 + its sidecars
+./scripts/recreate-vm.sh mt5 mt5-b      # both VMs + their sidecars
+./scripts/recreate-vm.sh --dry-run mt5  # show what would be recreated
+```
+
+This is covered by the real Compose lifecycle regression in
+`tests/integration/test_wickworks_lifecycle.py`.
+
 ## Logs
 
 Inside the VM's shared folder (`data/shared/logs/`):

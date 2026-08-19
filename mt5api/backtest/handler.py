@@ -32,6 +32,7 @@ from mt5api.backtest import cache_parser, ini_builder, jobs, optimization_parser
 from mt5api.config import (
     ACCOUNT,
     BROKER,
+    INSTANCE,
     LOG_DIR,
     TERMINAL_DIR,
     TERMINAL_PATH,
@@ -254,21 +255,38 @@ def _tail(text, limit=DIAGNOSTIC_TAIL_CHARS):
 
 
 def _tail_terminal_log(lines=20):
+    """Tail of the terminal's most recently written run log.
+
+    Picked by modification time, not by name. The logs are named `<date>.log`,
+    but the directory also holds `metaeditor.log`, which sorts after every one
+    of them ("m" > "2") and never changes — so an alphabetical pick attached a
+    months-old compile tail to every failure message and hid the actual reason
+    the run died.
+    """
     log_dir = os.path.join(TERMINAL_DIR, "logs")
     if not os.path.isdir(log_dir):
         return ""
 
     try:
-        candidates = sorted(
-            file_name for file_name in os.listdir(log_dir) if file_name.endswith(".log")
-        )
+        candidates = [
+            entry
+            for entry in os.scandir(log_dir)
+            if entry.is_file()
+            and entry.name.endswith(".log")
+            and entry.name.lower() != "metaeditor.log"
+        ]
     except OSError:
         return ""
 
     if not candidates:
         return ""
 
-    latest_path = os.path.join(log_dir, candidates[-1])
+    try:
+        newest = max(candidates, key=lambda entry: entry.stat().st_mtime)
+    except OSError:
+        return ""
+
+    latest_path = newest.path
     try:
         with open(latest_path, "r", encoding="utf-16-le", errors="replace") as handle:
             content = handle.read()
@@ -281,22 +299,77 @@ def _tail_terminal_log(lines=20):
     return "\n".join(tail_lines[-lines:])
 
 
-def _terminal_process_alive():
-    """True while a terminal64.exe belonging to THIS terminal directory runs.
+#: The tester runs as terminal64.exe plus one metatester64.exe per agent. The
+#: agents are what hold the localhost ports a later run needs, so a cleanup that
+#: only accounts for terminal64.exe leaves the terminal unusable.
+TESTER_PROCESS_NAMES = frozenset({"terminal64.exe", "metatester64.exe"})
 
-    Matched by directory rather than by the PID we spawned on purpose: the
-    point of this check is to see the process MT5 started to *replace* the one
-    we launched, which we never get a handle on.
+
+def _in_terminal_dir(exe):
+    """True when ``exe`` lives inside THIS terminal directory.
+
+    Compared by normalized path components, not by substring: a sibling at
+    ``...\\a2\\terminal64.exe`` must never match a terminal at ``...\\a``.
+    """
+    if not exe:
+        return False
+    base = TERMINAL_DIR.replace("\\", "/").lower().rstrip("/")
+    path = exe.replace("\\", "/").lower().rstrip("/")
+    return path == base or path.startswith(base + "/")
+
+
+def _terminal_processes(names=TESTER_PROCESS_NAMES):
+    """Processes of the given names running from THIS terminal directory.
+
+    Matched by directory rather than by the PID we spawned on purpose: MT5 may
+    replace the process we launched (see _await_self_relaunch), and the agents
+    are never ours to begin with. Sibling terminals live in sibling directories,
+    so this never reaches across to another instance's processes.
     """
     for proc in psutil.process_iter(["name", "exe"]):
         try:
-            if (proc.info.get("name") or "").lower() != "terminal64.exe":
+            if (proc.info.get("name") or "").lower() not in names:
                 continue
             exe = proc.info.get("exe") or ""
-            if exe and TERMINAL_DIR.lower() in exe.lower():
-                return True
+            if _in_terminal_dir(exe):
+                yield proc
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+
+
+def kill_terminal_processes(grace_seconds=10):
+    """Stop this terminal's tester processes. Returns how many were signalled.
+
+    Terminate first, then kill whatever is still standing, so MT5 gets the
+    chance to release its files cleanly before being shot.
+    """
+    victims = list(_terminal_processes())
+    if not victims:
+        return 0
+    for proc in victims:
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    _, alive = psutil.wait_procs(victims, timeout=grace_seconds)
+    for proc in alive:
+        try:
+            proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if alive:
+        psutil.wait_procs(alive, timeout=grace_seconds)
+    return len(victims)
+
+
+def _terminal_process_alive():
+    """True while a terminal64.exe belonging to THIS terminal directory runs.
+
+    Only terminal64.exe: this answers "is a run still going", and the agents
+    come and go within one.
+    """
+    for _ in _terminal_processes({"terminal64.exe"}):
+        return True
     return False
 
 
@@ -461,6 +534,9 @@ def run_backtest():
         "status": "queued",
         "broker": BROKER,
         "account": ACCOUNT,
+        # Sibling terminals share broker+account and differ only by instance, so
+        # without this the startup sweep cannot tell whose job it is looking at.
+        "instance": INSTANCE,
         "submittedAt": jobs.now_iso(),
         "startedAt": None,
         "finishedAt": None,
@@ -560,10 +636,24 @@ def _execute_job(job_id):
                     )
                 except subprocess.TimeoutExpired:
                     duration = round(time.time() - start_time, 3)
+                    # subprocess.run kills the process it started, but not the
+                    # metatester64.exe agents it spawned, and not a terminal MT5
+                    # relaunched in place of ours. Those keep the terminal's
+                    # localhost agent ports bound, so every later run on this
+                    # terminal dies with "bind error [10048]" until the host is
+                    # rebooted. Clear the whole directory's tester processes.
+                    killed = kill_terminal_processes()
+                    error = f"Backtest timed out after {job['timeoutSeconds']}s"
+                    if killed:
+                        error = f"{error} (killed {killed} leftover tester process(es))"
+                    log.warning(
+                        "backtest timed out broker=%s account=%s job=%s killed=%d",
+                        BROKER, ACCOUNT, job_id, killed,
+                    )
                     jobs.update_job(
                         job_id,
                         status="failed",
-                        error=f"Backtest timed out after {job['timeoutSeconds']}s",
+                        error=error,
                         durationSeconds=duration,
                         finishedAt=jobs.now_iso(),
                     )

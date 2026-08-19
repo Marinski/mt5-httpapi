@@ -13,6 +13,9 @@ from mt5api.backtest import jobs
 @pytest.fixture
 def tmp_jobs_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(jobs, "BACKTEST_JOB_DIR", str(tmp_path))
+    # Default to a single-terminal install so legacy (un-instanced) jobs are
+    # claimed. Ownership-scoping tests override this via _clone_count.
+    monkeypatch.setattr(jobs, "_configured_terminals", lambda b, a: 1)
     # Reset in-memory cache between tests.
     jobs.BACKTEST_JOBS.clear()
     return tmp_path
@@ -235,3 +238,75 @@ def test_store_and_load_job_roundtrip(tmp_jobs_dir):
 
 def test_load_job_missing_returns_none(tmp_jobs_dir):
     assert jobs.load_job("nope") is None
+
+
+# ── Ownership scoping ────────────────────────────────────────────────────────
+#
+# Every backtest API on a host shares one job directory, and sibling terminals
+# share broker+account (they differ only by instance). Before scoping, any
+# terminal's restart failed every other terminal's in-flight run.
+
+
+def _identity(monkeypatch, broker="darwinex", account="live", instance="a"):
+    monkeypatch.setattr(jobs, "BROKER", broker)
+    monkeypatch.setattr(jobs, "ACCOUNT", account)
+    monkeypatch.setattr(jobs, "INSTANCE", instance)
+
+
+def _clone_count(monkeypatch, count):
+    monkeypatch.setattr(jobs, "_configured_terminals", lambda b, a: count)
+
+
+def test_sweep_leaves_a_sibling_terminals_job_alone(tmp_jobs_dir, monkeypatch):
+    _identity(monkeypatch, instance="a")
+    _clone_count(monkeypatch, 3)
+    _write(tmp_jobs_dir, "mine", "running", broker="darwinex", account="live", instance="a")
+    _write(tmp_jobs_dir, "theirs", "running", broker="darwinex", account="live", instance="b")
+
+    assert jobs.sweep_orphans() == 1
+
+    mine = json.loads((tmp_jobs_dir / "mine.json").read_text())
+    theirs = json.loads((tmp_jobs_dir / "theirs.json").read_text())
+    assert mine["status"] == "failed"
+    assert theirs["status"] == "running", "a sibling terminal's live run must survive our restart"
+
+
+def test_sweep_does_not_claim_a_legacy_job_on_a_multi_clone_install(tmp_jobs_dir, monkeypatch):
+    # The real pre-PR shape: broker+account present, instance absent. On a
+    # multi-clone install every clone shares broker+account, so the job cannot
+    # be attributed — claiming it would fail a sibling's live run. It must be
+    # left alone (retention retires it eventually).
+    _identity(monkeypatch, instance="a")
+    _clone_count(monkeypatch, 3)
+    _write(tmp_jobs_dir, "legacy", "running", broker="darwinex", account="live")
+
+    assert jobs.sweep_orphans() == 0
+    assert json.loads((tmp_jobs_dir / "legacy.json").read_text())["status"] == "running"
+
+
+def test_sweep_still_claims_a_legacy_job_on_a_single_terminal_install(tmp_jobs_dir, monkeypatch):
+    # What a single-terminal install writes: broker+account, no instance, and no
+    # sibling clone to be confused with. Behaviour must not change there.
+    _identity(monkeypatch)
+    _clone_count(monkeypatch, 1)
+    _write(tmp_jobs_dir, "legacy", "running", broker="darwinex", account="live")
+
+    assert jobs.sweep_orphans() == 1
+    assert json.loads((tmp_jobs_dir / "legacy.json").read_text())["status"] == "failed"
+
+
+def test_sweep_skips_another_broker_or_account(tmp_jobs_dir, monkeypatch):
+    _identity(monkeypatch, broker="darwinex", account="live", instance="a")
+    _write(tmp_jobs_dir, "other-broker", "running", broker="icmarkets", account="live", instance="a")
+    _write(tmp_jobs_dir, "other-account", "running", broker="darwinex", account="demo", instance="a")
+    assert jobs.sweep_orphans() == 0
+
+
+def test_owns_job_normalizes_the_instance(monkeypatch):
+    # "" and None mean the default instance; they must not read as a stranger.
+    _identity(monkeypatch, instance="default")
+    _clone_count(monkeypatch, 1)
+    assert jobs.owns_job({"broker": "darwinex", "account": "live", "instance": ""})
+    assert jobs.owns_job({"broker": "darwinex", "account": "live", "instance": None})
+    assert jobs.owns_job({"broker": "darwinex", "account": "live", "instance": "default"})
+    assert not jobs.owns_job({"broker": "darwinex", "account": "live", "instance": "a"})
