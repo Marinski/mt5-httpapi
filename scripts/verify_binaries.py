@@ -48,6 +48,7 @@ EXECUTABLE_MAGICS = (
     (b"\xcf\xfa\xed\xfe", "macho"),
     (b"\xca\xfe\xba\xbe", "macho-fat"),
 )
+EX5_MAGIC = b"EX5"  # MetaTrader 5 compiled MQL programs
 
 # Signature states a manifest entry may declare.
 SIG_VALID = "valid"          # Authenticode digest matches the file's bytes
@@ -100,11 +101,17 @@ def tracked_files() -> list[str]:
 
 def classify(path: str) -> str | None:
     """Return the executable kind for `path`, or None if it is not one."""
+    if path.lower().endswith(".ex5"):
+        return "mql5-ex5"
+
     try:
         with open(path, "rb") as handle:
             head = handle.read(4)
     except OSError:
         return None
+
+    if head.startswith(EX5_MAGIC):
+        return "mql5-ex5"
 
     for magic, kind in EXECUTABLE_MAGICS:
         if head.startswith(magic):

@@ -8,7 +8,14 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.12.2] — 2026-08-20
+
 ### Fixed
+
+- **`make verify-binaries` now catches MetaTrader `.ex5` artifacts.** The
+  gate recognizes the EX5 header and any `.ex5` filename, so a compiled MQL5
+  program cannot bypass the manifest merely because it is not a PE, ELF, or
+  Mach-O file.
 
 - **The host-side per-VM health filter never ran.** `check_health.py` imports
   `_vm_group_filter`/`_in_group` from `scripts/config_helper.py`, but neither
@@ -21,6 +28,15 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
   empty file as "no filter" so single-VM installs are unchanged, and match
   broker/account/instance the same way the `vm_group` writer emits them. The
   strict `xfail` that recorded the gap is replaced with behavioral tests.
+
+- **Backtest cleanup now stays inside its terminal instance.** Startup no
+  longer fails sibling jobs that share the host job directory, stale tester
+  processes no longer hold agent ports after a timeout, and failure reports
+  use the latest terminal log rather than an old MetaEditor log.
+
+- **Wickworks follows the VM lifecycle.** The sidecar now detects an orphaned
+  network namespace and Compose recreates it with the VM instead of leaving
+  technical-analysis requests pointed at a dead gateway.
 
 ## [v4.12.1] — 2026-08-08
 

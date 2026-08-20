@@ -74,6 +74,16 @@ def test_classify_detects_pe_and_ignores_text(tmp_path):
     assert verify_binaries.classify(str(text)) is None
 
 
+def test_classify_detects_mql5_ex5_by_header_or_extension(tmp_path):
+    compiled = tmp_path / "compiled-artifact"
+    compiled.write_bytes(b"EX5\x02" + b"\x00" * 64)
+    mislabeled = tmp_path / "unparseable.ex5"
+    mislabeled.write_text("not a valid EX5", encoding="utf-8")
+
+    assert verify_binaries.classify(str(compiled)) == "mql5-ex5"
+    assert verify_binaries.classify(str(mislabeled)) == "mql5-ex5"
+
+
 @pytest.mark.parametrize("magic,kind", [
     (b"\x7fELF\x00\x00", "elf"),
     (b"\xfe\xed\xfa\xcf\x00", "macho"),
