@@ -33,10 +33,31 @@
 #   ./scripts/recreate-vm.sh mt5          # recreate mt5 + its sidecars
 #   ./scripts/recreate-vm.sh mt5 mt5-b    # recreate both VMs + their sidecars
 #
+# STOPPING BEFORE RECREATING
+# --------------------------
+# `docker compose up --force-recreate` stops each container using compose's OWN
+# --timeout, which defaults to 10 SECONDS, not the service's stop_grace_period.
+# A dockurr/windows VM needs far longer than that to shut down (ours declare
+# `stop_grace_period: 2m`), so compose gave up waiting and went straight to
+# removing a container that was still running:
+#
+#   Error response from daemon: cannot remove container "...":
+#   container is running: stop the container before removing or force remove
+#
+# The watchdog then recorded a failed recreate and backed off, leaving the VM
+# unhealthy and its sidecars stranded — the exact outcome this script exists to
+# prevent. So the targets are stopped explicitly first, with a timeout that
+# matches the grace period, and the same value is passed to `up` so its implicit
+# stop can never fall back to 10s.
+#
 # ENV
 # ---
-#   COMPOSE_FILE   compose file to read services from
-#                  (default: ./docker-compose.yml in the repo root)
+#   COMPOSE_FILE           compose file to read services from
+#                          (default: ./docker-compose.yml in the repo root)
+#   RECREATE_STOP_TIMEOUT  seconds to allow each container to stop
+#                          (default: 120, matching stop_grace_period: 2m).
+#                          Keep this below WATCHDOG_RECREATE_TIMEOUT (300s) or
+#                          the watchdog kills the script mid-recreate.
 #
 # The script never touches services it was not asked to recreate, and never
 # uses --no-deps in a way that skips the named sidecars.
@@ -47,6 +68,7 @@ trap 'echo "[ERROR] ${BASH_SOURCE[0]}:${LINENO} - command failed (exit $?)" >&2'
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${DIR}/docker-compose.yml}"
+STOP_TIMEOUT="${RECREATE_STOP_TIMEOUT:-120}"
 DRY_RUN=0
 
 usage() {
@@ -117,12 +139,17 @@ main() {
     done
 
     if [ "$DRY_RUN" = "1" ]; then
-        log "DRY-RUN: would run 'docker compose up -d --force-recreate --no-deps ${targets[*]}'"
+        log "DRY-RUN: would run 'docker compose stop -t ${STOP_TIMEOUT} ${targets[*]}'"
+        log "DRY-RUN: would run 'docker compose up -d --force-recreate --no-deps -t ${STOP_TIMEOUT} ${targets[*]}'"
         return 0
     fi
 
+    # Stop first, with the real grace period. See STOPPING BEFORE RECREATING.
+    log "stopping (timeout ${STOP_TIMEOUT}s): ${targets[*]}"
+    docker compose -f "$COMPOSE_FILE" stop -t "$STOP_TIMEOUT" "${targets[@]}"
+
     log "recreating: ${targets[*]}"
-    docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps "${targets[@]}"
+    docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps -t "$STOP_TIMEOUT" "${targets[@]}"
     log "recreate done"
 }
 
