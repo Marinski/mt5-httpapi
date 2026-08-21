@@ -2,6 +2,13 @@
 set -eo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The vm-watchdog container recovers a crashed VM by running
+# scripts/recreate-vm.sh, which shells out to `docker compose`. Compose
+# resolves this file's relative bind mounts client-side, so the watchdog needs
+# the project at the SAME absolute path the host uses. Exported (not just set)
+# because compose interpolates it into docker-compose.yml at up time.
+export MT5_PROJECT_DIR="${MT5_PROJECT_DIR:-${DIR}}"
 DEBLOAT=0
 for arg in "$@"; do
     if [ "$arg" = "--debloat" ]; then

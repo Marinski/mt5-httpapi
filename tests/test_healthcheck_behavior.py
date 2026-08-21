@@ -189,3 +189,78 @@ def test_group_file_ignores_comments_and_blank_lines(awk_prog, tmp_path):
     ports = _run_awk(awk_prog, str(groupfile), config)
 
     assert ports == ["6002", "6005"]
+
+
+# ── Verdict: is the VM dead, or just busy? ───────────────────────────────────
+#
+# These run the whole script with a stub `curl` on PATH, so they exercise the
+# real verdict logic rather than the awk filter alone.
+
+def _run_healthcheck(tmp_path, config, curl_body):
+    """Run healthcheck.sh with a fake curl that emits `curl_body` on stdout.
+
+    The stub mimics curl closely enough for the script: it writes what a real
+    `-w '%{http_code} %{time_connect}'` would print, and exits non-zero when
+    the status is 000, exactly as curl does on a failed request.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s' '{curl_body}'\n"
+        f"case '{curl_body}' in 000*) exit 7 ;; esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HEALTHCHECK_CONFIG": str(config),
+        "HEALTHCHECK_VM_GROUP": str(tmp_path / "no-such-group.txt"),
+        "HEALTHCHECK_LEASES": str(tmp_path / "no-such-leases"),
+    }
+    return subprocess.run(
+        ["sh", str(HEALTHCHECK_PATH)],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+
+
+ONE_TERMINAL = [{"broker": "darwinex", "account": "live", "port": "6001"}]
+
+
+def test_a_port_that_answers_is_healthy(tmp_path):
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    result = _run_healthcheck(tmp_path, config, "200 0.000181")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_port_with_nothing_listening_is_unhealthy(tmp_path):
+    """Connection refused leaves time_connect at zero. This is the outage the
+    healthcheck exists to catch, and it must still fail."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    result = _run_healthcheck(tmp_path, config, "000 0.000000")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "DOWN" in result.stdout
+
+
+def test_a_listening_but_slow_port_is_healthy(tmp_path):
+    """The regression this pair exists for.
+
+    A completed TCP handshake with no HTTP response in the probe window means
+    the process is alive and the guest is merely CPU-saturated - a compile or a
+    Strategy Tester run will do it. Reporting DOWN here makes a supervisor
+    restart a VM that was working, turning a slow batch into an outage.
+    """
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    result = _run_healthcheck(tmp_path, config, "000 0.001204")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "slow but listening" in result.stdout
+
+
+def test_a_missing_curl_fails_closed(tmp_path):
+    """An empty probe result must read as DOWN, not as 'not zero, so busy'."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    result = _run_healthcheck(tmp_path, config, "")
+    assert result.returncode == 1, result.stdout + result.stderr

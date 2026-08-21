@@ -18,11 +18,13 @@
 
 set -u
 
-readonly CONFIG=/shared/config/config.yaml
+# Overridable only so the behavioral tests can point the script at fixtures;
+# the container never sets these and gets the paths it always had.
+readonly CONFIG=${HEALTHCHECK_CONFIG:-/shared/config/config.yaml}
 # Per-VM terminal list, bind-mounted by docker-compose from
 # data/vm-group-<vm>.txt. Absent on single-VM installs, which means no filter.
-readonly VM_GROUP=/shared/config/vm-group.txt
-readonly DNSMASQ_LEASES=/var/lib/misc/dnsmasq.leases
+readonly VM_GROUP=${HEALTHCHECK_VM_GROUP:-/shared/config/vm-group.txt}
+readonly DNSMASQ_LEASES=${HEALTHCHECK_LEASES:-/var/lib/misc/dnsmasq.leases}
 readonly PROBE_PATH=/ping
 readonly PROBE_TIMEOUT_SECONDS=3
 # Tried after the leased VM IP so a probe still works before the lease lands.
@@ -96,6 +98,7 @@ HOSTS=""
 HOSTS="$HOSTS $FALLBACK_HOSTS"
 
 dead=""
+busy=""
 for p in $PORTS; do
     found=0
     for host in $HOSTS; do
@@ -105,14 +108,39 @@ for p in $PORTS; do
         # dead port as UP. This check could therefore never fail: a total
         # outage sat behind a green healthcheck for hours because Docker was
         # told everything was fine.
-        code=$(curl -s --max-time "$PROBE_TIMEOUT_SECONDS" -o /dev/null \
-            -w '%{http_code}' "http://$host:$p$PROBE_PATH" 2>/dev/null)
+        #
+        # time_connect comes back alongside the status because the two ways a
+        # probe fails need opposite verdicts — see the busy branch below.
+        probe=$(curl -s --max-time "$PROBE_TIMEOUT_SECONDS" -o /dev/null \
+            -w '%{http_code} %{time_connect}' "http://$host:$p$PROBE_PATH" 2>/dev/null)
+        code=${probe%% *}
+        connect=${probe##* }
         # Whitelist the valid shape instead of blacklisting one bad string, so
         # any future malformed value fails CLOSED rather than open. Empty means
         # curl is missing or crashed. Any real HTTP status — including 4xx/5xx,
         # e.g. a 401 from the auth layer — proves the process is listening.
         case "$code" in
         [1-5][0-9][0-9])
+            found=1
+            break
+            ;;
+        esac
+        # A BUSY VM IS NOT A DEAD VM.
+        #
+        # If the TCP handshake completed, something is listening on that port —
+        # the process is alive, it just did not answer within the probe window.
+        # That happens whenever the guest is CPU-saturated: a compile, a
+        # Strategy Tester run, or a backtest is enough. Reporting it DOWN makes
+        # a supervisor restart a VM that was merely working, which turns a slow
+        # batch into an outage and loses whatever was running.
+        #
+        # Nothing listening refuses the connection instead, leaving
+        # time_connect at 0.000 — that is the case this healthcheck exists to
+        # catch, and it still fails.
+        case "$connect" in
+        0.000000 | 0.000 | 0 | "") ;;
+        *)
+            busy="$busy $p"
             found=1
             break
             ;;
@@ -124,6 +152,13 @@ done
 if [ -n "$dead" ]; then
     echo "DOWN ports:$dead (vm_ip=$VM_IP)"
     exit 1
+fi
+
+# Healthy, but say so out loud: a port that only ever answers this way is worth
+# looking at even though it is not a restart-worthy fault.
+if [ -n "$busy" ]; then
+    echo "ok (slow but listening:$busy) all ports up:" $PORTS "(vm_ip=$VM_IP)"
+    exit 0
 fi
 
 # Unquoted on purpose: collapses the newline-separated list onto one line, so
