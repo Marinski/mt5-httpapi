@@ -207,8 +207,9 @@ curl -X POST "$MT5_API_URL/webrequest/apply" \
 Inside the Windows VM the allowlist is **not** stored in `common.ini` — it
 lives in the machine-bound `MQL5\experts.dat` and MT5 drops it on every
 restart. So the list is applied the way a user would: a bundled AutoIt
-interpreter (`assets/autoit/`) drives Tools → Options → Expert Advisors and
-types the URLs in. This takes effect immediately in-session (no restart), and
+interpreter (`assets/autoit/`; unmodified official binary, redistributed
+with its EULA and notices — see `assets/autoit/NOTICE.txt`) drives
+Tools → Options → Expert Advisors and types the URLs in. This takes effect immediately in-session (no restart), and
 because MT5 forgets it on restart, the API re-applies the persisted list
 automatically ~25 s after each terminal (re)start, so it survives the periodic
 auto-reboot. On a bare-metal terminal where `common.ini` *is* the store, it
