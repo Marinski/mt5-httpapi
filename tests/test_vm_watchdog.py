@@ -121,7 +121,7 @@ def test_healthy_vm_is_never_restarted(wd, tmp_path, recorder):
         assert wd.sweep_once(client, "mt5-httpapi") == 0
     assert recorder.services == []
     # healthy clock starts, but nothing is reset yet (below reset window).
-    state = json.loads((tmp_path / f"{cid}.json").read_text())
+    state = json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text())
     assert state["healthy_since"] > 0
     assert state["attempts"] == 0
 
@@ -138,7 +138,7 @@ def test_starting_vm_is_never_restarted(wd, tmp_path, recorder):
         assert wd.sweep_once(client, "mt5-httpapi") == 0
     assert recorder.services == []
     # starting must not start the healthy clock either.
-    state = json.loads((tmp_path / f"{cid}.json").read_text())
+    state = json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text())
     assert state["healthy_since"] == 0
 
 
@@ -222,7 +222,7 @@ def test_exponential_backoff_between_restarts(wd, tmp_path, recorder):
         assert wd.sweep_once(client, "mt5-httpapi", now=now + 1202 + 3601) == 1
 
     assert recorder.services == [cid, cid, cid, cid]
-    state = json.loads((tmp_path / f"{cid}.json").read_text())
+    state = json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text())
     assert state["attempts"] == 4
 
 
@@ -267,12 +267,12 @@ def test_attempts_reset_after_sustained_healthy_period(wd, tmp_path):
         # Two unhealthy sweeps: first restarts, second exceeds MAX_ATTEMPTS.
         assert wd.sweep_once(make_client("unhealthy", 99), "mt5-httpapi", now=now) == 1
         assert wd.sweep_once(make_client("unhealthy", 99), "mt5-httpapi", now=now + 1) == 0
-        assert "give up" in json.loads((tmp_path / f"{cid}.json").read_text()) or True
+        assert "give up" in json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text()) or True
 
         # VM recovers and stays healthy long enough to reset the budget.
         assert wd.sweep_once(make_client("healthy", 0), "mt5-httpapi", now=now + 100) == 0
         assert wd.sweep_once(make_client("healthy", 0), "mt5-httpapi", now=now + 100 + 1800) == 0
-        state = json.loads((tmp_path / f"{cid}.json").read_text())
+        state = json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text())
         assert state["attempts"] == 0
         assert state["last_restart"] == 0
 
@@ -351,7 +351,7 @@ def test_a_real_run_still_persists_state(wd, tmp_path, recorder):
         wd.sweep_once(client, "mt5-httpapi", dry_run=False, now=1000000)
 
     assert recorder.services == [cid]
-    state = wd.load_state(cid)
+    state = wd.load_state(wd.state_key("mt5-httpapi", cid))
     assert state["attempts"] == 1
     assert state["last_restart"] == 1000000
 
@@ -535,6 +535,80 @@ def test_a_vm_without_a_service_label_is_skipped_not_guessed(wd, tmp_path, recor
         mp.setattr(wd, "log", lambda *a, **k: None)
         assert wd.sweep_once(client, "mt5-httpapi", now=1_000_000) == 0
     assert recorder.calls == []
+
+
+# ── State survives the recreate it triggered ─────────────────────────────────
+
+def _same_service_as(cid, service="mt5"):
+    """One VM container for the compose service, under whatever id Docker
+    assigned this incarnation."""
+    return _container(cid, "mt5", labels={
+        "com.docker.compose.project": "mt5-httpapi",
+        "com.docker.compose.service": service,
+    })
+
+
+def test_the_attempt_cap_survives_the_recreate_it_triggered(wd, tmp_path, recorder, capsys):
+    """Recovery REPLACES the container, so the next poll sees a new id.
+
+    State used to be keyed by container id: the recreate orphaned the record
+    that had just spent an attempt, the replacement loaded a fresh one, and a
+    persistently-broken VM was recovered forever at "attempt 1" - the cap and
+    backoff reset themselves on every recovery they were meant to bound.
+    """
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 1
+    wd.MAX_ATTEMPTS = 1
+    wd.BACKOFF_ATTEMPTS = [999_999]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        old = _FakeClient([_same_service_as("old-container-id")],
+                          health={"old-container-id": _health("unhealthy", 10)})
+        assert wd.sweep_once(old, "mt5-httpapi", now=1_000_000) == 1
+
+        # The recreate happened: same compose service, replacement id, still
+        # unhealthy. The single-attempt budget is already spent.
+        new = _FakeClient([_same_service_as("new-container-id")],
+                          health={"new-container-id": _health("unhealthy", 10)})
+        assert wd.sweep_once(new, "mt5-httpapi", now=1_000_010) == 0
+
+    assert recorder.services == ["mt5"], "the replacement id refunded the attempt budget"
+
+
+def test_backoff_survives_the_recreate_it_triggered(wd, tmp_path, recorder):
+    """Same replacement-id scenario, asserted on backoff rather than the cap:
+    inside the backoff window the replacement must wait, and once the window
+    passes it is recovered again - carrying the attempt count forward."""
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 1
+    wd.MAX_ATTEMPTS = 99
+    wd.BACKOFF_ATTEMPTS = [300]
+
+    def incarnation(cid):
+        return _FakeClient([_same_service_as(cid)], health={cid: _health("unhealthy", 10)})
+
+    now = 1_000_000
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        assert wd.sweep_once(incarnation("id-1"), "mt5-httpapi", now=now) == 1
+        # Replacement, inside the 300s window: waits.
+        assert wd.sweep_once(incarnation("id-2"), "mt5-httpapi", now=now + 200) == 0
+        # Window passed: second attempt, on yet another id.
+        assert wd.sweep_once(incarnation("id-3"), "mt5-httpapi", now=now + 301) == 1
+
+    state = wd.load_state(wd.state_key("mt5-httpapi", "mt5"))
+    assert state["attempts"] == 2, "attempts must accumulate across container ids"
+
+
+def test_state_key_is_stable_identity_not_container_id(wd):
+    assert wd.state_key("proj", "mt5") == wd.state_key("proj", "mt5")
+    assert wd.state_key("proj", "mt5") != wd.state_key("proj", "mt5-b")
+    # Labels are the only outside text that becomes a file name. With every
+    # separator replaced the key is a single path component, so it cannot
+    # traverse out of the state directory no matter what a label carries.
+    hostile = wd.state_key("pro/ject", "../../etc/passwd")
+    assert "/" not in hostile and "\\" not in hostile
 
 
 def test_recreate_refuses_without_the_project_path(wd, monkeypatch):

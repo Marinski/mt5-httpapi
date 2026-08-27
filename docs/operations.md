@@ -286,8 +286,10 @@ Behavior:
   healthy or still starting is never touched, so running backtests on a working
   VM are never interrupted — the healthcheck stays green the whole time a
   terminal is serving.
-- Keeps a tiny state record per container on a named volume
-  (`/state/<container-id>.json`): last restart, attempt count, and when the VM
+- Keeps a tiny state record per VM on a named volume, keyed by compose
+  project + service (`/state/<project>.<service>.json` — stable across the
+  recreate that recovery performs, unlike a container id): last restart,
+  attempt count, and when the VM
   was last observed healthy.
 - Enforces exponential backoff between recovery attempts
   (`WATCHDOG_BACKOFF_ATTEMPTS`, default `300,900,3600` — 5m → 15m → 1h), so a

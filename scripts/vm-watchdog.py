@@ -17,9 +17,13 @@ terminal is serving, and only a genuinely dead VM stays red.
 
 Restart policy is stateful, not a fixed cooldown:
 
-- A tiny JSON state record per container lives on a named volume
-  (``/state/<container-id>.json``): last restart time, attempt count, and when
-  the VM was last observed healthy.
+- A tiny JSON state record per VM lives on a named volume, keyed by STABLE
+  COMPOSE IDENTITY (``/state/<project>.<service>.json``): last restart time,
+  attempt count, and when the VM was last observed healthy. Never keyed by
+  container id: recovery here is a recreate, which REPLACES the container, so
+  an id-keyed record is orphaned by the very action that wrote it and the next
+  poll would start the replacement at ``attempts = 0`` - every recovery
+  silently refunding the attempt budget and resetting backoff.
 - After the sustained-unhealthy threshold, the VM is restarted. Attempts gate
   an exponential backoff (default 5m -> 15m -> 1h): a VM that crashes again
   immediately after recovery is not restarted into a loop.
@@ -292,9 +296,21 @@ def recreate_vm(service: str, project: str) -> None:
 # ── Pure policy: state + health in, action out ───────────────────────────────
 
 
-def load_state(container_id: str, state_dir: str | None = None) -> dict:
-    """The per-container state record, or a fresh one when absent/corrupt."""
-    path = Path(state_dir if state_dir is not None else STATE_DIR) / f"{container_id}.json"
+def state_key(project: str, service: str) -> str:
+    """Stable identity for one VM's state record.
+
+    Compose project + service survives a recreate; the container id does not.
+    Sanitized defensively so a hostile-looking label cannot become a path -
+    both values come from compose labels, but this file name is the only place
+    they touch the filesystem.
+    """
+    raw = f"{project}.{service}"
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in raw)
+
+
+def load_state(key: str, state_dir: str | None = None) -> dict:
+    """The per-VM state record, or a fresh one when absent/corrupt."""
+    path = Path(state_dir if state_dir is not None else STATE_DIR) / f"{key}.json"
     if not path.exists():
         return {"last_restart": 0, "attempts": 0, "healthy_since": 0}
     try:
@@ -303,8 +319,8 @@ def load_state(container_id: str, state_dir: str | None = None) -> dict:
         return {"last_restart": 0, "attempts": 0, "healthy_since": 0}
 
 
-def save_state(container_id: str, state: dict, state_dir: str | None = None) -> None:
-    path = Path(state_dir if state_dir is not None else STATE_DIR) / f"{container_id}.json"
+def save_state(key: str, state: dict, state_dir: str | None = None) -> None:
+    path = Path(state_dir if state_dir is not None else STATE_DIR) / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state), encoding="utf-8")
@@ -399,7 +415,17 @@ def sweep_once(client: DockerClient, project: str, dry_run: bool = False, now: i
         except (RuntimeError, OSError) as exc:
             log(f"{name}: cannot inspect health ({exc}); skipping")
             continue
-        state = load_state(cid)
+        # Resolve the compose service BEFORE touching state: it is both what a
+        # recreate names and the stable half of the state key. A recreate
+        # replaces the container, so state keyed by container id was orphaned
+        # by every successful recovery - the replacement arrived with a fresh
+        # id, loaded a fresh record, and the attempt cap and backoff never
+        # carried across the one boundary they exist to police.
+        service = (c.get("Labels") or {}).get("com.docker.compose.service")
+        if not service:
+            log(f"{name}: no compose service label; cannot recreate, skipping")
+            continue
+        state = load_state(state_key(project, service))
         # decide() MUTATES the state it is handed - it increments attempts and
         # stamps last_restart. Under --dry-run that must not reach disk: a dry
         # pass would consume the real backoff and attempt budget without
@@ -409,15 +435,11 @@ def sweep_once(client: DockerClient, project: str, dry_run: bool = False, now: i
         working = copy.deepcopy(state) if dry_run else state
         action, reason = decide(working, status, streak, now)
         if not dry_run:
-            save_state(cid, working)
+            save_state(state_key(project, service), working)
         if action == "restart":
             # Recreate by COMPOSE SERVICE, not container id: the helper has to
             # name the VM and its sidecars as compose services to recreate them
             # together, and a container id means nothing to compose.
-            service = (c.get("Labels") or {}).get("com.docker.compose.service")
-            if not service:
-                log(f"{name}: no compose service label; cannot recreate, skipping")
-                continue
             if dry_run:
                 log(f"DRY-RUN: would recreate {service} (+ its sidecars) - {reason}")
             else:
