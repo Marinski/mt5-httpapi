@@ -173,9 +173,18 @@ def stack(tmp_path_factory):
         _wait(lambda: "scoped to compose project" in _watchdog_logs(), STARTUP_TIMEOUT_SECONDS, "watchdog started")
         yield project_dir
     finally:
+        # The operator's shell again: `down` interpolates the compose file too,
+        # so it needs MT5_PROJECT_DIR exactly as `make down` after run.sh does
+        # (psyb0t's finding #2, in miniature - without it this teardown failed
+        # at interpolation and, being check=False, silently left a
+        # socket-mounted watchdog running). Loud now: a leaked privileged
+        # container is worse than a noisy teardown.
         # --rmi local: the per-project build tag would otherwise accumulate one
         # dangling watchdog image per run.
-        _compose(project_dir, "down", "-v", "--remove-orphans", "--rmi", "local", check=False)
+        _compose(
+            project_dir, "down", "-v", "--remove-orphans", "--rmi", "local",
+            env_extra={"MT5_PROJECT_DIR": str(project_dir)},
+        )
 
 
 def test_the_watchdog_starts_clean_against_the_real_wiring(stack):
@@ -190,10 +199,13 @@ def test_the_blocker_is_real_inside_the_sidecar(stack):
     """Reproduce psyb0t's finding where it bites: compose run INSIDE the
     watchdog container, with the container's own environment, fails to even
     parse the project file. This is what every pre-fix recovery hit."""
+    # The INNER command's exit code is echoed so the failure is provably the
+    # inner compose (inside the container), not the outer `exec` wrapper.
     res = _compose(stack, "exec", "-T", "vm-watchdog", "sh", "-c",
-                   f"docker compose -f {stack}/docker-compose.yml config --quiet", check=False)
-    assert res.returncode != 0, "compose succeeded without MT5_PROJECT_DIR - the reproduction no longer holds"
-    assert "MT5_PROJECT_DIR" in (res.stderr + res.stdout)
+                   f"docker compose -f {stack}/docker-compose.yml config --quiet; echo INNER_RC=$?", check=False)
+    assert res.returncode == 0, f"outer exec failed, so nothing was tested: {res.stderr}"
+    assert "INNER_RC=" in res.stdout and "INNER_RC=0" not in res.stdout, res.stdout
+    assert "required variable MT5_PROJECT_DIR" in (res.stderr + res.stdout), res.stderr
 
 
 def test_the_watchdog_gives_the_helper_what_the_container_never_got(stack):
