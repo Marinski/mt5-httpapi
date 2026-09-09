@@ -297,9 +297,17 @@ Behavior:
   loop.
 - Stops after `WATCHDOG_MAX_ATTEMPTS` consecutive failed recoveries (default
   `3`) and logs loudly, instead of threshing forever.
-- Resets the attempt budget only after the VM has stayed healthy for
-  `WATCHDOG_RESET_SECONDS` (default `1800`), so a VM that recovered then crashed
-  later gets a fresh budget.
+- Resets the attempt budget only after the VM has stayed **continuously**
+  healthy for `WATCHDOG_RESET_SECONDS` (default `1800`), so a VM that recovered
+  then crashed later gets a fresh budget. Any non-healthy observation — a
+  `starting` container after a restart, or an `unhealthy` poll below the streak
+  threshold — restarts that clock; it does not carry over from an earlier
+  healthy run.
+- Never selects itself, whatever `WATCHDOG_IMAGE_FILTER` is set to — it resolves
+  its own full container id at startup and excludes it by equality (falling
+  back to Docker's short-id hostname only if that inspect fails) — and matches
+  the image **repository exactly** (`dockurr/windows`, `dockurr/windows:5.14`,
+  `dockurr/windows@sha256:…` — not `dockurr/windows-something`).
 - `WATCHDOG_DRY_RUN=1` (or `--dry-run`) prints what it would do without
   touching any container.
 
@@ -313,9 +321,49 @@ Environment overrides: `WATCHDOG_INTERVAL_SECONDS`, `WATCHDOG_MIN_FAILING_STREAK
 service mounts the project through at that same absolute path. Compose resolves
 the relative bind mounts in `docker-compose.yml` client-side, so a
 container-local path would rewrite every mount to something that does not exist
-on the host. `run.sh` exports `MT5_PROJECT_DIR` for this; if it is missing the
-watchdog reports it at startup and refuses to act, rather than falling back to a
-restart that looks like recovery and is not.
+on the host. If it is missing the watchdog reports it at startup and refuses to
+act, rather than falling back to a restart that looks like recovery and is not.
+
+That path reaches compose as `MT5_PROJECT_DIR`, and compose interpolates it on
+**every** command against `docker-compose.yml`, not only the first `up`:
+
+- `run.sh` exports it for its own run **and writes it to `.env`**, so `make
+  down`, `make logs` and a manual `docker compose …` keep working after `run.sh`
+  has exited. Starting the stack some other way? Put
+  `MT5_PROJECT_DIR=<absolute host path of this directory>` in `.env` yourself.
+- The watchdog sets it explicitly in the environment of the `recreate-vm.sh` it
+  runs (from its own `WATCHDOG_PROJECT_DIR`), because the container is not
+  handed the host's shell variables. `tests/test_vm_watchdog.py` runs the real
+  helper under exactly that environment, and
+  `tests/integration/test_vm_watchdog_lifecycle.py` drives a real recovery
+  through the built sidecar on a disposable Compose project.
+
+### Busy is not dead — and hung is not busy
+
+`healthcheck.sh` reports a port **healthy** when the TCP handshake completes but
+no HTTP answer arrives inside the probe window: something is listening, the
+guest is just saturated (a compile, a Strategy Tester run). Restarting a VM for
+being busy would turn a slow batch into an outage.
+
+That tolerance is **bounded**. A port that accepts TCP but stays silent for
+`HEALTHCHECK_SLOW_GRACE` consecutive checks (default `10`, ≈5 minutes at the 30s
+interval) is reported as `hung` and the check fails — from there the watchdog's
+own streak gate (`WATCHDOG_MIN_FAILING_STREAK`, another ≈5 minutes) applies, so
+a wedged API is recovered in roughly ten minutes rather than never. The
+per-port counters live in `HEALTHCHECK_STATE_DIR` (default `/tmp/healthcheck-slow`
+inside the VM container); an HTTP answer or a refused connection resets a port's
+count, and a recreate starts every count from zero. A refused connection
+(nothing listening) is `DOWN` immediately, as before. If the counters cannot be
+written (a full disk), the bound is off for that check and the verdict says so:
+`ok (slow but listening: …) [slow-state unwritable: hung detection off]`.
+
+**Blast radius.** One hung terminal API is enough to mark the whole VM `DOWN`,
+and the watchdog's recovery is the whole VM — every other terminal on it, and
+whatever they were running, goes with it. That is the same rule the check has
+always applied to a dead port; it is just now applied to a hung one after the
+grace. When you catch a single wedged terminal before the watchdog does,
+`POST /terminal/restart` on that terminal (see `docs/rest-api.md`) is the
+cheaper first response.
 
 This complements the in-VM `MT5AutoReboot` scheduled task, which reboots on a
 fixed timer and can interrupt long-running backtests; operators who disable that

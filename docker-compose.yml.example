@@ -122,6 +122,12 @@ services:
       WATCHDOG_STATE_DIR: /state
       WATCHDOG_PROJECT_DIR: ${MT5_PROJECT_DIR}
       WATCHDOG_RECREATE_SCRIPT: ${MT5_PROJECT_DIR}/scripts/recreate-vm.sh
+      # The helper the watchdog runs calls `docker compose`, which interpolates
+      # ${MT5_PROJECT_DIR:?} in THIS file again. The watchdog sets it in the
+      # helper's environment itself; it is handed through here as well so a
+      # human running `docker compose exec vm-watchdog …/recreate-vm.sh` gets
+      # the same environment the watchdog uses.
+      MT5_PROJECT_DIR: ${MT5_PROJECT_DIR}
     logging:
       driver: json-file
       options:

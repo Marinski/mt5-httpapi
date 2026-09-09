@@ -9,6 +9,20 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the project at the SAME absolute path the host uses. Exported (not just set)
 # because compose interpolates it into docker-compose.yml at up time.
 export MT5_PROJECT_DIR="${MT5_PROJECT_DIR:-${DIR}}"
+# It must be THIS checkout. A stale export from another clone would be
+# persisted to .env below and then acted on by the watchdog, which would
+# recreate this project's VMs from the other clone's compose file.
+if [ "$(readlink -f "${MT5_PROJECT_DIR}")" != "$(readlink -f "${DIR}")" ]; then
+    echo "ERROR: MT5_PROJECT_DIR is '${MT5_PROJECT_DIR}' but this checkout is '${DIR}'."
+    echo "  Unset it (run.sh derives it) or point it at this directory."
+    exit 1
+fi
+case "${MT5_PROJECT_DIR}" in
+*"'"*)
+    echo "ERROR: the project path contains a single quote, which .env cannot carry: ${MT5_PROJECT_DIR}"
+    exit 1
+    ;;
+esac
 DEBLOAT=0
 for arg in "$@"; do
     if [ "$arg" = "--debloat" ]; then
@@ -140,6 +154,15 @@ done
 
 # Generate fresh .env each run.
 : >"${DIR}/.env"
+
+# Compose interpolates ${MT5_PROJECT_DIR:?} in docker-compose.yml on EVERY
+# compose command, not only the `up` below - so the value has to outlive this
+# shell. The export above covers this script; this line covers `make down`,
+# `make logs`, a manual `docker compose`, and the vm-watchdog's own recreate,
+# all of which run after it has exited. Written first, so a later failure in
+# this script cannot leave .env without it. Single-quoted: unquoted, a path
+# with `$` or ` #` in it is mangled by compose's dotenv parser.
+echo "MT5_PROJECT_DIR='${MT5_PROJECT_DIR}'" >>"${DIR}/.env"
 
 API_TOKEN=$(python3 "$CFG" api_token)
 if [ -n "${API_TOKEN}" ]; then

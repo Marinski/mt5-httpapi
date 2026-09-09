@@ -196,12 +196,16 @@ def test_group_file_ignores_comments_and_blank_lines(awk_prog, tmp_path):
 # These run the whole script with a stub `curl` on PATH, so they exercise the
 # real verdict logic rather than the awk filter alone.
 
-def _run_healthcheck(tmp_path, config, curl_body):
+def _run_healthcheck(tmp_path, config, curl_body, grace=None):
     """Run healthcheck.sh with a fake curl that emits `curl_body` on stdout.
 
     The stub mimics curl closely enough for the script: it writes what a real
     `-w '%{http_code} %{time_connect}'` would print, and exits non-zero when
     the status is 000, exactly as curl does on a failed request.
+
+    The slow-port counters go under tmp_path, so consecutive calls within one
+    test see each other's state (as consecutive healthchecks in one container
+    do) while tests never see each other's.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -220,7 +224,10 @@ def _run_healthcheck(tmp_path, config, curl_body):
         "HEALTHCHECK_CONFIG": str(config),
         "HEALTHCHECK_VM_GROUP": str(tmp_path / "no-such-group.txt"),
         "HEALTHCHECK_LEASES": str(tmp_path / "no-such-leases"),
+        "HEALTHCHECK_STATE_DIR": str(tmp_path / "slow-state"),
     }
+    if grace is not None:
+        env["HEALTHCHECK_SLOW_GRACE"] = str(grace)
     return subprocess.run(
         ["sh", str(HEALTHCHECK_PATH)],
         capture_output=True, text=True, env=env, timeout=60,
@@ -264,3 +271,124 @@ def test_a_missing_curl_fails_closed(tmp_path):
     config = _write_config(tmp_path, ONE_TERMINAL)
     result = _run_healthcheck(tmp_path, config, "")
     assert result.returncode == 1, result.stdout + result.stderr
+
+
+# ── Hung is not busy: the slow tolerance is bounded ──────────────────────────
+#
+# psyb0t (2026-09-04): "curl result 000 with a completed TCP connection" was
+# healthy unconditionally, so an API that accepts TCP but never answers HTTP
+# stayed healthy forever and the watchdog never recovered it. A busy spell ends
+# and the port answers; a hung port does not - so tolerate the former for a
+# bounded number of CONSECUTIVE checks and then call the latter what it is.
+
+SLOW = "000 0.001204"       # handshake completed, no HTTP inside the window
+ANSWERS = "200 0.000181"
+REFUSED = "000 0.000000"
+
+
+def _slow_runs(tmp_path, config, count, grace=None):
+    return [_run_healthcheck(tmp_path, config, SLOW, grace=grace) for _ in range(count)]
+
+
+def test_a_slow_port_is_tolerated_below_the_grace(tmp_path):
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    for result in _slow_runs(tmp_path, config, 2, grace=3):
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "slow but listening" in result.stdout
+
+
+def test_a_port_still_silent_at_the_grace_is_hung_and_down(tmp_path):
+    """The regression. Third consecutive silent check with grace=3 -> DOWN,
+    and the verdict says hung, not merely down, so an operator can tell it
+    from a refused connection."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    first, second, third = _slow_runs(tmp_path, config, 3, grace=3)
+    assert first.returncode == 0 and second.returncode == 0
+    assert third.returncode == 1, third.stdout + third.stderr
+    assert "DOWN" in third.stdout and "hung" in third.stdout and "6001" in third.stdout
+    # And it stays down while it stays silent.
+    assert _run_healthcheck(tmp_path, config, SLOW, grace=3).returncode == 1
+
+
+def test_an_answer_resets_the_slow_count(tmp_path):
+    """slow, slow, ANSWER, slow, slow with grace=3 is healthy throughout: the
+    answer proves the process serves, so the count starts over."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    sequence = [SLOW, SLOW, ANSWERS, SLOW, SLOW]
+    for body in sequence:
+        result = _run_healthcheck(tmp_path, config, body, grace=3)
+        assert result.returncode == 0, (body, result.stdout + result.stderr)
+    # ...and the third silent check after the answer is the one that trips.
+    assert _run_healthcheck(tmp_path, config, SLOW, grace=3).returncode == 1
+
+
+def test_a_refused_connection_resets_the_slow_count(tmp_path):
+    """Refused is DOWN on its own terms (nothing listening), and it means the
+    hung process is gone - the next listener starts with a clean count."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    _slow_runs(tmp_path, config, 2, grace=3)
+    refused = _run_healthcheck(tmp_path, config, REFUSED, grace=3)
+    assert refused.returncode == 1 and "hung" not in refused.stdout
+    first, second = _slow_runs(tmp_path, config, 2, grace=3)
+    assert first.returncode == 0 and second.returncode == 0
+
+
+def test_the_default_grace_is_ten_checks(tmp_path):
+    """Ten consecutive silent checks is ~5 minutes at the 30s interval - longer
+    than any compile burst seen on the farm, far shorter than forever."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    results = _slow_runs(tmp_path, config, 10)
+    assert all(r.returncode == 0 for r in results[:9])
+    assert results[9].returncode == 1 and "hung" in results[9].stdout
+
+
+@pytest.mark.parametrize("bad", ["0", "00", "010", "banana", "", "-3", "2.5", " 5"])
+def test_a_bad_grace_falls_back_to_the_default_not_to_forever(tmp_path, bad):
+    """A typo must not silently restore the unbounded tolerance (or zero it).
+
+    `00` slipped past a literal-`0` pattern and made the FIRST silent probe
+    hung (`[ 1 -ge 00 ]` is true); `010` would read as octal. Both now strip
+    to their decimal value first - `010` is simply 10, the default."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    results = _slow_runs(tmp_path, config, 10, grace=bad)
+    assert all(r.returncode == 0 for r in results[:9]), bad
+    assert results[9].returncode == 1, bad
+
+
+def test_an_unwritable_state_dir_degrades_to_tolerance_not_to_restarts(tmp_path):
+    """If the counters cannot be kept, the script cannot know a port is hung -
+    so it falls back to the busy verdict rather than inventing a streak. The
+    wrong failure mode here would be restarting busy VMs whenever /tmp fills
+    up. Documented degradation, pinned so nobody 'fixes' it into fail-closed."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "curl").write_text(
+        "#!/bin/sh\nprintf '%s' '000 0.001204'\nexit 7\n", encoding="utf-8"
+    )
+    (bindir / "curl").chmod(0o755)
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HEALTHCHECK_CONFIG": str(config),
+        "HEALTHCHECK_VM_GROUP": str(tmp_path / "no-such-group.txt"),
+        "HEALTHCHECK_LEASES": str(tmp_path / "no-such-leases"),
+        # A file where the directory should be: mkdir -p and every write fail.
+        "HEALTHCHECK_STATE_DIR": str(tmp_path / "not-a-dir"),
+        "HEALTHCHECK_SLOW_GRACE": "2",
+    }
+    (tmp_path / "not-a-dir").write_text("", encoding="utf-8")
+    for _ in range(4):
+        result = subprocess.run(["sh", str(HEALTHCHECK_PATH)], capture_output=True, text=True, env=env, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "slow but listening" in result.stdout
+        # ...but never silently: the verdict says the bound is off.
+        assert "slow-state unwritable" in result.stdout
+
+
+def test_a_leading_zero_grace_does_not_trip_on_the_first_probe(tmp_path):
+    """The exact hole the counter-review found: with grace `00` the first
+    silent probe used to be reported hung."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    first = _run_healthcheck(tmp_path, config, SLOW, grace="00")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "hung" not in first.stdout

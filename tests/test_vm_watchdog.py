@@ -10,6 +10,8 @@ retries, and reset after stable health.
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -250,13 +252,14 @@ def test_gives_up_after_max_attempts(wd, tmp_path, capsys, recorder):
 
 # ── Reset after stable health ────────────────────────────────────────────────
 
-def test_attempts_reset_after_sustained_healthy_period(wd, tmp_path):
+def test_attempts_reset_after_sustained_healthy_period(wd, tmp_path, recorder):
     wd.STATE_DIR = str(tmp_path)
     wd.MIN_FAILING_STREAK = 1
     wd.MAX_ATTEMPTS = 1
     wd.BACKOFF_ATTEMPTS = [0]
     wd.RESET_SECONDS = 1800
     cid = "aaa"
+    state_file = tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json"
 
     def make_client(status, streak):
         return _FakeClient([_container(cid, "mt5")], health={cid: _health(status, streak)})
@@ -267,17 +270,93 @@ def test_attempts_reset_after_sustained_healthy_period(wd, tmp_path):
         # Two unhealthy sweeps: first restarts, second exceeds MAX_ATTEMPTS.
         assert wd.sweep_once(make_client("unhealthy", 99), "mt5-httpapi", now=now) == 1
         assert wd.sweep_once(make_client("unhealthy", 99), "mt5-httpapi", now=now + 1) == 0
-        assert "give up" in json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text()) or True
+        # The budget really is spent - one attempt recorded, one recreate made.
+        # (This line used to read `assert ... or True`, which asserted nothing.)
+        assert json.loads(state_file.read_text())["attempts"] == 1
+        assert recorder.services == [cid]
 
         # VM recovers and stays healthy long enough to reset the budget.
         assert wd.sweep_once(make_client("healthy", 0), "mt5-httpapi", now=now + 100) == 0
         assert wd.sweep_once(make_client("healthy", 0), "mt5-httpapi", now=now + 100 + 1800) == 0
-        state = json.loads((tmp_path / f"{wd.state_key('mt5-httpapi', cid)}.json").read_text())
+        state = json.loads(state_file.read_text())
         assert state["attempts"] == 0
         assert state["last_restart"] == 0
 
         # A later crash gets a fresh budget again.
         assert wd.sweep_once(make_client("unhealthy", 99), "mt5-httpapi", now=now + 100 + 1801) == 1
+    assert recorder.services == [cid, cid]
+
+
+# ── healthy_since means CONTINUOUSLY healthy ─────────────────────────────────
+#
+# psyb0t (2026-09-04): healthy_since survived a `starting` state, so a VM that
+# was healthy before a restart had its attempt budget refunded on the first
+# healthy poll AFTER it - not after RESET_SECONDS of proven stability. The same
+# leak existed for an unhealthy poll below the streak threshold.
+
+
+def _vm(cid, status, streak=0):
+    return _FakeClient([_container(cid, "mt5")], health={cid: _health(status, streak)})
+
+
+def _budget_spent_then_healthy_at(wd, cid, now):
+    """Spend the single-attempt budget, then observe the VM healthy at `now`.
+    Returns nothing; the caller continues the timeline."""
+    assert wd.sweep_once(_vm(cid, "unhealthy", 99), "mt5-httpapi", now=now - 10) == 1
+    assert wd.sweep_once(_vm(cid, "healthy"), "mt5-httpapi", now=now) == 0
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [("starting", 0), ("unhealthy", 1), ("none", 0)],
+    ids=["starting", "unhealthy-below-streak", "no-healthcheck"],
+)
+def test_any_non_healthy_observation_restarts_the_reset_clock(wd, tmp_path, recorder, interruption):
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 10
+    wd.MAX_ATTEMPTS = 1
+    wd.BACKOFF_ATTEMPTS = [0]
+    wd.RESET_SECONDS = 1800
+    cid = "aaa"
+    status, streak = interruption
+    key = wd.state_key("mt5-httpapi", cid)
+
+    t0 = 1_000_000
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        # Streak 99 so the spend is not blocked by the threshold above.
+        assert wd.sweep_once(_vm(cid, "unhealthy", 99), "mt5-httpapi", now=t0 - 10) == 1
+        assert wd.sweep_once(_vm(cid, "healthy"), "mt5-httpapi", now=t0) == 0
+        # Interrupted 1000s in, back to healthy 1900s in: 1900s since the
+        # ORIGINAL healthy poll (> RESET_SECONDS), but only 900s continuous.
+        assert wd.sweep_once(_vm(cid, status, streak), "mt5-httpapi", now=t0 + 1000) == 0
+        assert wd.sweep_once(_vm(cid, "healthy"), "mt5-httpapi", now=t0 + 1900) == 0
+        assert wd.load_state(key)["attempts"] == 1, "budget refunded across a non-healthy state"
+
+        # Continuity restored at t0+1900: the reset happens 1800s after THAT.
+        assert wd.sweep_once(_vm(cid, "healthy"), "mt5-httpapi", now=t0 + 1900 + 1799) == 0
+        assert wd.load_state(key)["attempts"] == 1
+        assert wd.sweep_once(_vm(cid, "healthy"), "mt5-httpapi", now=t0 + 1900 + 1800) == 0
+        assert wd.load_state(key)["attempts"] == 0
+
+    assert recorder.services == [cid]
+
+
+def test_the_healthy_clock_starts_at_the_first_healthy_poll_after_recovery(wd, tmp_path, recorder):
+    """The recovery itself zeroes the clock; the next healthy poll starts it."""
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 1
+    wd.BACKOFF_ATTEMPTS = [0]
+    cid = "aaa"
+    key = wd.state_key("mt5-httpapi", cid)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        assert wd.sweep_once(_vm(cid, "unhealthy", 99), "mt5-httpapi", now=500) == 1
+        assert wd.load_state(key)["healthy_since"] == 0
+        assert wd.sweep_once(_vm(cid, "starting"), "mt5-httpapi", now=600) == 0
+        assert wd.load_state(key)["healthy_since"] == 0
+        assert wd.sweep_once(_vm(cid, "healthy"), "mt5-httpapi", now=700) == 0
+        assert wd.load_state(key)["healthy_since"] == 700
 
 
 # ── Dry-run ──────────────────────────────────────────────────────────────────
@@ -620,16 +699,25 @@ def test_recreate_refuses_without_the_project_path(wd, monkeypatch):
         wd.recreate_vm("mt5", "mt5-httpapi")
 
 
-def test_recreate_passes_the_project_name_explicitly(wd, monkeypatch, tmp_path):
-    """Compose derives the project from the directory name otherwise, and a
-    mismatch does not fail — it creates a SECOND set of containers beside the
-    running ones."""
+def test_recreate_hands_the_helper_the_project_name_and_the_project_dir(wd, monkeypatch, tmp_path):
+    """Two variables compose needs that the container was never handed.
+
+    COMPOSE_PROJECT_NAME: compose derives the project from the directory name
+    otherwise, and a mismatch does not fail — it creates a SECOND set of
+    containers beside the running ones.
+
+    MT5_PROJECT_DIR: the compose file interpolates `${MT5_PROJECT_DIR:?}` on
+    every compose command. This test used to assert only the project name, so
+    the helper failing at interpolation - psyb0t's 2026-09-04 blocker - was
+    invisible to it. The host variable is scrubbed first: the helper must get
+    it from the watchdog, not by inheritance from whoever ran the tests.
+    """
     seen = {}
 
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["cwd"] = kwargs.get("cwd")
-        seen["project"] = (kwargs.get("env") or {}).get("COMPOSE_PROJECT_NAME")
+        seen["env"] = dict(kwargs.get("env") or {})
 
         class R:
             returncode = 0
@@ -638,6 +726,7 @@ def test_recreate_passes_the_project_name_explicitly(wd, monkeypatch, tmp_path):
 
         return R()
 
+    monkeypatch.delenv("MT5_PROJECT_DIR", raising=False)
     monkeypatch.setattr(wd, "PROJECT_DIR", str(tmp_path))
     monkeypatch.setattr(wd, "RECREATE_SCRIPT", "/project/scripts/recreate-vm.sh")
     monkeypatch.setattr(wd.subprocess, "run", fake_run)
@@ -646,7 +735,21 @@ def test_recreate_passes_the_project_name_explicitly(wd, monkeypatch, tmp_path):
 
     assert seen["cmd"] == ["/project/scripts/recreate-vm.sh", "mt5"]
     assert seen["cwd"] == str(tmp_path)
-    assert seen["project"] == "mt5-httpapi"
+    assert seen["env"]["COMPOSE_PROJECT_NAME"] == "mt5-httpapi"
+    assert seen["env"]["MT5_PROJECT_DIR"] == str(tmp_path)
+
+
+def test_recreate_env_is_the_watchdogs_own_project_dir_not_the_hosts(wd, monkeypatch, tmp_path):
+    """Even when the host shell HAS the variable, the helper gets the
+    watchdog's WATCHDOG_PROJECT_DIR: that is the path the project is mounted at
+    inside this container, which is what compose must resolve mounts against."""
+    monkeypatch.setenv("MT5_PROJECT_DIR", "/somewhere/else/entirely")
+    monkeypatch.setattr(wd, "PROJECT_DIR", str(tmp_path))
+    env = wd.recreate_env("mt5-httpapi")
+    assert env["MT5_PROJECT_DIR"] == str(tmp_path)
+    assert env["COMPOSE_PROJECT_NAME"] == "mt5-httpapi"
+    # Everything else is inherited: the helper needs PATH, HOME, DOCKER_HOST...
+    assert env["PATH"] == os.environ["PATH"]
 
 
 def test_recreate_surfaces_the_scripts_failure(wd, monkeypatch, tmp_path):
@@ -674,3 +777,218 @@ def test_missing_project_dir_is_reported_at_startup(monkeypatch):
 def test_missing_recreate_script_is_reported_at_startup(monkeypatch):
     wd = _load_with(monkeypatch, WATCHDOG_RECREATE_SCRIPT="/nope/recreate-vm.sh")
     assert any("WATCHDOG_RECREATE_SCRIPT" in p for p in wd.validate_config())
+
+
+# ── The REAL helper, under the watchdog's EXACT child environment ────────────
+#
+# psyb0t (2026-09-04): the unit suite passed while every real recovery failed,
+# because nothing here ever ran scripts/recreate-vm.sh with the environment the
+# watchdog actually gives it. These do. The docker CLI is a stub - the offline
+# image has no daemon - but the stub emulates the one compose behaviour that
+# matters: `${VAR:?msg}` interpolation of the compose file fails BEFORE any
+# container is touched when VAR is unset or empty. Everything else in the chain
+# is real: the watchdog's env construction, the bash script, its PyYAML sidecar
+# discovery, the compose file.
+
+_COMPOSE_REQUIRING_PROJECT_DIR = """\
+services:
+  mt5:
+    image: dockurr/windows:5.14
+  wickworks:
+    image: psyb0t/wickworks
+    network_mode: "service:mt5"
+  vm-watchdog:
+    image: python:3.12-alpine
+    volumes:
+      - ${MT5_PROJECT_DIR:?MT5_PROJECT_DIR must be the absolute host path of this project}:${MT5_PROJECT_DIR}:ro
+"""
+
+_STUB_DOCKER = r"""#!/bin/sh
+# Stand-in for the docker CLI. Emulates compose's `${VAR:?msg}` interpolation:
+# when the compose file names MT5_PROJECT_DIR as required and it is unset or
+# empty in THIS process's environment, fail exactly as compose does, before
+# doing anything. Otherwise record the call and succeed.
+printf 'argv: %s\n' "$*" >>"$STUB_LOG"
+env | grep -E '^(MT5_PROJECT_DIR|COMPOSE_PROJECT_NAME)=' >>"$STUB_LOG" || true
+file=""
+prev=""
+for a in "$@"; do
+    [ "$prev" = "-f" ] && file="$a"
+    prev="$a"
+done
+if [ -n "$file" ] && grep -q 'MT5_PROJECT_DIR:?' "$file" && [ -z "${MT5_PROJECT_DIR:-}" ]; then
+    echo 'error while interpolating services.vm-watchdog.volumes.[]: required variable MT5_PROJECT_DIR is missing a value' >&2
+    exit 1
+fi
+exit 0
+"""
+
+
+def _project_with_stub_docker(tmp_path):
+    """A compose project holding the REAL helper, plus a stub docker on PATH."""
+    project = tmp_path / "project"
+    (project / "scripts").mkdir(parents=True)
+    helper = project / "scripts" / "recreate-vm.sh"
+    shutil.copy(_REPO / "scripts" / "recreate-vm.sh", helper)
+    helper.chmod(0o755)
+    (project / "docker-compose.yml").write_text(_COMPOSE_REQUIRING_PROJECT_DIR, encoding="utf-8")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "docker").write_text(_STUB_DOCKER, encoding="utf-8")
+    (bindir / "docker").chmod(0o755)
+    return project, helper, bindir, tmp_path / "stub.log"
+
+
+def test_the_real_helper_recreates_under_the_watchdogs_exact_child_environment(wd, monkeypatch, tmp_path):
+    """The blocker, end to end: recreate_vm() -> real recreate-vm.sh -> docker
+    compose, with MT5_PROJECT_DIR scrubbed from the host so the ONLY way the
+    helper can have it is the watchdog putting it there."""
+    project, helper, bindir, log = _project_with_stub_docker(tmp_path)
+    monkeypatch.delenv("MT5_PROJECT_DIR", raising=False)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("STUB_LOG", str(log))
+    monkeypatch.setattr(wd, "PROJECT_DIR", str(project))
+    monkeypatch.setattr(wd, "RECREATE_SCRIPT", str(helper))
+
+    wd.recreate_vm("mt5", "mt5-httpapi")  # raises RuntimeError on any failure
+
+    recorded = log.read_text(encoding="utf-8")
+    assert f"MT5_PROJECT_DIR={project}" in recorded
+    assert "COMPOSE_PROJECT_NAME=mt5-httpapi" in recorded
+    # The real script planned the real operation, with the sidecar it found
+    # in the compose file - not some path the stub short-circuited.
+    assert "compose" in recorded and "stop" in recorded
+    assert "--force-recreate" in recorded
+    assert "wickworks" in recorded
+
+
+def test_without_the_injected_variable_the_same_helper_fails_at_interpolation(tmp_path, monkeypatch):
+    """Guards the test above. Run the identical helper WITHOUT MT5_PROJECT_DIR
+    and it fails with compose's own error, before stopping anything - so a
+    regression to the old child environment turns the suite red rather than
+    quietly green."""
+    project, helper, bindir, log = _project_with_stub_docker(tmp_path)
+    env = {
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "STUB_LOG": str(log),
+        "COMPOSE_PROJECT_NAME": "mt5-httpapi",
+        # No MT5_PROJECT_DIR - the pre-fix child environment.
+    }
+    res = subprocess.run(
+        [str(helper), "mt5"], cwd=str(project), env=env,
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert res.returncode != 0
+    assert "required variable MT5_PROJECT_DIR is missing a value" in res.stderr
+    assert "--force-recreate" not in log.read_text(encoding="utf-8"), "recreate ran despite the failed stop"
+
+
+# ── Scope: exact image repository, and never itself ──────────────────────────
+#
+# psyb0t (2026-08-21), still open at c29b289: `startswith(IMAGE_FILTER)` also
+# matched `dockurr/windows-not-the-vm`, and nothing excluded SELF_ID, so a valid
+# operator override like WATCHDOG_IMAGE_FILTER=python selected the watchdog.
+
+
+@pytest.mark.parametrize(
+    "image,selected",
+    [
+        ("dockurr/windows", True),
+        ("dockurr/windows:5.14", True),
+        ("dockurr/windows@sha256:" + "ab" * 32, True),
+        ("dockurr/windows-not-the-vm:latest", False),
+        ("dockurr/windows2:1", False),
+        ("psyb0t/wickworks:v0.3.1", False),
+        ("notdockurr/windows:5.14", False),
+    ],
+)
+def test_image_filter_matches_the_repository_exactly(wd, tmp_path, recorder, image, selected):
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 1
+    wd.IMAGE_FILTER = "dockurr/windows"
+    client = _FakeClient([_container("c1", "vm", image=image)], health={"c1": _health("unhealthy", 99)})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        wd.sweep_once(client, "mt5-httpapi", now=1_000_000)
+    assert recorder.services == (["c1"] if selected else []), image
+
+
+def test_the_watchdog_never_selects_itself_whatever_the_filter_says(wd, tmp_path, recorder):
+    """Docker sets the hostname to the SHORT container id; the list endpoint
+    reports the full one. Self-exclusion is unconditional and first, before
+    the image filter gets a say."""
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 1
+    wd.IMAGE_FILTER = "python"
+    wd.SELF_ID = "abcdef123456"
+    me = _container("abcdef123456" + "0" * 52, "vm-watchdog", image="python:3.12-alpine")
+    vm = _container("vm1", "fake-vm", image="python:3.12-alpine")
+    client = _FakeClient(
+        [me, vm],
+        health={me["Id"]: _health("unhealthy", 99), "vm1": _health("unhealthy", 99)},
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        assert wd.sweep_once(client, "mt5-httpapi", now=1_000_000) == 1
+    assert recorder.services == ["vm1"]
+
+
+def test_an_empty_self_id_excludes_nothing_by_accident(wd):
+    """"".startswith("") is True for every id: an unset SELF_ID must not make
+    every container look like the watchdog and silently disable it."""
+    wd.SELF_ID = ""
+    wd.SELF_FULL_ID = ""
+    assert wd._is_self("anything") is False
+
+
+def test_self_exclusion_uses_the_resolved_full_id_when_the_hostname_is_a_name(wd, tmp_path, recorder):
+    """`hostname: watchdog` on the service (or WATCHDOG_SELF_ID set to a name)
+    used to defeat self-exclusion entirely, because the prefix test compared
+    container ids against a word. With the full id resolved at startup the
+    test is equality, and the hostname no longer matters."""
+    wd.STATE_DIR = str(tmp_path)
+    wd.MIN_FAILING_STREAK = 1
+    wd.IMAGE_FILTER = "python"
+    wd.SELF_ID = "watchdog"
+    full = "f" * 64
+    wd.SELF_FULL_ID = full
+    me = _container(full, "vm-watchdog", image="python:3.12-alpine")
+    vm = _container("vm1", "fake-vm", image="python:3.12-alpine")
+    client = _FakeClient([me, vm], health={full: _health("unhealthy", 99), "vm1": _health("unhealthy", 99)})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", lambda *a, **k: None)
+        assert wd.sweep_once(client, "mt5-httpapi", now=1_000_000) == 1
+    assert recorder.services == ["vm1"]
+
+
+def test_a_name_hostname_without_a_resolved_id_never_prefix_matches_other_containers(wd):
+    """The fallback is only the hex short-id prefix. A word must not exclude a
+    container whose id merely starts with the same letters."""
+    wd.SELF_FULL_ID = ""
+    wd.SELF_ID = "abc"           # too short / not a container id
+    assert wd._is_self("abc" + "0" * 61) is False
+    wd.SELF_ID = "watchdog"
+    assert wd._is_self("watchdog-lookalike") is False
+    wd.SELF_ID = "abcdef123456"  # a real short id still works by prefix
+    assert wd._is_self("abcdef123456" + "0" * 52) is True
+
+
+def test_main_resolves_its_own_full_id_before_the_first_sweep(monkeypatch):
+    """The resolution is what makes the equality test possible in production."""
+    wd = _load_with(monkeypatch, WATCHDOG_COMPOSE_PROJECT="mt5-httpapi")
+    wd.SELF_ID = "self-watchdog-id"
+
+    class Client(_FakeClient):
+        def inspect(self, cid):
+            if cid == "self-watchdog-id":
+                return {"Id": "e" * 64, "Config": {"Labels": {"com.docker.compose.project": "mt5-httpapi"}}}
+            return super().inspect(cid)
+
+    monkeypatch.setattr(wd, "DockerClient", lambda *_a, **_k: Client([]))
+    # Stop main() at its first sleep, after startup work is done.
+    monkeypatch.setattr(wd.time, "sleep", lambda *_a: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(wd, "log", lambda *a, **k: None)
+    with pytest.raises(KeyboardInterrupt):
+        wd.main()
+    assert wd.SELF_FULL_ID == "e" * 64

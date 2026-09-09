@@ -57,9 +57,16 @@ That is why this container needs the compose project mounted at the SAME
 absolute path the host uses: Compose resolves relative bind mounts
 client-side, so ``./scripts/x`` in the compose file has to land on the host's
 ``<project>/scripts/x``, not on some path inside this container. ``run.sh``
-exports ``MT5_PROJECT_DIR`` for that. Without it the watchdog refuses to act
-and says so, rather than falling back to a restart that looks like recovery
-and is not.
+exports ``MT5_PROJECT_DIR`` for that and persists it to ``.env``. Without it
+the watchdog refuses to act and says so, rather than falling back to a
+restart that looks like recovery and is not.
+
+The helper runs ``docker compose`` itself, and compose interpolates
+``${MT5_PROJECT_DIR:?}`` in the compose file on EVERY command — so the
+watchdog hands that variable to the helper explicitly (``recreate_env``).
+Compose resolved it on the host when it created this container but never
+passed it in, and without that line every real recovery failed at
+interpolation before it could stop anything.
 
 Runs forever, restarting itself if it crashes: keepalive is the Compose
 ``restart: unless-stopped`` on this service, not a supervisor inside the loop.
@@ -71,6 +78,7 @@ import copy
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -173,10 +181,10 @@ INTERVAL_SECONDS = _env_int("WATCHDOG_INTERVAL_SECONDS", "30", minimum=1)
 # Restart only after this many consecutive failed healthchecks.
 MIN_FAILING_STREAK = _env_int("WATCHDOG_MIN_FAILING_STREAK", "10", minimum=1)
 
-# Only containers whose image starts with this are considered VM containers.
-# Empty is refused rather than treated as "no filter": "".startswith() matches
-# every image, so a blank value would make every container in the project a
-# restart candidate - including this watchdog and any database sharing it.
+# Only containers running exactly this image REPOSITORY (any tag or digest)
+# are considered VM containers - see _image_matches. Empty is refused rather
+# than treated as "no filter": a blank value would make every container in the
+# project a restart candidate - including any database sharing it.
 IMAGE_FILTER = _env_str("WATCHDOG_IMAGE_FILTER", "dockurr/windows", allow_empty=False)
 
 # Exponential backoff per attempt: first restart after 5m, then 15m, then 1h.
@@ -194,8 +202,13 @@ RESET_SECONDS = _env_int("WATCHDOG_RESET_SECONDS", "1800", minimum=1)
 # labels (the watchdog runs as a service in the same project).
 COMPOSE_PROJECT = os.environ.get("WATCHDOG_COMPOSE_PROJECT", "")
 
-# This container's own ID; Docker sets the container hostname to it.
+# This container's own ID; Docker sets the container hostname to its SHORT id.
 SELF_ID = os.environ.get("WATCHDOG_SELF_ID", socket.gethostname())
+# Resolved to the FULL id at startup (main -> _inspect_self) so self-exclusion
+# works by equality even when the hostname is not the container id - a
+# `hostname:` on the service, or WATCHDOG_SELF_ID set to a name.
+SELF_FULL_ID = ""
+_HEX_ID = re.compile(r"[0-9a-f]{12,64}")
 
 
 def log(message: str, *args) -> None:
@@ -257,6 +270,33 @@ class DockerClient:
 
 
 
+def recreate_env(project: str) -> dict[str, str]:
+    """The exact environment the recreate helper runs with.
+
+    Two values are set explicitly, because the helper runs ``docker compose``
+    and compose needs both while this container was handed neither:
+
+    - ``COMPOSE_PROJECT_NAME``: compose otherwise derives the project from the
+      directory name, and a mismatch does not fail - it quietly creates a
+      SECOND set of containers alongside the running ones.
+    - ``MT5_PROJECT_DIR``: the compose file interpolates ``${MT5_PROJECT_DIR:?}``
+      on EVERY compose command, not only the ``up`` that started the stack.
+      Compose resolved it on the host when it created this container, but the
+      container's own environment carries ``WATCHDOG_PROJECT_DIR`` instead, so
+      the helper's compose call failed at interpolation - "required variable
+      MT5_PROJECT_DIR is missing a value" - before it could stop or recreate
+      anything. Every real (non-dry-run) recovery was dead on arrival.
+      ``WATCHDOG_PROJECT_DIR`` IS that host path, so it is the source here.
+
+    Factored out of recreate_vm() so a test can run the real helper under
+    precisely this environment, with nothing inherited from the host shell.
+    """
+    env = dict(os.environ)
+    env["COMPOSE_PROJECT_NAME"] = project
+    env["MT5_PROJECT_DIR"] = PROJECT_DIR
+    return env
+
+
 def recreate_vm(service: str, project: str) -> None:
     """Recreate one VM together with every sidecar sharing its netns.
 
@@ -264,23 +304,20 @@ def recreate_vm(service: str, project: str) -> None:
     script is what operators run, what the lifecycle regression test exercises,
     and the only place that knows how to find a VM's sidecars in the generated
     compose file. Reimplementing the discovery here would give the fleet two
-    recovery paths that could drift apart.
-
-    COMPOSE_PROJECT_NAME is passed explicitly. Compose otherwise derives the
-    project from the directory name, and a mismatch there would not fail — it
-    would quietly create a SECOND set of containers alongside the running ones.
+    recovery paths that could drift apart. See recreate_env() for the two
+    variables the helper is handed explicitly.
     """
     if not PROJECT_DIR:
         raise RuntimeError(
             "WATCHDOG_PROJECT_DIR is unset, so the compose project cannot be "
             "recreated. Start the stack through run.sh (it exports "
-            "MT5_PROJECT_DIR), or set it to the host path of the project."
+            "MT5_PROJECT_DIR and writes it to .env), or set it to the host "
+            "path of the project."
         )
-    env = dict(os.environ, COMPOSE_PROJECT_NAME=project)
     result = subprocess.run(
         [RECREATE_SCRIPT, service],
         cwd=PROJECT_DIR,
-        env=env,
+        env=recreate_env(project),
         capture_output=True,
         text=True,
         timeout=RECREATE_TIMEOUT_SECONDS,
@@ -333,18 +370,26 @@ def decide(state: dict, health_status: str, failing_streak: int, now: int) -> tu
     Mutates ``state`` (attempts / timestamps) and returns ``(action, reason)``
     where action is one of ``wait``, ``restart`` or ``give_up``.
     """
+    # healthy_since means CONTINUOUSLY healthy since. Any other observation -
+    # starting, unhealthy, none - breaks that continuity and the clock starts
+    # over on the next healthy poll. It used to survive a `starting` (and an
+    # unhealthy poll below the streak threshold), so a VM that was healthy at
+    # t0, went through a restart, and came back healthy at t0+RESET had its
+    # attempt budget refunded on that first healthy poll rather than after
+    # RESET_SECONDS of proven stability.
+    if health_status != "healthy":
+        state["healthy_since"] = 0
+
     if health_status != "unhealthy":
-        # Healthy or starting: never touch. Track when we last saw it healthy
-        # so a recovery that holds long enough resets the attempt budget.
+        # Healthy or starting: never touch. Track when the current healthy run
+        # began so a recovery that holds long enough resets the attempt budget.
         if health_status == "healthy":
-            state["healthy_since"] = state.get("healthy_since") or now
+            if not state.get("healthy_since"):
+                state["healthy_since"] = now
             if now - state["healthy_since"] >= RESET_SECONDS:
                 state["attempts"] = 0
                 state["last_restart"] = 0
                 return "wait", "healthy long enough - attempt budget reset"
-        else:
-            # starting / none: nothing to do, do not start a healthy clock.
-            state["healthy_since"] = state.get("healthy_since") or 0
         return "wait", f"health={health_status}"
 
     # Unhealthy from here on.
@@ -372,23 +417,61 @@ def decide(state: dict, health_status: str, failing_streak: int, now: int) -> tu
 # ── Docker-facing logic ──────────────────────────────────────────────────────
 
 
+def _inspect_self(client: DockerClient) -> dict:
+    """This container's own inspect record, or {} when it cannot be read."""
+    try:
+        return client.inspect(SELF_ID)
+    except (RuntimeError, OSError):
+        return {}
+
+
 def _compose_project(client: DockerClient) -> str | None:
     """This project's name, from our own container's compose labels."""
-    try:
-        info = client.inspect(SELF_ID)
-    except (RuntimeError, OSError):
-        return None
+    info = _inspect_self(client)
     return (info.get("Config", {}).get("Labels", {}) or {}).get("com.docker.compose.project")
 
 
+def _image_matches(image: str, repo: str) -> bool:
+    """Exact image REPOSITORY match, any tag or digest.
+
+    ``dockurr/windows`` matches ``dockurr/windows``, ``dockurr/windows:5.14``
+    and ``dockurr/windows@sha256:...`` - and not ``dockurr/windows-not-the-vm``.
+    A prefix test did match that last one, which for a container holding the
+    Docker socket meant its restart scope was "anything whose image name
+    happens to start the same way".
+    """
+    return image == repo or image.startswith(repo + ":") or image.startswith(repo + "@")
+
+
+def _is_self(container_id: str) -> bool:
+    """Whether this id is the watchdog's own container.
+
+    By equality against the full id resolved at startup. Before that (or if
+    the self-inspect failed) fall back to the short-id prefix Docker gives the
+    hostname - but only when SELF_ID actually looks like one, so a service
+    `hostname: watchdog` never prefix-matches unrelated containers, and a real
+    name never quietly matches nothing while the docs promise otherwise.
+    """
+    if SELF_FULL_ID:
+        return container_id == SELF_FULL_ID
+    if SELF_ID and _HEX_ID.fullmatch(SELF_ID):
+        return container_id == SELF_ID or container_id.startswith(SELF_ID)
+    return False
+
+
 def _scoped_containers(client: DockerClient, project: str) -> list[dict]:
-    """Running containers in this project running the VM image."""
+    """Running containers in this project running the VM image - never itself."""
     out = []
     for c in client.list_containers():
+        # Unconditional and first: a valid operator override such as
+        # WATCHDOG_IMAGE_FILTER=python would otherwise select the watchdog, and
+        # a watchdog that recreates itself mid-sweep is not a recovery path.
+        if _is_self(c.get("Id") or ""):
+            continue
         labels = c.get("Labels", {}) or {}
         if project and labels.get("com.docker.compose.project") != project:
             continue
-        if not (c.get("Image") or "").startswith(IMAGE_FILTER):
+        if not _image_matches(c.get("Image") or "", IMAGE_FILTER):
             continue
         out.append(c)
     return out
@@ -468,8 +551,8 @@ def validate_config() -> list[str]:
     if not PROJECT_DIR:
         errors.append(
             "WATCHDOG_PROJECT_DIR is empty - recovery needs the compose project's "
-            "HOST path (run.sh exports MT5_PROJECT_DIR). Without it a crashed VM "
-            "cannot be recreated."
+            "HOST path (run.sh exports MT5_PROJECT_DIR and writes it to .env). "
+            "Without it a crashed VM cannot be recreated."
         )
     elif not os.path.isdir(PROJECT_DIR):
         errors.append(
@@ -500,6 +583,16 @@ def main() -> int:
     if dry_run:
         log("dry-run mode: will report decisions without restarting")
     client = DockerClient(DOCKER_SOCKET)
+
+    # Resolve our own FULL container id once, so self-exclusion is an equality
+    # test rather than a guess from the hostname.
+    global SELF_FULL_ID
+    self_info = _inspect_self(client)
+    SELF_FULL_ID = self_info.get("Id") or ""
+    if SELF_FULL_ID:
+        log(f"own container id resolved: {SELF_FULL_ID[:12]}")
+    else:
+        log(f"cannot inspect own container '{SELF_ID}'; self-exclusion falls back to the short-id prefix")
 
     project = COMPOSE_PROJECT or _compose_project(client) or ""
     if not project:

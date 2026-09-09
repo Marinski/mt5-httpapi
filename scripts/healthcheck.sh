@@ -29,6 +29,24 @@ readonly PROBE_PATH=/ping
 readonly PROBE_TIMEOUT_SECONDS=3
 # Tried after the leased VM IP so a probe still works before the lease lands.
 readonly FALLBACK_HOSTS='127.0.0.1 localhost'
+# A port that accepts TCP but never answers HTTP is tolerated as "busy" for
+# this many CONSECUTIVE checks, then counted as down - see the busy branch.
+# Anything that is not a positive integer falls back to the default rather
+# than to "tolerate forever" or "tolerate nothing". Leading zeros are stripped
+# first: `00` is not caught by a literal `0` pattern, and `010` would read as
+# octal to `$(( ))` - neither may become a one-probe trigger.
+slow_grace=${HEALTHCHECK_SLOW_GRACE:-10}
+case "$slow_grace" in
+'' | *[!0-9]*) slow_grace=10 ;;
+*)
+    slow_grace=${slow_grace#"${slow_grace%%[!0]*}"}
+    [ -n "$slow_grace" ] && [ "$slow_grace" -ge 1 ] 2>/dev/null || slow_grace=10
+    ;;
+esac
+readonly SLOW_GRACE_CHECKS=$slow_grace
+# Per-port counters behind that tolerance. /tmp is container-local, so they
+# reset when the VM is recreated - the right lifetime for "consecutive".
+readonly SLOW_STATE_DIR=${HEALTHCHECK_STATE_DIR:-/tmp/healthcheck-slow}
 
 [ -f "$CONFIG" ] || {
     echo "no config.yaml at $CONFIG"
@@ -97,8 +115,14 @@ HOSTS=""
 [ -n "$VM_IP" ] && HOSTS="$VM_IP"
 HOSTS="$HOSTS $FALLBACK_HOSTS"
 
+mkdir -p "$SLOW_STATE_DIR" 2>/dev/null
+
 dead=""
 busy=""
+hung=""
+# Set when a counter cannot be written: the bound is then off for that port,
+# and the verdict says so rather than reading exactly like a healthy VM.
+slow_note=""
 for p in $PORTS; do
     found=0
     for host in $HOSTS; do
@@ -121,6 +145,8 @@ for p in $PORTS; do
         # e.g. a 401 from the auth layer — proves the process is listening.
         case "$code" in
         [1-5][0-9][0-9])
+            # An answer ends any slow streak this port had.
+            rm -f "$SLOW_STATE_DIR/$p"
             found=1
             break
             ;;
@@ -137,27 +163,55 @@ for p in $PORTS; do
         # Nothing listening refuses the connection instead, leaving
         # time_connect at 0.000 — that is the case this healthcheck exists to
         # catch, and it still fails.
+        #
+        # BUT A HUNG API IS NOT A BUSY ONE EITHER. A process that accepts
+        # connections and never serves one - wedged, deadlocked, stuck on a
+        # dead terminal - looks exactly like "busy" on any single probe, and
+        # tolerating that unconditionally kept such a VM healthy forever: the
+        # watchdog never saw an unhealthy streak, so it never recovered it.
+        # The tolerance is therefore bounded: a port that is still silent after
+        # SLOW_GRACE_CHECKS consecutive checks is reported as hung, and DOWN.
+        # A real busy spell ends and the port answers, which resets its count.
         case "$connect" in
         0.000000 | 0.000 | 0 | "") ;;
         *)
-            busy="$busy $p"
+            slow_n=$(cat "$SLOW_STATE_DIR/$p" 2>/dev/null)
+            case "$slow_n" in
+            '' | *[!0-9]*) slow_n=0 ;;
+            esac
+            slow_n=$((slow_n + 1))
+            echo "$slow_n" >"$SLOW_STATE_DIR/$p" 2>/dev/null ||
+                slow_note=" [slow-state unwritable: hung detection off]"
+            if [ "$slow_n" -ge "$SLOW_GRACE_CHECKS" ]; then
+                hung="$hung $p"
+            else
+                busy="$busy $p"
+            fi
             found=1
             break
             ;;
         esac
     done
-    [ "$found" -eq 0 ] && dead="$dead $p"
+    # Refused everywhere: nothing is listening. That also ends any slow
+    # streak - whatever was hung on this port is gone now.
+    [ "$found" -eq 0 ] && {
+        dead="$dead $p"
+        rm -f "$SLOW_STATE_DIR/$p"
+    }
 done
 
-if [ -n "$dead" ]; then
-    echo "DOWN ports:$dead (vm_ip=$VM_IP)"
+if [ -n "$dead" ] || [ -n "$hung" ]; then
+    verdict="DOWN"
+    [ -n "$dead" ] && verdict="$verdict ports:$dead"
+    [ -n "$hung" ] && verdict="$verdict hung (listening, no HTTP for $SLOW_GRACE_CHECKS+ checks):$hung"
+    echo "$verdict (vm_ip=$VM_IP)"
     exit 1
 fi
 
 # Healthy, but say so out loud: a port that only ever answers this way is worth
 # looking at even though it is not a restart-worthy fault.
 if [ -n "$busy" ]; then
-    echo "ok (slow but listening:$busy) all ports up:" $PORTS "(vm_ip=$VM_IP)"
+    echo "ok (slow but listening:$busy)$slow_note all ports up:" $PORTS "(vm_ip=$VM_IP)"
     exit 0
 fi
 
