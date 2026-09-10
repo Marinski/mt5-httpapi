@@ -8,6 +8,38 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.13.0]: 2026-09-10
+
+### Added
+
+- A Compose-managed `vm-watchdog` sidecar now watches this project's Windows
+  VM containers and recreates a VM only after it has remained unhealthy for the
+  configured streak. Recovery uses the existing `recreate-vm.sh` path, so the
+  VM and its shared-network sidecars are rebuilt together. The watchdog has
+  scoped image and Compose-project filters, exponential backoff, a bounded
+  attempt budget, dry-run mode, and documented configuration defaults.
+
+- Shared-network sidecars with their own healthchecks are supervised after
+  their VM is continuously healthy. This repairs a sidecar stranded in an
+  obsolete network namespace without unnecessarily recreating the VM. Set
+  `WATCHDOG_WATCH_SIDECARS=0` to retain VM-only recovery.
+
+### Changed
+
+- VM port checks now run concurrently. The healthcheck has a bounded wall-clock
+  time independent of terminal count, deduplicates configured ports, and
+  distinguishes a responsive terminal, a temporarily busy one, and a
+  persistently hung one.
+
+- `run.sh` persists `MT5_PROJECT_DIR` for later Compose commands, and recovery
+  explicitly stops VMs with the configured grace period before recreating them.
+
+### Fixed
+
+- `make lint` no longer reports a false clean result when PSScriptAnalyzer is
+  unavailable. The lint image treats module installation and import failures as
+  fatal and validates the exact analyzer version before scanning scripts.
+
 ## [v4.12.2] — 2026-08-20
 
 ### Fixed

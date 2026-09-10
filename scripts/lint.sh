@@ -22,7 +22,7 @@
 set -uo pipefail
 
 readonly REPO=/work
-readonly PSSA_VERSION=1.22.0
+readonly PSSA_VERSION="${PSSCRIPTANALYZER_VERSION:-}"
 
 # Gate on warning and above. shellcheck's `info`/`style` tiers flag deliberate
 # idioms -- e.g. SC2015 on the `[ x ] && pass ... || fail ...` shape used
@@ -187,11 +187,27 @@ check_psscriptanalyzer() {
     section "PSScriptAnalyzer ${PSSA_VERSION}"
     local bad=0 f
 
+    if [[ -z "$PSSA_VERSION" ]]; then
+        log ERROR "PSSCRIPTANALYZER_VERSION is unset; Dockerfile.lint must provide it"
+        return 1
+    fi
+
+    if ! pwsh -NoProfile -Command '
+$ErrorActionPreference = "Stop"
+Import-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -ErrorAction Stop
+Get-Command Invoke-ScriptAnalyzer -ErrorAction Stop | Out-Null
+'; then
+        log ERROR "PSScriptAnalyzer ${PSSA_VERSION} is unavailable"
+        return 1
+    fi
+
     # Per-file rather than -Recurse on the dir, so the vendored
     # defender-remover tree stays excluded by tracked_files().
     while IFS= read -r f; do
         if ! pwsh -NoProfile -File /dev/stdin "$f" <<'PWSH'; then
 param([string]$Path)
+$ErrorActionPreference = "Stop"
+Import-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -ErrorAction Stop
 $results = Invoke-ScriptAnalyzer -Path $Path -Severity Error,Warning
 if ($results) {
     $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Output

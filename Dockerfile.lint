@@ -22,7 +22,8 @@ COPY --from=shfmt /bin/shfmt /usr/local/bin/shfmt
 # represent a non-ASCII byte it read from a script. The base image has no
 # en_US.UTF-8, so pin C.UTF-8 which is always present and is a superset.
 ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PSSCRIPTANALYZER_VERSION=1.22.0
 
 # git is here so lint.sh can ask `git ls-files` which scripts are TRACKED --
 # linting gitignored local scratch (commit.sh, git-update.sh, fix.sh) produces
@@ -33,7 +34,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends shellcheck git \
     && rm -rf /var/lib/apt/lists/* \
     && pwsh -NoProfile -Command \
-        "Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.22.0 -Force -Scope AllUsers" \
+        "\$ErrorActionPreference = 'Stop'; \
+        \$ProgressPreference = 'SilentlyContinue'; \
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+        Install-Module -Name PSScriptAnalyzer -RequiredVersion \$env:PSSCRIPTANALYZER_VERSION -Force -Scope AllUsers -ErrorAction Stop; \
+        Import-Module PSScriptAnalyzer -RequiredVersion \$env:PSSCRIPTANALYZER_VERSION -ErrorAction Stop; \
+        Get-Command Invoke-ScriptAnalyzer -ErrorAction Stop | Out-Null" \
     && shfmt --version \
     && shellcheck --version \
     && git --version
