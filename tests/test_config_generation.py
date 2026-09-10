@@ -37,6 +37,11 @@ TWO_VMS_WITH_WICKWORKS = [
     },
 ]
 
+WICKWORKS_IMAGE = (
+    "psyb0t/wickworks:v0.7.0@sha256:"
+    "2973055356e8879a4a9a4025422d5835e18235eece898c780fa61ed563c43590"
+)
+
 
 def _load_config_helper_module():
     module_path = Path(__file__).resolve().parents[1] / "scripts" / "config_helper.py"
@@ -261,7 +266,61 @@ def test_generate_compose_gives_wickworks_a_self_healing_healthcheck(
     services = yaml.safe_load(outpath.read_text(encoding="utf-8"))["services"]
     for name in ("wickworks", "wickworks-b"):
         svc = services[name]
-        assert svc["network_mode"] == "service:" + {"wickworks": "mt5", "wickworks-b": "mt5-b"}[name]
+        assert svc["image"] == WICKWORKS_IMAGE
+        expected_owner = {"wickworks": "mt5", "wickworks-b": "mt5-b"}[name]
+        assert svc["network_mode"] == "service:" + expected_owner
         assert "./scripts/wickworks-healthcheck.py:/wickworks-healthcheck.py:ro" in svc["volumes"]
         hc = svc["healthcheck"]["test"]
         assert hc == ["CMD", "python", "/wickworks-healthcheck.py"]
+
+
+def test_log_rotator_mounts_only_logs_and_terminal_journals(tmp_path, monkeypatch):
+    helper = _load_config_helper_module()
+    config_path = _write_config(
+        tmp_path, [{"broker": "acme", "account": "main", "port": 5001}]
+    )
+    vms_path = _write_vms(tmp_path, TWO_VMS)
+    outpath = tmp_path / "docker-compose.yml"
+    template_path = Path(__file__).resolve().parents[1] / "docker-compose.yml.j2"
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(helper, "VMS_PATH", str(vms_path))
+    monkeypatch.setattr(helper, "COMPOSE_TEMPLATE_PATH", str(template_path))
+    monkeypatch.setattr(helper, "COMPOSE_OUTPUT_PATH", str(outpath))
+    monkeypatch.setattr("sys.argv", ["config_helper.py", "generate_compose"])
+
+    helper.main()
+
+    services = yaml.safe_load(outpath.read_text(encoding="utf-8"))["services"]
+    rotator = services["log-rotator"]
+    assert rotator["environment"] == {
+        "LOG_DIR": "/logs",
+        "TERMINALS_DIR": "/terminals",
+        "RETAIN_DAYS": "7",
+        "INTERVAL": "3600",
+    }
+    assert rotator["volumes"] == [
+        "/data/mt5-shared/logs:/logs",
+        "/data/mt5-shared/terminals:/terminals",
+        "./scripts/rotate-logs.sh:/rotate.sh:ro",
+    ]
+
+
+def test_default_compose_exposes_terminal_retention_to_the_rotator():
+    repo_root = Path(__file__).resolve().parents[1]
+    compose = yaml.safe_load(
+        (repo_root / "docker-compose.yml.example").read_text(encoding="utf-8")
+    )
+    rotator = compose["services"]["log-rotator"]
+
+    assert rotator["environment"] == {
+        "LOG_DIR": "/logs",
+        "TERMINALS_DIR": "/terminals",
+        "RETAIN_DAYS": "7",
+        "INTERVAL": "3600",
+    }
+    assert compose["services"]["wickworks"]["image"] == WICKWORKS_IMAGE
+    assert rotator["volumes"] == [
+        "./data/shared/logs:/logs",
+        "./data/shared/terminals:/terminals",
+        "./scripts/rotate-logs.sh:/rotate.sh:ro",
+    ]

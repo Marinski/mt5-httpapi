@@ -183,7 +183,7 @@ JSON body:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `indicators` | yes | Non-empty object — wickworks indicator spec. Each entry maps an output key to either `true` (run with defaults) or a flat params object (e.g. `{"length": 20, "std": 2}`); add `"type": "<name>"` only when the output key differs from the indicator name (e.g. `{"rsi21": {"type": "rsi", "length": 21}}` to run a second RSI under a custom key). See the [wickworks indicator catalog](https://github.com/psyb0t/docker-wickworks#available-indicators) for the full list of types, params, and output shapes. |
-| `recentBars` | no | Currently **inert** in wickworks v0.3.0 — accepted by the request schema but unused (reserved for future signal-tagged outputs). To get fewer bars back, lower `count` on the query string or slice client-side. |
+| `recentBars` | no | Accepted for mt5-httpapi compatibility but not sent to Wickworks. To get fewer bars back, lower `count` on the query string or slice client-side. |
 
 The sidecar runs inside the mt5 container's net namespace with no published ports — only the mt5 process (and by extension this API) can reach it. Configure via `wickworks:` in `config.yaml` (defaults to `http://20.20.20.1:8000/`, the dockurr gateway IP seen from inside the Windows VM).
 

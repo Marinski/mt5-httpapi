@@ -72,6 +72,7 @@ fuckyeah.md
 # Per-run QA audit logs — never committed.
 .anustimes/
 .brutal_reviews/
+.pr-reviews/
 
 # Local orchestration scaffolding — never committed
 .plan-and-delegate/

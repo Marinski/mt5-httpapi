@@ -222,13 +222,12 @@ def get_rates(symbol):
 
 
 def _bars_to_wickworks(rates):
-    """MT5 bar shape -> wickworks bar shape (camelCase volume fields)."""
+    """Convert MT5 bars to Wickworks v0.7 canonical OHLCV bars."""
     return [{
         "time": broker_to_utc_seconds(r[0]),
         "open": float(r[1]), "high": float(r[2]),
         "low": float(r[3]), "close": float(r[4]),
-        "tickVolume": int(r[5]),
-        "realVolume": int(r[7]),
+        "volume": int(r[5]),
     } for r in rates]
 
 
@@ -296,9 +295,6 @@ def get_rates_ta(symbol):
         "bars": _bars_to_wickworks(rates),
         "indicators": indicators,
     }
-    if "recentBars" in body:
-        wickworks_payload["recentBars"] = body["recentBars"]
-
     ta_body, status, conn_err = _call_wickworks(wickworks_payload)
     if conn_err is not None:
         log.warning("wickworks call failed: %s", conn_err)

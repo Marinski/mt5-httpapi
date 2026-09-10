@@ -13,11 +13,59 @@
 set -eu
 
 LOG_DIR="${LOG_DIR:-/logs}"
+TERMINALS_DIR="${TERMINALS_DIR:-/terminals}"
 RETAIN_DAYS="${RETAIN_DAYS:-7}"
 INTERVAL="${INTERVAL:-3600}"
 
 log() {
     printf '[%s] [rotator] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+is_positive_integer() {
+    case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+
+    [ "$1" -gt 0 ]
+}
+
+prune_journal_dir() {
+    journal_dir=$1
+    cutoff=$2
+
+    [ -d "$journal_dir" ] || return 0
+
+    for journal in "$journal_dir"/????????.log; do
+        [ -f "$journal" ] || continue
+        journal_date="${journal##*/}"
+        journal_date="${journal_date%.log}"
+        case "$journal_date" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+        *) continue ;;
+        esac
+
+        if [ "$journal_date" -lt "$cutoff" ]; then
+            rm -f "$journal"
+            log "pruned terminal journal $journal"
+        fi
+    done
+}
+
+prune_terminal_journals() {
+    cutoff=$1
+
+    [ -d "$TERMINALS_DIR" ] || return 0
+
+    find "$TERMINALS_DIR" -type f -name terminal64.exe -print |
+        while IFS= read -r terminal_binary; do
+            terminal_dir="${terminal_binary%/terminal64.exe}"
+            prune_journal_dir "$terminal_dir/logs" "$cutoff"
+            prune_journal_dir "$terminal_dir/Tester/logs" "$cutoff"
+
+            for agent_journal_dir in "$terminal_dir"/Tester/Agent-*/logs; do
+                prune_journal_dir "$agent_journal_dir" "$cutoff"
+            done
+        done
 }
 
 rotate_once() {
@@ -56,9 +104,16 @@ rotate_once() {
             log "pruned $(basename "$old")"
         fi
     done
+
+    prune_terminal_journals "$cutoff"
 }
 
-log "starting (log_dir=$LOG_DIR retain_days=$RETAIN_DAYS interval=${INTERVAL}s)"
+if ! is_positive_integer "$RETAIN_DAYS"; then
+    log "RETAIN_DAYS must be a positive integer, got: $RETAIN_DAYS"
+    exit 1
+fi
+
+log "starting (log_dir=$LOG_DIR terminals_dir=$TERMINALS_DIR retain_days=$RETAIN_DAYS interval=${INTERVAL}s)"
 while true; do
     if ! rotate_once; then
         log "rotate_once failed (continuing)"

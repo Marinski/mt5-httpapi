@@ -339,7 +339,10 @@ def test_rates_ta_returns_bars_and_the_ta_payload(api_client, patch_handler, mon
 
     resp = api_client.post(
         f"/symbols/{SYMBOL}/rates/ta?timeframe=H1&count=200",
-        json={"indicators": {"rsi14": {"type": "rsi", "params": {"period": 14}}}},
+        json={
+            "indicators": {"rsi14": {"type": "rsi", "params": {"period": 14}}},
+            "recentBars": 10,
+        },
     )
 
     assert resp.status_code == 200
@@ -350,13 +353,12 @@ def test_rates_ta_returns_bars_and_the_ta_payload(api_client, patch_handler, mon
     assert body["ta"] is not None
     assert "rsi14" in body["ta"]
 
-    # The wickworks payload must use the camelCase bar shape from
-    # _bars_to_wickworks — exactly the translation a live-terminal test
-    # cannot inspect.
     first_bar = captured_payload["bars"][0]
-    assert "tickVolume" in first_bar
-    assert "realVolume" in first_bar
+    assert first_bar["volume"] == 100
+    assert "tickVolume" not in first_bar
+    assert "realVolume" not in first_bar
     assert "tick_volume" not in first_bar
+    assert "recentBars" not in captured_payload
 
 
 # ── tests/real/test_market_order.py ──────────────────────────────────────

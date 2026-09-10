@@ -8,6 +8,21 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.13.1]: 2026-09-10
+
+### Changed
+
+- Updated the Wickworks sidecar to v0.7.0. Technical-analysis requests now
+  use its canonical OHLCV `volume` field. The existing `recentBars` request
+  field remains accepted for compatibility and is not forwarded to Wickworks.
+
+### Fixed
+
+- The log rotator now prunes dated MT5 terminal, Tester, and Tester Agent
+  journals under `data/shared/terminals/`, using the same configurable
+  `RETAIN_DAYS` window as shared API logs. It leaves expert logs, MetaEditor
+  logs, reports, and backtest jobs alone.
+
 ## [v4.13.0]: 2026-09-10
 
 ### Added

@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pytest
 
+from .host_shared_fixture import create_host_shared_fixture_dir
+
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -175,13 +177,13 @@ def _wait(predicate, timeout, what):
 
 
 @pytest.fixture(scope="module")
-def stack(tmp_path_factory):
+def stack():
     _require_compose()
-    project_dir = tmp_path_factory.mktemp("vm-watchdog-lifecycle")
-    _write_project(project_dir)
-    # The operator's shell: MT5_PROJECT_DIR exported for THIS command only.
-    _compose(project_dir, "up", "-d", "--build", env_extra={"MT5_PROJECT_DIR": str(project_dir)})
+    project_dir = create_host_shared_fixture_dir(REPO_ROOT, "vm-watchdog-lifecycle")
     try:
+        _write_project(project_dir)
+        # The operator's shell: MT5_PROJECT_DIR exported for THIS command only.
+        _compose(project_dir, "up", "-d", "--build", env_extra={"MT5_PROJECT_DIR": str(project_dir)})
         _wait(lambda: _inspect("vm", "{{.State.Health.Status}}") == "healthy", STARTUP_TIMEOUT_SECONDS, "vm healthy")
         _wait(lambda: "scoped to compose project" in _watchdog_logs(), STARTUP_TIMEOUT_SECONDS, "watchdog started")
         yield project_dir
@@ -209,6 +211,7 @@ def stack(tmp_path_factory):
             project_dir, "down", "-v", "--remove-orphans", "--rmi", "local",
             env_extra={"MT5_PROJECT_DIR": str(project_dir)},
         )
+        shutil.rmtree(project_dir)
 
 
 def test_the_watchdog_starts_clean_against_the_real_wiring(stack):

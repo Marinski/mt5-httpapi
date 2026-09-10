@@ -1,8 +1,8 @@
 """Wickworks TA passthrough — POST /symbols/<symbol>/rates/ta with an
 indicators spec returns bars + computed TA.
 
-Wickworks v0.3.x is primitives-only (rsi/ema/sma/atr/macd/bbands/stoch/adx/...)
-— no divergences/signals/divTrends. If wickworks is down the endpoint
+Wickworks is primitives-only (rsi/ema/sma/atr/macd/bbands/stoch/adx/...)
+with no divergences, signals, or divTrends. If wickworks is down the endpoint
 returns 502; we skip rather than fail in that case.
 """
 from __future__ import annotations

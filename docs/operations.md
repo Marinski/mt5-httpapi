@@ -475,11 +475,17 @@ Inside the VM's shared folder (`data/shared/logs/`):
 
 ### Rotation
 
-A small alpine sidecar (`log-rotator`) rotates every `*.log` in `data/shared/logs/` daily and prunes archives older than 7 days. Naming: `full.log` → `full.log.YYYYMMDD` (yesterday's date) at the next post-midnight wakeup. Idempotent, hourly check loop, no cron daemon needed.
+A small alpine sidecar (`log-rotator`) rotates every `*.log` in
+`data/shared/logs/` daily and prunes archives older than 7 days. It also deletes
+dated journals older than the same retention period from each installed
+terminal's `logs/`, `Tester/logs/`, and `Tester/Agent-*/logs/` directories. It
+does not touch MQL5 expert logs, MetaEditor logs, reports, or backtest jobs.
+Naming: `full.log` → `full.log.YYYYMMDD` (yesterday's date) at the next
+post-midnight wakeup. Idempotent, hourly check loop, no cron daemon needed.
 
 Override defaults via `docker-compose.yml`:
 
-- `RETAIN_DAYS` (default `7`) - how many days of archives to keep
+- `RETAIN_DAYS` (default `7`) - how many days of rotated shared logs and dated MT5 journals to keep
 - `INTERVAL` (default `3600`) - how often to check for the day boundary, in seconds
 
 Truncation is in-place (the archive is a copy, then the original is `:>`-truncated) so the Python API's open log handle keeps writing without reopening.

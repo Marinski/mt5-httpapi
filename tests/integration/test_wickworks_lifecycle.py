@@ -47,6 +47,8 @@ from pathlib import Path
 
 import pytest
 
+from .host_shared_fixture import create_host_shared_fixture_dir
+
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -202,16 +204,17 @@ def _inspect(service, tmpl):
 
 
 @pytest.fixture(scope="module")
-def lifecycle(tmp_path_factory):
+def lifecycle():
     _require_compose()
-    project_dir = tmp_path_factory.mktemp("wickworks-lifecycle")
-    _write_project(project_dir)
-    _compose(project_dir, PROJECT, "up", "-d")
+    project_dir = create_host_shared_fixture_dir(REPO_ROOT, "wickworks-lifecycle")
     try:
+        _write_project(project_dir)
+        _compose(project_dir, PROJECT, "up", "-d")
         _wait_healthy()
         yield project_dir
     finally:
         _compose(project_dir, PROJECT, "down", "-v", "--remove-orphans", check=False)
+        shutil.rmtree(project_dir)
 
 
 def test_sidecar_starts_healthy(lifecycle):

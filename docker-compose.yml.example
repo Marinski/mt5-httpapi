@@ -53,7 +53,7 @@ services:
   # a restart, but the sidecar's netns does not (verified in the lifecycle
   # integration test). See scripts/wickworks-healthcheck.py.
   wickworks:
-    image: psyb0t/wickworks:v0.3.1
+    image: psyb0t/wickworks:v0.7.0@sha256:2973055356e8879a4a9a4025422d5835e18235eece898c780fa61ed563c43590
     restart: unless-stopped
     network_mode: "service:mt5"
     environment:
@@ -75,7 +75,8 @@ services:
       - mt5
 
   # Daily log rotator. Rotates data/shared/logs/*.log to *.log.YYYYMMDD
-  # at the day boundary and prunes archives older than RETAIN_DAYS.
+  # at the day boundary and prunes those archives plus dated MT5 terminal,
+  # Tester, and Tester Agent journals older than RETAIN_DAYS.
   # Truncate-in-place so the Python API's open log handles keep working
   # without reopening. Hourly check, idempotent (keyed on yesterday's
   # archive existing).
@@ -84,10 +85,12 @@ services:
     restart: unless-stopped
     environment:
       LOG_DIR: /logs
+      TERMINALS_DIR: /terminals
       RETAIN_DAYS: "7"
       INTERVAL: "3600"
     volumes:
       - ./data/shared/logs:/logs
+      - ./data/shared/terminals:/terminals
       - ./scripts/rotate-logs.sh:/rotate.sh:ro
     command: ["sh", "/rotate.sh"]
 
