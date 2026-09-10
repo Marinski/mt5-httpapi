@@ -1,0 +1,30 @@
+# VM crash watchdog.
+#
+# Recovery is a coordinated compose recreate (VM + the sidecars sharing its
+# netns), not a Docker-API restart — see scripts/vm-watchdog.py for why a
+# restart strands the sidecar. That means this image needs the docker CLI and
+# the compose plugin, plus bash and PyYAML for scripts/recreate-vm.sh, which is
+# the helper it shells out to.
+#
+# Pinned by digest, not tag: this container mounts the Docker socket, which is
+# root-equivalent on the host, and a moving tag would hand that to whatever the
+# registry serves tomorrow. The digest is the multi-arch OCI index for
+# python:3.12-alpine, so it still resolves per-platform.
+# To update: docker buildx imagetools inspect python:3.12-alpine
+FROM python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31
+
+# docker-cli-compose provides `docker compose`; recreate-vm.sh is bash and
+# parses the compose file with PyYAML. The Python dependency is pinned by
+# version and hash (see requirements-watchdog.txt for why); --require-hashes
+# makes pip fail closed on anything not in that file.
+COPY requirements-watchdog.txt /tmp/requirements-watchdog.txt
+RUN apk add --no-cache bash docker-cli docker-cli-compose \
+    && pip install --no-cache-dir --require-hashes -r /tmp/requirements-watchdog.txt \
+    && rm /tmp/requirements-watchdog.txt
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# The watchdog script and recreate-vm.sh stay bind-mounted by compose rather
+# than baked in, so a fix to either is a container restart and not a rebuild.
+CMD ["python", "-u", "/vm-watchdog.py"]

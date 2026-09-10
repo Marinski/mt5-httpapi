@@ -120,6 +120,48 @@ services:
       - ./scripts/rotate-logs.sh:/rotate.sh:ro
     command: ["sh", "/rotate.sh"]
 
+  # VM crash watchdog. dockurr/windows keeps the container up while the
+  # Windows guest may have crashed internally, so restart: unless-stopped
+  # never fires and every terminal API in that VM stays dead. This sidecar
+  # polls Docker health through the socket and restarts a VM only after its
+  # health has stayed unhealthy for a sustained FailingStreak, with
+  # exponential backoff and bounded retries; state lives on a named volume.
+  # Runs inside the compose project (docker compose up -d), no host cron.
+  # See scripts/vm-watchdog.py.
+  vm-watchdog:
+    # Needs the docker CLI + compose plugin to run scripts/recreate-vm.sh, so
+    # it is built rather than pulled. The base image is digest-pinned inside
+    # the Dockerfile (this container mounts the Docker socket).
+    build:
+      context: .
+      dockerfile: Dockerfile.watchdog
+    restart: unless-stopped
+    command: ["python", "-u", "/vm-watchdog.py"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/vm-watchdog.py:/vm-watchdog.py:ro
+      - vm-watchdog-state:/state
+      # The project itself, at the SAME absolute path the host uses. Compose
+      # resolves the relative bind mounts in this file client-side, so a
+      # different path in here would rewrite every mount to somewhere that
+      # does not exist on the host. run.sh exports MT5_PROJECT_DIR; the
+      # watchdog refuses to act (and says so at startup) if it is unset.
+      - ${MT5_PROJECT_DIR:?MT5_PROJECT_DIR must be the absolute host path of this project (run.sh exports it; otherwise set it in .env)}:${MT5_PROJECT_DIR}:ro
+    environment:
+      WATCHDOG_STATE_DIR: /state
+      WATCHDOG_PROJECT_DIR: ${MT5_PROJECT_DIR}
+      WATCHDOG_RECREATE_SCRIPT: ${MT5_PROJECT_DIR}/scripts/recreate-vm.sh
+      # The helper the watchdog runs calls `docker compose`, which interpolates
+      # ${MT5_PROJECT_DIR:?} in THIS file again. The watchdog sets it in the
+      # helper's environment itself; it is handed through here as well so a
+      # human running `docker compose exec vm-watchdog …/recreate-vm.sh` gets
+      # the same environment the watchdog uses.
+      MT5_PROJECT_DIR: ${MT5_PROJECT_DIR}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 {% if enable_mcpunifier|default(true) %}
   # Unified MCP endpoint. One MCP session that reaches every terminal, with
   # broker/account as tool parameters, instead of one endpoint per terminal.
@@ -229,3 +271,8 @@ services:
   #     - NET_RAW
   #   depends_on:
   #     - nginx
+
+volumes:
+  # Persistent per-container watchdog state (last restart, attempts,
+  # healthy-since) so backoff survives the watchdog's own restarts.
+  vm-watchdog-state:

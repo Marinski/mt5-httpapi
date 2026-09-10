@@ -1,0 +1,16 @@
+# Dependencies baked into the vm-watchdog image (Dockerfile.watchdog).
+#
+# Pinned by version AND hash: this image mounts the root-equivalent Docker
+# socket, so "whatever PyPI serves today" is not an acceptable input to it -
+# same argument as the base-image digest pin above it. --require-hashes makes
+# pip refuse anything not listed here, including a compromised or yanked
+# re-upload under the same version number.
+#
+# The three hashes are the two musllinux cp312 wheels (python:3.12-alpine on
+# x86_64 / aarch64) plus the sdist as a fallback for any other platform.
+# To update: pick the new version on https://pypi.org/pypi/PyYAML/json and
+# copy the sha256 digests for the matching artifacts.
+pyyaml==6.0.2 \
+    --hash=sha256:8b9c7197f7cb2738065c481a0461e50ad02f18c78cd75775628afb4d7137fb3b \
+    --hash=sha256:0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48 \
+    --hash=sha256:d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e
