@@ -84,6 +84,18 @@ def _write_project(project_dir: Path) -> None:
     image: {SIDECAR_IMAGE}
     command: ["sleep", "infinity"]
     network_mode: "service:vm"
+    # An ORPHAN-AWARE healthcheck, which is what the watchdog's sidecar sweep
+    # requires and what scripts/wickworks-healthcheck.py does for real (it
+    # probes the owner's gateway services). A check that only looked at itself
+    # would stay green inside a dead namespace, which is exactly how the
+    # 2026-09-07 fault hid for two days. Losing eth0 is the same signal here.
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -e /sys/class/net/eth0"]
+      interval: 1s
+      timeout: 1s
+      retries: 1
+      start_period: 0s
+    stop_grace_period: 3s
     depends_on:
       - vm
 
@@ -104,6 +116,7 @@ def _write_project(project_dir: Path) -> None:
       WATCHDOG_RECREATE_SCRIPT: {project_dir}/scripts/recreate-vm.sh
       WATCHDOG_COMPOSE_PROJECT: {PROJECT}
       WATCHDOG_IMAGE_FILTER: python
+      WATCHDOG_WATCH_SIDECARS: "1"
       WATCHDOG_MIN_FAILING_STREAK: "3"
       WATCHDOG_INTERVAL_SECONDS: "1"
       WATCHDOG_BACKOFF_ATTEMPTS: "5"
@@ -181,6 +194,17 @@ def stack(tmp_path_factory):
         # container is worse than a noisy teardown.
         # --rmi local: the per-project build tag would otherwise accumulate one
         # dangling watchdog image per run.
+        #
+        # The watchdog is stopped FIRST, and this is not tidiness. It holds the
+        # Docker socket and acts once a second; `down` removes containers one
+        # at a time, so a sweep landing between the sidecar's removal and the
+        # watchdog's own recreates the sidecar behind compose's back and leaves
+        # it running after the project is gone. Observed, once, exactly that
+        # way. Best-effort: if this fails, `down` below still has to run.
+        _compose(
+            project_dir, "stop", "-t", "3", "vm-watchdog",
+            env_extra={"MT5_PROJECT_DIR": str(project_dir)}, check=False,
+        )
         _compose(
             project_dir, "down", "-v", "--remove-orphans", "--rmi", "local",
             env_extra={"MT5_PROJECT_DIR": str(project_dir)},
@@ -262,3 +286,93 @@ def test_a_persistently_unhealthy_vm_is_recreated_with_its_sidecar(stack):
     # One attempt, recorded under the stable compose identity (not the old id).
     state = _compose(stack, "exec", "-T", "vm-watchdog", "cat", f"/state/{PROJECT}.vm.json").stdout
     assert '"attempts": 1' in state, state
+
+
+def test_a_sidecar_stranded_by_an_owner_only_restart_is_rejoined_alone(stack):
+    """The 2026-09-07 production fault, reproduced and then recovered.
+
+    Restarting the OWNER alone is what `restart: unless-stopped` does after a
+    clean guest shutdown, and it is the case no VM ever reports: the container
+    id does not change, so the binding still names a running, healthy VM, while
+    Docker has built it a brand new namespace and left the sidecar in the old
+    one. Only the sidecar's own healthcheck can see that.
+
+    What is asserted afterwards is the whole point of the change: the SIDECAR
+    has a new container, bound to the same VM, with a working eth0, and the VM
+    container was never touched.
+    """
+    vm_before = _inspect("vm", "{{.Id}}")
+    sidecar_before = _inspect("sidecar", "{{.Id}}")
+    _wait(lambda: _inspect("sidecar", "{{.State.Health.Status}}") == "healthy",
+          STARTUP_TIMEOUT_SECONDS, "sidecar healthy to begin with")
+
+    # Strand it, the way production did. Note: a RESTART, not a recreate.
+    subprocess.run(["docker", "restart", "-t", "3", _name("vm")], capture_output=True, check=True)
+
+    # The fault is real before the watchdog gets to it, and invisible from the
+    # VM: same owner id, VM healthy, sidecar with no network.
+    _wait(lambda: _inspect("vm", "{{.State.Health.Status}}") == "healthy",
+          STARTUP_TIMEOUT_SECONDS, "the restarted vm healthy")
+    assert _inspect("vm", "{{.Id}}") == vm_before, "a restart must not change the container id"
+    assert _inspect("sidecar", "{{.Id}}") == sidecar_before, "the sidecar was not recreated"
+    assert _inspect("sidecar", "{{.HostConfig.NetworkMode}}") == f"container:{vm_before}"
+    assert "eth0" not in _exec("sidecar", "ls", "/sys/class/net").stdout.split()
+
+    _wait(
+        lambda: "recreated sidecar sidecar" in _watchdog_logs(),
+        RECOVERY_TIMEOUT_SECONDS,
+        "the watchdog to recreate the stranded sidecar",
+    )
+    log = _watchdog_logs()
+    assert "sidecar recreate failed" not in log, log
+
+    _wait(lambda: _inspect("sidecar", "{{.Id}}") != sidecar_before, 60, "a new sidecar container")
+    interfaces = _exec("sidecar", "ls", "/sys/class/net").stdout.split()
+    assert "eth0" in interfaces, f"sidecar still has no eth0: {interfaces}"
+    _wait(lambda: _inspect("sidecar", "{{.State.Health.Status}}") == "healthy", 60, "sidecar healthy")
+
+    # Only the sidecar. The VM the terminals live in was not restarted, not
+    # recreated and not stopped.
+    assert _inspect("vm", "{{.Id}}") == vm_before, "the vm must not have been touched"
+    assert _inspect("vm", "{{.State.Health.Status}}") == "healthy"
+
+    # Recorded under the sidecar's own compose identity, with its own budget.
+    state = _compose(stack, "exec", "-T", "vm-watchdog", "cat", f"/state/{PROJECT}.sidecar.json").stdout
+    assert '"attempts": 1' in state, state
+
+
+def test_a_sidecar_under_a_stopped_owner_is_left_running(stack):
+    """The counter-review's sharpest finding, pinned against a real daemon.
+
+    `/containers/json` lists running containers only, so a stopped owner looks
+    exactly like a destroyed one. Acting on that would run the helper, which
+    stops the sidecar first and then cannot start it again - nothing to join -
+    leaving it STOPPED and invisible to both sweeps forever. An operator
+    stopping a VM for maintenance must not lose the sidecar with it.
+    """
+    sidecar_before = _inspect("sidecar", "{{.Id}}")
+    subprocess.run(["docker", "stop", "-t", "3", _name("vm")], capture_output=True, check=True)
+    try:
+        marker = len(_watchdog_logs())
+        # Several sweeps at WATCHDOG_INTERVAL_SECONDS=1, well past the streak.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            assert _inspect("sidecar", "{{.State.Status}}") == "running", (
+                "the sidecar was stopped while its owner was merely stopped\n"
+                + _watchdog_logs()[marker:]
+            )
+            time.sleep(1)
+        assert _inspect("sidecar", "{{.Id}}") == sidecar_before
+        assert "recreated sidecar" not in _watchdog_logs()[marker:]
+    finally:
+        # Starting the owner again gives it a FRESH namespace, which strands
+        # the sidecar exactly as the previous test did - so hand the recreate
+        # to compose here rather than leaving a live orphan for the watchdog to
+        # act on while the fixture is tearing the project down.
+        subprocess.run(["docker", "start", _name("vm")], capture_output=True, check=True)
+        _wait(lambda: _inspect("vm", "{{.State.Health.Status}}") == "healthy",
+              STARTUP_TIMEOUT_SECONDS, "the vm healthy again")
+        _compose(stack, "up", "-d", "--force-recreate", "--no-deps", "sidecar",
+                 env_extra={"MT5_PROJECT_DIR": str(stack)})
+        _wait(lambda: _inspect("sidecar", "{{.State.Health.Status}}") == "healthy",
+              STARTUP_TIMEOUT_SECONDS, "the sidecar healthy again")
