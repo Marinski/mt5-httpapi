@@ -10,6 +10,7 @@ asserting on the emitted port list.
 """
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -196,7 +197,7 @@ def test_group_file_ignores_comments_and_blank_lines(awk_prog, tmp_path):
 # These run the whole script with a stub `curl` on PATH, so they exercise the
 # real verdict logic rather than the awk filter alone.
 
-def _run_healthcheck(tmp_path, config, curl_body, grace=None):
+def _run_healthcheck(tmp_path, config, curl_body, grace=None, state_dir=None):
     """Run healthcheck.sh with a fake curl that emits `curl_body` on stdout.
 
     The stub mimics curl closely enough for the script: it writes what a real
@@ -224,7 +225,7 @@ def _run_healthcheck(tmp_path, config, curl_body, grace=None):
         "HEALTHCHECK_CONFIG": str(config),
         "HEALTHCHECK_VM_GROUP": str(tmp_path / "no-such-group.txt"),
         "HEALTHCHECK_LEASES": str(tmp_path / "no-such-leases"),
-        "HEALTHCHECK_STATE_DIR": str(tmp_path / "slow-state"),
+        "HEALTHCHECK_STATE_DIR": state_dir or str(tmp_path / "slow-state"),
     }
     if grace is not None:
         env["HEALTHCHECK_SLOW_GRACE"] = str(grace)
@@ -392,3 +393,296 @@ def test_a_leading_zero_grace_does_not_trip_on_the_first_probe(tmp_path):
     first = _run_healthcheck(tmp_path, config, SLOW, grace="00")
     assert first.returncode == 0, first.stdout + first.stderr
     assert "hung" not in first.stdout
+
+
+# ── Probe budget: many terminals must not blow the Docker healthcheck timeout ─
+
+
+MANY_TERMINALS = [
+    {"broker": "darwinex", "account": "live", "instance": chr(c), "port": str(6600 + i)}
+    for i, c in enumerate(range(ord("a"), ord("a") + 24))
+]
+
+
+def _run_with_slow_curl(tmp_path, config, delay, timeout):
+    """Run the script with a curl stub that sleeps, mimicking an unanswered probe.
+
+    Every probe here hangs for `delay` seconds and then reports a refused
+    connection, which is what a terminal that has not finished starting looks
+    like.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        f"sleep {delay}\n"
+        "printf '000 0.000000'\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HEALTHCHECK_CONFIG": str(config),
+        "HEALTHCHECK_VM_GROUP": str(tmp_path / "no-such-group.txt"),
+        "HEALTHCHECK_LEASES": str(tmp_path / "no-such-leases"),
+        # Without this the run reads and writes the REAL /tmp/healthcheck-slow,
+        # so it is neither hermetic nor safe to run in parallel with itself.
+        "HEALTHCHECK_STATE_DIR": str(tmp_path / "slow-state"),
+    }
+    started = time.monotonic()
+    result = subprocess.run(
+        ["sh", str(HEALTHCHECK_PATH)],
+        capture_output=True, text=True, env=env, timeout=timeout,
+    )
+    return result, time.monotonic() - started
+
+
+def test_24_slow_terminals_still_finish_inside_the_docker_timeout(tmp_path):
+    """The bug this parallelisation exists for.
+
+    24 terminals x a 3s probe ran sequentially is 72s, well past the compose
+    `timeout: 30s`. Docker killed the check and recorded "Health check exceeded
+    timeout" — which a supervisor cannot tell apart from a dead VM, so it
+    restarted VMs that were merely still starting.
+
+    Fanned out, the wall clock is one probe, not twenty-four of them.
+    """
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    result, elapsed = _run_with_slow_curl(tmp_path, config, delay=2, timeout=60)
+
+    assert elapsed < 20, f"probes did not run concurrently: {elapsed:.1f}s for 24 ports"
+    # And the verdict must still be the useful one, naming the ports.
+    assert result.returncode == 1
+    assert "DOWN ports:" in result.stdout
+
+
+def test_concurrent_probes_still_report_every_dead_port(tmp_path):
+    """Fanning out must not lose results: all 24 ports belong in the verdict."""
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    result = _run_healthcheck(tmp_path, config, "000 0.000000")
+
+    assert result.returncode == 1
+    reported = {tok for tok in result.stdout.split() if tok.isdigit()}
+    # The SET, not the count: a duplicated port plus a dropped one would pass a
+    # length check while losing a real result.
+    assert reported == {t["port"] for t in MANY_TERMINALS}, result.stdout
+
+
+def test_the_hung_bound_survives_the_fan_out(tmp_path):
+    """The two changes meet here.
+
+    The bound was written against the sequential probe loop, where the counter
+    lived in the parent shell's own flow. Fanned out, each port's counter is
+    incremented inside its own background job, so this pins that all 24 still
+    count independently and all 24 reach the bound together - a hung API is a
+    hung API whether the VM carries one terminal or two dozen.
+    """
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    first, second, third = _slow_runs(tmp_path, config, 3, grace=3)
+
+    assert first.returncode == 0 and second.returncode == 0
+    assert third.returncode == 1, third.stdout + third.stderr
+    assert "hung" in third.stdout
+    for terminal in MANY_TERMINALS:
+        assert terminal["port"] in third.stdout
+
+
+def test_a_slow_state_write_failure_is_reported_once_not_per_port(tmp_path):
+    """With the counters unwritable every one of the 24 jobs fails to write.
+    The parent learns it from a marker rather than from a variable it cannot
+    see across the fork, and says so once."""
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    (tmp_path / "not-a-dir").write_text("", encoding="utf-8")
+    result = _run_healthcheck(
+        tmp_path, config, SLOW, grace=3, state_dir=str(tmp_path / "not-a-dir")
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("slow-state unwritable") == 1
+
+
+def test_a_port_configured_twice_is_probed_once(tmp_path):
+    """A duplicated port is a misconfiguration, and it used to be acted on
+    twice.
+
+    Fanned out that is two background jobs writing one verdict file and one
+    slow counter, which is a real race; sequentially it was worse in a quieter
+    way, because the counter was incremented twice per check and the hung bound
+    fired at half the configured grace. Emitting each port once removes both.
+    """
+    duplicated = [
+        {"broker": "darwinex", "account": "live", "instance": "a", "port": "6001"},
+        {"broker": "darwinex", "account": "live", "instance": "b", "port": "6001"},
+    ]
+    config = _write_config(tmp_path, duplicated)
+
+    first, second = _slow_runs(tmp_path, config, 2, grace=3)
+    assert first.returncode == 0 and second.returncode == 0
+    # Named once in the port list...
+    listed = first.stdout.split("all ports up:")[1]
+    assert listed.split().count("6001") == 1, first.stdout
+    # ...and counted once, so the grace still means what it says: the third
+    # consecutive silent check is the one that trips it, not the second.
+    assert (tmp_path / "slow-state" / "6001").read_text().strip() == "2"
+    third = _run_healthcheck(tmp_path, config, SLOW, grace=3)
+    assert third.returncode == 1 and "hung" in third.stdout
+
+
+# ── What the fan-out must not break ──────────────────────────────────────────
+
+
+def _run_with_scripted_curl(tmp_path, config, body, extra_env=None):
+    """Run the script with a curl stub that can answer differently per port."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    curl = bindir / "curl"
+    curl.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    curl.chmod(0o755)
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HEALTHCHECK_CONFIG": str(config),
+        "HEALTHCHECK_VM_GROUP": str(tmp_path / "no-such-group.txt"),
+        "HEALTHCHECK_LEASES": str(tmp_path / "no-such-leases"),
+        "HEALTHCHECK_STATE_DIR": str(tmp_path / "slow-state"),
+    }
+    env.update(extra_env or {})
+    return subprocess.run(
+        ["sh", str(HEALTHCHECK_PATH)], capture_output=True, text=True, env=env, timeout=120
+    )
+
+
+def test_each_port_gets_its_own_verdict(tmp_path):
+    """Routing. Every other test feeds one uniform reply to all 24 ports, so a
+    job that reported another port's result would sail through them.
+
+    Here the reply depends on the port: one third answer, one third accept but
+    stay silent, one third refuse - and each third must land in its own bucket.
+    """
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    result = _run_with_scripted_curl(
+        tmp_path, config,
+        # $@ ends with the URL; take the port out of it.
+        'url=$(eval echo \\$$#)\n'
+        'port=${url##*:}; port=${port%%/*}\n'
+        'case $((port % 3)) in\n'
+        '  0) printf "%s" "200 0.000181"; exit 0 ;;\n'
+        '  1) printf "%s" "000 0.001204"; exit 7 ;;\n'
+        '  2) printf "%s" "000 0.000000"; exit 7 ;;\n'
+        'esac\n',
+    )
+    ports = [int(t["port"]) for t in MANY_TERMINALS]
+    reported_dead = {int(t) for t in result.stdout.split("(")[0].split() if t.isdigit()}
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert reported_dead == {p for p in ports if p % 3 == 2}, result.stdout
+    # And the slow third is counted as slow, not lost and not called dead.
+    slow_counted = sorted(int(f.name) for f in (tmp_path / "slow-state").iterdir())
+    assert slow_counted == sorted(p for p in ports if p % 3 == 1)
+
+
+def test_a_job_that_dies_before_reporting_is_a_down_port(tmp_path):
+    """Fail closed, which is the documented rule and had no test.
+
+    The parent reads each job's exit status; a job killed outright returns
+    128+signal, which is not one of the verdicts. That must read as down, and
+    must not touch the ports beside it.
+    """
+    config = _write_config(tmp_path, MANY_TERMINALS[:3])
+    doomed = MANY_TERMINALS[1]["port"]
+    result = _run_with_scripted_curl(
+        tmp_path, config,
+        'url=$(eval echo \\$$#)\n'
+        'port=${url##*:}; port=${port%%/*}\n'
+        f'if [ "$port" = "{doomed}" ]; then kill -9 $PPID; sleep 5; fi\n'
+        'printf "%s" "200 0.000181"\n',
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert doomed in result.stdout
+    for survivor in (MANY_TERMINALS[0]["port"], MANY_TERMINALS[2]["port"]):
+        assert survivor not in result.stdout.split("(")[0], result.stdout
+
+
+def test_a_disk_that_cannot_be_written_never_becomes_a_port_outage(tmp_path):
+    """The reason the verdicts travel in exit statuses rather than in files.
+
+    A per-port verdict file under a `mktemp -d` looks obviously fine until the
+    disk is full: the write fails, the parent finds no verdict, and its
+    fail-closed rule reports every terminal on the VM as down. Ten of those and
+    the watchdog recreates a perfectly healthy VM, killing two dozen running
+    backtests, because /tmp filled up. The sequential loop this replaced had no
+    disk dependency and neither may this.
+    """
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("", encoding="utf-8")
+
+    result = _run_with_scripted_curl(
+        tmp_path, config, 'printf "%s" "200 0.000181"\n',
+        # Every place a scratch-file implementation could put its verdicts:
+        # a `mktemp -d` honours TMPDIR, a fixed root honours HEALTHCHECK_RUN_DIR,
+        # and the slow counters use HEALTHCHECK_STATE_DIR. All three point at a
+        # FILE, so any attempt to create a directory there fails - as root too,
+        # which a permission bit would not achieve.
+        extra_env={
+            "HEALTHCHECK_STATE_DIR": str(blocked),
+            "HEALTHCHECK_RUN_DIR": str(blocked),
+            "TMPDIR": str(blocked),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ok all ports up" in result.stdout
+    for terminal in MANY_TERMINALS:
+        assert terminal["port"] in result.stdout
+
+
+def test_the_check_leaves_nothing_behind_to_clean_up(tmp_path):
+    """No scratch directory means nothing can leak when Docker SIGKILLs a check
+    that overran its timeout - and no trap is needed to promise otherwise."""
+    config = _write_config(tmp_path, MANY_TERMINALS)
+    before = set(Path("/tmp").glob("tmp.*"))
+    result = _run_healthcheck(tmp_path, config, "200 0.000181")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert set(Path("/tmp").glob("tmp.*")) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bin", "config.yaml", "slow-state"]
+
+
+def test_curl_is_invoked_the_way_its_output_is_parsed(tmp_path):
+    """The stub curl ignores its arguments, so every other test here passes
+    against a script that calls curl wrongly.
+
+    It bit for real: a `-w` format that reached curl with literal quotes around
+    it produced output whose first field was not a status code, and the script
+    reported every port on both live VMs as `slow but listening` while all 24
+    terminals were answering 401. Nothing in this file could see it.
+
+    So: capture the real argument vector and assert the two things the parser
+    depends on - the exact `-w` format, and a bounded `--max-time`.
+    """
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    argv = tmp_path / "argv.txt"
+    result = _run_with_scripted_curl(
+        tmp_path, config,
+        f'for a in "$@"; do printf "%s\\n" "$a" >>"{argv}"; done\n'
+        'printf "%s" "200 0.000181"\n',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    args = argv.read_text(encoding="utf-8").splitlines()
+    assert "%{http_code} %{time_connect}" in args, args
+    assert "--max-time" in args, args
+    assert args[args.index("--max-time") + 1] == "3", args
+    assert any(a.endswith(":6001/ping") for a in args), args
+
+
+def test_a_real_http_status_from_the_stub_reads_as_up_not_slow(tmp_path):
+    """The symptom the mangled format produced, pinned from the other side: an
+    answering port must land in `all ports up` and NOT in `slow but listening`,
+    and a 401 from the auth layer counts as answering."""
+    config = _write_config(tmp_path, ONE_TERMINAL)
+    for body in ("200 0.000181", "401 0.000379", "503 0.000112"):
+        result = _run_healthcheck(tmp_path, config, body)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "slow but listening" not in result.stdout, (body, result.stdout)
+        assert result.stdout.startswith("ok all ports up:"), (body, result.stdout)

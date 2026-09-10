@@ -369,6 +369,49 @@ This complements the in-VM `MT5AutoReboot` scheduled task, which reboots on a
 fixed timer and can interrupt long-running backtests; operators who disable that
 task still get crash recovery from the watchdog.
 
+### The probe budget: why the ports are probed concurrently
+
+The check's wall clock used to be the **product** of the probe timeout and the
+terminal count. `PROBE_TIMEOUT_SECONDS` is 3, so a 24-terminal VM whose ports
+are all silent took 72s against the compose `timeout: 30s`. Docker killed the
+check before it reached a verdict and recorded `Health check exceeded timeout
+(30s)` instead of naming the ports that were down.
+
+That failure is worse than useless, because a supervisor cannot tell it apart
+from a dead VM. It is also most likely exactly when it hurts most: every port
+is slow while the VM is still booting its terminals, so a VM that was merely
+starting looked identical to one that had crashed.
+
+The probes therefore run **concurrently**, one background job per port. The
+worst case is now one port's **host walk**, not one probe: each job still tries
+the leased VM IP and then the two fallback hosts in turn, so the bound is
+`PROBE_TIMEOUT_SECONDS × 3` = 9s, independent of terminal count. Keep three
+times `PROBE_TIMEOUT_SECONDS` comfortably under the compose `timeout:` — at 10s
+it would be 30s and the original bug is back.
+
+**The verdicts travel in exit statuses, not in files, and that is the whole
+point.** The obvious implementation gives each job a verdict file under a
+`mktemp -d`. It is fine until the disk is full: the write fails, the parent
+finds no verdict, and its fail-closed rule reports *every* terminal on the VM
+as down. Ten of those in a row and the watchdog recreates a perfectly healthy
+VM, destroying two dozen running backtests, because `/tmp` filled up. The
+sequential loop this replaced needed no disk, and neither does this: each job
+returns `0` up, `1` busy, `2` hung, `3` dead, `4` busy-but-the-counter-could-
+not-be-written, and the parent reads them back with `wait` in port order.
+Anything else — a job killed by a signal — is unknown and fails closed as down.
+
+The only thing here that touches the disk is the slow/hung counter, and it is
+deliberately off the path that decides up or down: if the counters cannot be
+written the bound is off for that check and the verdict says
+`[slow-state unwritable: hung detection off]`, while every port's liveness is
+still whatever its probe actually found.
+
+A port configured twice is probed once. Two terminals on one port is a
+misconfiguration rather than a topology, and acting on it twice meant two jobs
+writing one counter — and, before the fan-out, a hung bound that fired at half
+the configured grace. `config_helper.py` is where a duplicated port should be
+reported; a healthcheck's job is liveness.
+
 ## Logs
 
 Inside the VM's shared folder (`data/shared/logs/`):
