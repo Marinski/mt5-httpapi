@@ -33,9 +33,33 @@ Restart policy is stateful, not a fixed cooldown:
   ``WATCHDOG_RESET_SECONDS``, so a VM that recovered then crashed again later
   gets a fresh budget instead of inheriting old failures.
 
-Scope is strict: only containers in this Compose project running the
-``dockurr/windows`` image are considered, so nginx, wickworks, the log rotator
+Scope is strict: for the VM sweep, only containers in this Compose project
+running the ``dockurr/windows`` image are considered, so nginx, the log rotator
 and the watchdog itself are never touched.
+
+A SECOND, narrower sweep covers the netns sidecars, because nothing watched
+them and the way they fail leaves the VM sweep with nothing to act on. Docker
+resolves ``network_mode: service:<vm>`` ONCE, at the sidecar's own start, into
+an immutable ``NetworkMode=container:<owner-id>``, and it builds a fresh
+namespace whenever the owner starts. So restarting the owner strands the
+sidecar - the id is unchanged, the namespace is not - and the VM comes back
+perfectly healthy. It happened here: mt5 exited cleanly on 2026-09-07 and
+``unless-stopped`` restarted it, and its wickworks sidecar spent two days in a
+dead namespace, 502-ing every ``/rates/ta`` call, with a 13,700-long failing
+streak nothing was looking at.
+
+The streak is the point. The sidecar's OWN healthcheck saw the fault the whole
+time; there was simply no supervisor for it. So this sweep applies the same
+rule as the VM sweep - Docker health, past the same streak - and recreates the
+sidecar ALONE, which is the documented repair and what an operator does by
+hand. It acts only while the owner is a RUNNING, HEALTHY VM of this project:
+an unhealthy owner belongs to the VM sweep, which recreates owner and sidecars
+together, and an owner that is not running cannot be joined at all, so
+recreating a sidecar under it would only leave it stopped.
+
+That makes an orphan-aware sidecar healthcheck a requirement, not a nicety -
+see ``scripts/wickworks-healthcheck.py``. Disable the sweep entirely with
+``WATCHDOG_WATCH_SIDECARS=0``.
 
 Recovery is a COORDINATED RECREATE, not a restart. A sidecar sharing the VM's
 network namespace (``network_mode: service:<vm>``, i.e. wickworks) resolves
@@ -153,6 +177,26 @@ def _env_int_list(name: str, default: str, minimum: int) -> list[int]:
     return values
 
 
+def _env_bool(name: str, default: str) -> bool:
+    """A yes/no switch, tolerant of how people actually write them.
+
+    Anything unrecognised is a recorded error and falls back to the default
+    rather than being read as false: silently disabling a recovery path
+    because someone wrote ``WATCHDOG_WATCH_SIDECARS=no thanks`` is the failure
+    mode this whole file is written against.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = default
+    text = raw.strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    CONFIG_ERRORS.append(f"{name}={raw!r} is not a boolean (1/0, true/false, yes/no, on/off)")
+    return default.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _env_str(name: str, default: str, *, allow_empty: bool) -> str:
     raw = os.environ.get(name)
     if raw is None:
@@ -186,6 +230,14 @@ MIN_FAILING_STREAK = _env_int("WATCHDOG_MIN_FAILING_STREAK", "10", minimum=1)
 # than treated as "no filter": a blank value would make every container in the
 # project a restart candidate - including any database sharing it.
 IMAGE_FILTER = _env_str("WATCHDOG_IMAGE_FILTER", "dockurr/windows", allow_empty=False)
+
+# Also watch the sidecars that share a VM's network namespace
+# (``network_mode: service:<vm>``). Restarting the owner strands them - same
+# container id, fresh namespace - while the VM itself comes back healthy, so
+# the VM sweep has nothing to act on. Their own healthchecks see it; nothing
+# was watching those. On this farm that cost two days of dead TA calls on
+# 2026-09-07. Set to 0 to restore the VM-only scope.
+WATCH_SIDECARS = _env_bool("WATCHDOG_WATCH_SIDECARS", "1")
 
 # Exponential backoff per attempt: first restart after 5m, then 15m, then 1h.
 BACKOFF_ATTEMPTS = _env_int_list("WATCHDOG_BACKOFF_ATTEMPTS", "300,900,3600", minimum=1)
@@ -477,6 +529,57 @@ def _scoped_containers(client: DockerClient, project: str) -> list[dict]:
     return out
 
 
+def _netns_sidecars(client: DockerClient, project: str) -> list[tuple[dict, str]]:
+    """(container, owner-id) for every project container bound to another's netns.
+
+    ``network_mode: service:<vm>`` shows up on the running container as
+    ``HostConfig.NetworkMode = "container:<owner-id>"`` - the resolved id, not
+    the service name, because Docker resolves it once at start and never
+    revisits it. That resolved id is exactly what makes the binding breakable,
+    and it is what this returns alongside the container.
+
+    Read from the container list rather than a per-container inspect: the list
+    already carries HostConfig, and one API call per sweep beats one per
+    container on a host with two dozen of them.
+    """
+    out: list[tuple[dict, str]] = []
+    for c in client.list_containers():
+        if _is_self(c.get("Id") or ""):
+            continue
+        labels = c.get("Labels", {}) or {}
+        if project and labels.get("com.docker.compose.project") != project:
+            continue
+        mode = ((c.get("HostConfig") or {}) or {}).get("NetworkMode") or ""
+        if not mode.startswith("container:"):
+            continue
+        # An empty token after `container:` needs no guard here: it matches no
+        # VM in _owner_container, which is where every owner reference is
+        # resolved, so there is one place that decides and not two.
+        out.append((c, mode.split(":", 1)[1]))
+    return out
+
+
+def _owner_container(token: str, vms: list[dict]) -> dict | None:
+    """The VM container a sidecar's ``container:<token>`` names, if any.
+
+    ``network_mode: service:<vm>`` always resolves to a full id (verified
+    against the daemon), but ``container:<name>`` and ``container:<short-id>``
+    are both legal to write by hand and are NOT normalised anywhere. Matching
+    only full ids would leave such a sidecar permanently unrecognised, and this
+    file's rule is that an unrecognised container is left alone - so it would
+    silently go unwatched while the docs promised otherwise.
+    """
+    for vm in vms:
+        cid = vm.get("Id") or ""
+        if not cid:
+            continue
+        if cid == token or (len(token) >= 12 and cid.startswith(token)):
+            return vm
+        if any(name.lstrip("/") == token for name in (vm.get("Names") or [])):
+            return vm
+    return None
+
+
 def _health_of(client: DockerClient, container_id: str) -> tuple[str, int]:
     """(State.Health.Status, State.Health.FailingStreak) or ('none', 0)."""
     info = client.inspect(container_id)
@@ -487,10 +590,18 @@ def _health_of(client: DockerClient, container_id: str) -> tuple[str, int]:
 
 
 def sweep_once(client: DockerClient, project: str, dry_run: bool = False, now: int | None = None) -> int:
-    """One pass over the project's VM containers. Returns recovery count."""
+    """One pass over the project's VMs, then over their netns sidecars.
+
+    Returns the recovery count across both.
+    """
     now = now if now is not None else int(time.time())
     restarted = 0
-    for c in _scoped_containers(client, project):
+    # What the VM pass saw, for the sidecar pass that follows: a sidecar's fate
+    # depends on its owner's, and re-deriving it there would be a second,
+    # divergent opinion about the same containers in the same tick.
+    vm_health: dict[str, str] = {}
+    vms = _scoped_containers(client, project)
+    for c in vms:
         cid = c["Id"]
         name = (c.get("Names") or ["?"])[0]
         try:
@@ -504,6 +615,7 @@ def sweep_once(client: DockerClient, project: str, dry_run: bool = False, now: i
         # by every successful recovery - the replacement arrived with a fresh
         # id, loaded a fresh record, and the attempt cap and backoff never
         # carried across the one boundary they exist to police.
+        vm_health[cid] = status
         service = (c.get("Labels") or {}).get("com.docker.compose.service")
         if not service:
             log(f"{name}: no compose service label; cannot recreate, skipping")
@@ -534,7 +646,107 @@ def sweep_once(client: DockerClient, project: str, dry_run: bool = False, now: i
             restarted += 1
         elif action == "give_up":
             log(f"GIVING UP on {name} after {working.get('attempts', 0)} attempts - {reason}")
+
+    if WATCH_SIDECARS:
+        restarted += sweep_sidecars_once(
+            client, project, vms, vm_health, dry_run=dry_run, now=now
+        )
     return restarted
+
+
+def sweep_sidecars_once(
+    client: DockerClient,
+    project: str,
+    vms: list[dict],
+    vm_health: dict[str, str],
+    *,
+    dry_run: bool = False,
+    now: int | None = None,
+) -> int:
+    """One pass over the sidecars sharing a VM's netns. Returns recovery count.
+
+    Same rule as the VM sweep - Docker health, past the streak - applied to a
+    container class the VM sweep is not allowed to touch. What changes is only
+    WHOSE health decides and WHAT gets recreated:
+
+    - Owner is a running project VM and healthy: the sidecar's own health
+      decides, and a recovery recreates the SIDECAR ALONE.
+    - Owner is a running project VM and not healthy: left alone. Recreating
+      owner and sidecars together is the only thing that repairs the binding,
+      and that is the VM sweep's job; acting here would race it and rebind to
+      a namespace about to be replaced.
+    - Owner is not a running project VM: left alone, and this is load-bearing
+      rather than a default. A stopped owner is INDISTINGUISHABLE from a
+      destroyed one over ``/containers/json``, which lists running containers
+      only. Recreating a sidecar under a stopped owner cannot work - the
+      helper stops it first, then ``up --no-deps`` cannot join a namespace
+      that is not there - so the sidecar would be left STOPPED, invisible to
+      both sweeps, and never retried. ``docker compose stop mt5`` for
+      maintenance must not cost the sidecar.
+
+    This means a netns sidecar has to have a healthcheck that can SEE the
+    orphaning. A check that only probes loopback stays green inside a dead
+    namespace and nothing here will ever fire. ``scripts/wickworks-healthcheck.py``
+    is the worked example: it probes the owner's gateway services, which
+    disappear the moment the namespace does.
+    """
+    now = now if now is not None else int(time.time())
+    recovered = 0
+    for c, owner_token in _netns_sidecars(client, project):
+        name = (c.get("Names") or ["?"])[0]
+        service = (c.get("Labels") or {}).get("com.docker.compose.service")
+        if not service:
+            log(f"{name}: no compose service label; cannot recreate, skipping")
+            continue
+
+        owner = _owner_container(owner_token, vms)
+        if owner is None:
+            # Not one of this project's running VMs: somebody else's netns, a
+            # sidecar chained to a sidecar, or an owner that is stopped. None
+            # of those is this sweep's to act on.
+            continue
+        owner_id = owner.get("Id") or ""
+        # Only a healthy owner. An unhealthy one belongs to the VM sweep,
+        # which recreates it together with its sidecars - the only operation
+        # that repairs the binding - and acting here would race that. This
+        # also covers the owner the VM sweep recreated moments ago in this
+        # same pass: a recreate only ever follows an UNHEALTHY observation, so
+        # such an owner can never be `healthy` here.
+        if vm_health.get(owner_id) != "healthy":
+            continue
+
+        try:
+            status, streak = _health_of(client, c["Id"])
+        except (RuntimeError, OSError) as exc:
+            log(f"{name}: cannot inspect health ({exc}); skipping")
+            continue
+
+        state = load_state(state_key(project, service))
+        working = copy.deepcopy(state) if dry_run else state
+        action, reason = decide(working, status, streak, now)
+        if not dry_run:
+            save_state(state_key(project, service), working)
+        if action == "restart":
+            # The sidecar ALONE. recreate-vm.sh discovers the netns sidecars of
+            # the service it is given, and nothing declares
+            # `network_mode: service:<sidecar>`, so naming one here recreates
+            # exactly one container - the documented repair, which does not
+            # disturb the VM or the terminals running inside it.
+            if dry_run:
+                log(f"DRY-RUN: would recreate sidecar {service} - {reason}")
+            else:
+                try:
+                    recreate_vm(service, project)
+                    log(f"recreated sidecar {service} - {reason}")
+                except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                    log(f"{name}: sidecar recreate failed ({exc}); state kept for backoff")
+            recovered += 1
+        elif action == "give_up":
+            log(
+                f"GIVING UP on sidecar {name} after {working.get('attempts', 0)} "
+                f"attempts - {reason}"
+            )
+    return recovered
 
 
 def validate_config() -> list[str]:

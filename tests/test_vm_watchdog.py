@@ -992,3 +992,337 @@ def test_main_resolves_its_own_full_id_before_the_first_sweep(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         wd.main()
     assert wd.SELF_FULL_ID == "e" * 64
+
+
+# ── Netns sidecars ───────────────────────────────────────────────────────────
+#
+# 2026-09-07, in production: mt5's container exited cleanly, `unless-stopped`
+# restarted it, and its wickworks sidecar spent two days in the namespace that
+# restart destroyed - 13,700 failed healthchecks, every /rates/ta call 502-ing,
+# while the VM reported healthy the whole time. A restart KEEPS the container
+# id, so nothing about the binding looked wrong from the outside; only the
+# sidecar's own healthcheck saw it, and nothing was watching that.
+
+
+def _sidecar(cid, name, owner, service=None):
+    """A container bound to another container's network namespace.
+
+    `HostConfig.NetworkMode` carries the OWNER as compose resolved it, which
+    for `network_mode: service:<vm>` is always a full id.
+    """
+    return {
+        "Id": cid,
+        "Names": [f"/{name}"],
+        "Image": "wickworks:latest",
+        "HostConfig": {"NetworkMode": f"container:{owner}"},
+        "Labels": {
+            "com.docker.compose.project": "mt5-httpapi",
+            "com.docker.compose.service": service or name,
+        },
+    }
+
+
+def _vm_container(cid="vm-id", service="mt5"):
+    return _container(cid, service, labels={
+        "com.docker.compose.project": "mt5-httpapi",
+        "com.docker.compose.service": service,
+    })
+
+
+def _pair(vm_status, vm_streak, side_status, side_streak, owner=None, extra=None):
+    vm = _vm_container()
+    containers = [vm, _sidecar("side-id", "wickworks", owner or vm["Id"])] + (extra or [])
+    return _FakeClient(containers, health={
+        "vm-id": _health(vm_status, vm_streak),
+        "side-id": _health(side_status, side_streak),
+    })
+
+
+def _sweep(wd, client, now=1_000_000, **kw):
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wd, "log", kw.pop("log", lambda *a, **k: None))
+        return wd.sweep_once(client, "mt5-httpapi", now=now, **kw)
+
+
+def test_an_unhealthy_sidecar_under_a_healthy_owner_is_recreated_alone(wd, tmp_path, recorder):
+    """The 2026-09-07 recovery. Only the sidecar is named, so the VM and the
+    twelve terminals inside it are not disturbed."""
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("healthy", 0, "unhealthy", 13700)) == 1
+    assert recorder.services == ["wickworks"]
+
+
+def test_the_streak_gate_applies_to_a_sidecar_too(wd, tmp_path, recorder):
+    """One bad poll is not an outage, here as anywhere else."""
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("healthy", 0, "unhealthy", 3)) == 0
+    assert recorder.services == []
+    assert _sweep(wd, _pair("healthy", 0, "unhealthy", 10), now=1_000_001) == 1
+    assert recorder.services == ["wickworks"]
+
+
+def test_a_healthy_sidecar_is_never_touched(wd, tmp_path, recorder):
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("healthy", 0, "healthy", 0)) == 0
+    assert recorder.services == []
+
+
+def test_a_sidecar_whose_healthcheck_cannot_see_the_orphaning_is_not_recovered(wd, tmp_path, recorder):
+    """Documented limitation, pinned so it cannot be mistaken for a bug later.
+
+    A netns sidecar whose check only probes loopback stays green inside a dead
+    namespace, and health is this daemon's only source of truth. The fix is an
+    orphan-aware check on the sidecar (see scripts/wickworks-healthcheck.py),
+    not a structural guess here: over `/containers/json`, which lists running
+    containers only, a stopped owner and a destroyed one are the same thing.
+    """
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("healthy", 0, "healthy", 0)) == 0
+    assert recorder.services == []
+
+
+def test_an_unhealthy_owner_below_the_streak_still_keeps_the_sweep_out(wd, tmp_path, recorder):
+    """The guard that matters, isolated.
+
+    Counter-review finding: the earlier test set the owner to a streak past the
+    threshold, so the VM sweep recreated it in the same tick and the sidecar
+    was skipped by the ALREADY-RECREATED check - deleting the owner-health
+    guard changed nothing. Here the owner is unhealthy BELOW the threshold, so
+    the VM sweep decides `wait` and this guard is the only thing standing
+    between a sick VM and a sidecar recreate that would race its recovery.
+    """
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("unhealthy", 2, "unhealthy", 99)) == 0
+    assert recorder.services == []
+
+
+def test_a_starting_owner_keeps_the_sweep_out(wd, tmp_path, recorder):
+    """A VM that is still booting has sidecars that cannot be healthy yet."""
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("starting", 0, "unhealthy", 99)) == 0
+    assert recorder.services == []
+
+
+def test_an_owner_recreated_this_tick_is_not_followed_by_a_sidecar_recreate(wd, tmp_path, recorder):
+    """The VM sweep recreates owner AND sidecars together, so a second recreate
+    would stop a container that was just rebuilt - and charge it an attempt."""
+    wd.STATE_DIR = str(tmp_path)
+    assert _sweep(wd, _pair("unhealthy", 99, "unhealthy", 99)) == 1
+    assert recorder.services == ["mt5"]
+
+
+def test_a_sidecar_under_a_stopped_owner_is_left_alone(wd, tmp_path, recorder):
+    """`docker compose stop mt5` for maintenance must not cost the sidecar.
+
+    Counter-review finding, and the sharpest one: `/containers/json` lists
+    RUNNING containers only, so a stopped owner and a destroyed one are
+    indistinguishable. Acting on "not running" would have run the helper, which
+    stops the sidecar first and then cannot start it again (nothing to join),
+    leaving it stopped - and a stopped container is invisible to both sweeps,
+    so it would never be retried.
+    """
+    wd.STATE_DIR = str(tmp_path)
+    stopped_owner_gone = _FakeClient(
+        [_sidecar("side-id", "wickworks", "an-owner-that-is-not-running")],
+        health={"side-id": _health("unhealthy", 99)},
+    )
+    assert _sweep(wd, stopped_owner_gone) == 0
+    assert recorder.services == []
+    assert not list(tmp_path.glob("*.json")), "no budget may be spent either"
+
+
+def test_a_sidecar_of_something_that_is_not_our_vm_is_not_touched(wd, tmp_path, recorder):
+    """Its owner is up; it is simply not a VM this watchdog manages."""
+    wd.STATE_DIR = str(tmp_path)
+    client = _FakeClient(
+        [
+            _container("db-id", "postgres", image="postgres:16", labels={
+                "com.docker.compose.project": "mt5-httpapi",
+                "com.docker.compose.service": "postgres",
+            }),
+            _sidecar("side-id", "exporter", "db-id"),
+        ],
+        health={"db-id": _health("healthy", 0), "side-id": _health("unhealthy", 99)},
+    )
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+def test_a_sidecar_chained_to_another_sidecar_is_not_touched(wd, tmp_path, recorder):
+    """`network_mode: service:<sidecar>` is legal, and its owner is not a VM."""
+    wd.STATE_DIR = str(tmp_path)
+    client = _pair("healthy", 0, "healthy", 0, extra=[_sidecar("chain-id", "sniffer", "side-id")])
+    client.health["chain-id"] = _health("unhealthy", 99)
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+def test_a_sidecar_in_another_project_is_not_touched(wd, tmp_path, recorder):
+    wd.STATE_DIR = str(tmp_path)
+    foreign = _sidecar("side-id", "wickworks", "vm-id")
+    foreign["Labels"]["com.docker.compose.project"] = "someone-else"
+    client = _FakeClient([_vm_container(), foreign], health={
+        "vm-id": _health("healthy", 0), "side-id": _health("unhealthy", 99)})
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+def test_the_watchdog_never_selects_itself_in_the_sidecar_sweep(wd, tmp_path, recorder):
+    """The VM sweep excludes self by id; so must this one. A watchdog with
+    `network_mode` set that recreates itself mid-sweep is not a recovery path.
+
+    The id here is deliberately NOT the fake client's magic self-inspect id:
+    with that one the health lookup is short-circuited, the sweep sees
+    `health=none`, and the test passes whether the exclusion exists or not.
+    """
+    wd.STATE_DIR = str(tmp_path)
+    wd.SELF_FULL_ID = "the-watchdogs-own-id"
+    me = _sidecar("the-watchdogs-own-id", "vm-watchdog", "vm-id", service="vm-watchdog")
+    client = _FakeClient([_vm_container(), me], health={
+        "vm-id": _health("healthy", 0), "the-watchdogs-own-id": _health("unhealthy", 99)})
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+def test_a_sidecar_with_no_compose_service_label_is_reported_not_recreated(wd, tmp_path, recorder):
+    """A recreate names a compose service. Without one there is nothing to
+    name, and guessing would be worse than saying so."""
+    wd.STATE_DIR = str(tmp_path)
+    unlabelled = _sidecar("side-id", "wickworks", "vm-id")
+    del unlabelled["Labels"]["com.docker.compose.service"]
+    client = _FakeClient([_vm_container(), unlabelled], health={
+        "vm-id": _health("healthy", 0), "side-id": _health("unhealthy", 99)})
+    logs = []
+    assert _sweep(wd, client, log=logs.append) == 0
+    assert recorder.services == []
+    assert any("no compose service label" in line for line in logs), logs
+
+
+def test_a_network_mode_with_no_owner_is_ignored(wd, tmp_path, recorder):
+    """`container:` with nothing after it names nobody."""
+    wd.STATE_DIR = str(tmp_path)
+    client = _FakeClient([_vm_container(), _sidecar("side-id", "wickworks", "")], health={
+        "vm-id": _health("healthy", 0), "side-id": _health("unhealthy", 99)})
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+def test_a_container_with_no_host_config_is_ignored(wd, tmp_path, recorder):
+    """Docker's container list is not a contract this daemon controls, and a
+    KeyError here would kill the sweep and with it every VM's recovery."""
+    wd.STATE_DIR = str(tmp_path)
+    bare = {"Id": "bare-id", "Names": ["/odd"], "Image": "whatever:1",
+            "Labels": {"com.docker.compose.project": "mt5-httpapi",
+                       "com.docker.compose.service": "odd"}}
+    client = _FakeClient([_vm_container(), bare], health={
+        "vm-id": _health("healthy", 0), "bare-id": _health("unhealthy", 99)})
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+# A real container id, and the 12-character short form Docker prints for it.
+VM_LONG_ID = "8e796ef18a62c4f8650fc3f5c9407a3f198f5f2e3b771a5b5a3ab3fbe04e7bdb"
+VM_SHORT_ID = VM_LONG_ID[:12]
+
+
+@pytest.mark.parametrize("token", [VM_LONG_ID, VM_SHORT_ID, "mt5"])
+def test_a_hand_written_owner_reference_is_still_recognised(wd, tmp_path, recorder, token):
+    """`container:<name>` and `container:<short-id>` are legal to write by hand
+    and are not normalised anywhere. Matching full ids only would leave such a
+    sidecar unwatched while the docs promised otherwise."""
+    wd.STATE_DIR = str(tmp_path)
+    vm = _vm_container(cid=VM_LONG_ID)
+    client = _FakeClient([vm, _sidecar("side-id", "wickworks", token)], health={
+        VM_LONG_ID: _health("healthy", 0), "side-id": _health("unhealthy", 99)})
+    assert _sweep(wd, client) == 1
+    assert recorder.services == ["wickworks"]
+
+
+def test_a_prefix_shorter_than_a_short_id_is_not_a_match(wd, tmp_path, recorder):
+    """Prefix matching is bounded at Docker's own 12-character short id. `v`
+    must not select a VM, or a stray token would rebind an unrelated sidecar."""
+    wd.STATE_DIR = str(tmp_path)
+    client = _FakeClient(
+        [_vm_container(cid=VM_LONG_ID), _sidecar("side-id", "wickworks", VM_LONG_ID[:4])],
+        health={VM_LONG_ID: _health("healthy", 0), "side-id": _health("unhealthy", 99)})
+    assert _sweep(wd, client) == 0
+    assert recorder.services == []
+
+
+def test_the_sidecar_sweep_can_be_switched_off(wd, tmp_path, recorder):
+    wd.STATE_DIR = str(tmp_path)
+    wd.WATCH_SIDECARS = False
+    assert _sweep(wd, _pair("healthy", 0, "unhealthy", 99)) == 0
+    assert recorder.services == []
+
+
+def test_a_dry_run_recreates_no_sidecar_and_spends_no_budget(wd, tmp_path, recorder):
+    wd.STATE_DIR = str(tmp_path)
+    _sweep(wd, _pair("healthy", 0, "unhealthy", 99), dry_run=True)
+    assert recorder.services == []
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_the_sidecar_attempt_cap_is_the_same_one_the_vms_get(wd, tmp_path, recorder):
+    """A sidecar that cannot be repaired must stop being retried, like any
+    other container - the shared decide() is what guarantees it."""
+    wd.STATE_DIR = str(tmp_path)
+    logs = []
+    for step in range(6):
+        # Far enough apart that backoff never masks the cap.
+        _sweep(wd, _pair("healthy", 0, "unhealthy", 99),
+               now=1_000_000 + step * 100_000, log=logs.append)
+    assert len(recorder.services) == wd.MAX_ATTEMPTS
+    assert any("GIVING UP on sidecar" in line for line in logs), logs
+
+
+def test_a_sidecar_and_its_vm_keep_separate_budgets(wd, tmp_path, recorder):
+    """State is keyed by compose service, so a sidecar's attempts can never
+    exhaust the VM's budget or the other way round."""
+    wd.STATE_DIR = str(tmp_path)
+    _sweep(wd, _pair("healthy", 0, "unhealthy", 99))
+    written = sorted(f.name for f in tmp_path.glob("*.json"))
+    assert written == ["mt5-httpapi.mt5.json", "mt5-httpapi.wickworks.json"], written
+    import json as _json
+    vm_state = _json.loads((tmp_path / "mt5-httpapi.mt5.json").read_text())
+    side_state = _json.loads((tmp_path / "mt5-httpapi.wickworks.json").read_text())
+    assert vm_state["attempts"] == 0, "the healthy VM must not be charged"
+    assert side_state["attempts"] == 1
+
+
+def test_every_sidecar_of_one_owner_is_considered(wd, tmp_path, recorder):
+    """A VM may carry more than one netns sidecar, and they fail independently."""
+    wd.STATE_DIR = str(tmp_path)
+    client = _pair("healthy", 0, "unhealthy", 99,
+                   extra=[_sidecar("side-b", "tailscale", "vm-id")])
+    client.health["side-b"] = _health("unhealthy", 99)
+    assert _sweep(wd, client) == 2
+    assert sorted(recorder.services) == ["tailscale", "wickworks"]
+
+
+# ── _env_bool ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True), (" 1 ", True),
+    ("0", False), ("false", False), ("FALSE", False), ("no", False), ("off", False),
+])
+def test_env_bool_accepts_the_spellings_people_actually_write(monkeypatch, raw, expected):
+    monkeypatch.setenv("WATCHDOG_WATCH_SIDECARS", raw)
+    module = _load()
+    assert module.WATCH_SIDECARS is expected
+    assert not [e for e in module.CONFIG_ERRORS if "WATCH_SIDECARS" in e]
+
+
+@pytest.mark.parametrize("raw", ["banana", "", "2", "no thanks"])
+def test_env_bool_refuses_to_guess(monkeypatch, raw):
+    """Unrecognised is a recorded error, so validate_config() refuses to start.
+
+    NOT silently false: quietly disabling a recovery path because someone typed
+    it wrong is the failure mode this whole file is written against. Same call
+    _env_int already makes for its own junk.
+    """
+    monkeypatch.setenv("WATCHDOG_WATCH_SIDECARS", raw)
+    module = _load()
+    assert [e for e in module.CONFIG_ERRORS if "WATCHDOG_WATCH_SIDECARS" in e]
+    assert any("WATCHDOG_WATCH_SIDECARS" in p for p in module.validate_config())

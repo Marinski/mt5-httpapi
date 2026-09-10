@@ -272,8 +272,9 @@ Behavior:
 
 - Scopes itself to this Compose project (`com.docker.compose.project`,
   discovered from its own container labels) and to the `dockurr/windows` VM
-  image, so it only ever recovers the VM containers — never nginx, wickworks,
-  the log rotator, or other sidecars.
+  image, so the VM sweep only ever recovers the VM containers — never nginx,
+  the log rotator, or other containers. The netns sidecars get a second,
+  narrower sweep of their own (below).
 - **Recovers by recreating the VM together with its netns sidecars**, by
   running `scripts/recreate-vm.sh <service>` — the same helper documented above
   and covered by `tests/integration/test_wickworks_lifecycle.py`. It does not
@@ -311,11 +312,60 @@ Behavior:
 - `WATCHDOG_DRY_RUN=1` (or `--dry-run`) prints what it would do without
   touching any container.
 
+#### The stranded sidecar, which no VM ever reports
+
+A sidecar joins its VM with `network_mode: service:<vm>`. Docker resolves that
+**once**, at the sidecar's own start, into an immutable
+`NetworkMode=container:<owner-id>`, and it builds a **fresh namespace every
+time the owner starts**. So restarting the owner strands the sidecar: the
+container id is unchanged, so nothing about the binding looks wrong, but the
+namespace it points at is gone. The VM comes back perfectly healthy and the VM
+sweep has nothing to act on.
+
+That is not hypothetical here. On 2026-09-07 the `mt5` container exited cleanly
+and `restart: unless-stopped` brought it back; its `wickworks` sidecar sat in
+the dead namespace for **two days** — `FailingStreak` 13,700, only `lo` left,
+every `/rates/ta` call 502-ing — with the VM green throughout.
+
+The failing streak is the point. The sidecar's own healthcheck saw the fault
+the whole time. There was simply no supervisor for it. So a second sweep
+follows the VM sweep and applies the **same rule** — Docker health, past the
+same `WATCHDOG_MIN_FAILING_STREAK`, the same backoff and attempt cap — to the
+netns sidecars:
+
+- It recreates **that sidecar alone** (`recreate-vm.sh <sidecar>` →
+  `up -d --force-recreate --no-deps`). Nothing declares
+  `network_mode: service:<sidecar>`, so the helper's own discovery returns
+  nothing for it and exactly one container is touched. That is the documented
+  repair, it is what an operator does by hand, and it leaves the VM and its
+  terminals alone.
+- It acts **only while the owner is a running, healthy VM of this project**. An
+  unhealthy owner belongs to the VM sweep, which recreates owner and sidecars
+  together. An owner that is not running is left alone too, and that one is
+  load-bearing rather than a default: `/containers/json` lists running
+  containers only, so a **stopped** owner is indistinguishable from a destroyed
+  one. Recreating a sidecar under a stopped owner cannot work — the helper
+  stops it first, then `up --no-deps` has no namespace to join — so the sidecar
+  would end up stopped, invisible to both sweeps, and never retried. A
+  `docker compose stop mt5` for maintenance must not cost you the sidecar.
+- `container:<name>` and `container:<short-id>` are legal to write by hand and
+  are not normalised anywhere, so the owner reference is matched by full id, by
+  a 12-character-or-longer prefix, and by container name.
+
+**This makes an orphan-aware sidecar healthcheck a requirement, not a nicety.**
+A check that only probes loopback stays green inside a dead namespace, and
+Docker health is this daemon's only source of truth, so nothing here will ever
+fire for it. `scripts/wickworks-healthcheck.py` is the worked example: it
+probes the owner's gateway services, which disappear the moment the namespace
+does.
+
+Set `WATCHDOG_WATCH_SIDECARS=0` to restore the VM-only scope.
+
 Environment overrides: `WATCHDOG_INTERVAL_SECONDS`, `WATCHDOG_MIN_FAILING_STREAK`,
-`WATCHDOG_IMAGE_FILTER`, `WATCHDOG_BACKOFF_ATTEMPTS`, `WATCHDOG_MAX_ATTEMPTS`,
-`WATCHDOG_RESET_SECONDS`, `WATCHDOG_COMPOSE_PROJECT`, `WATCHDOG_STATE_DIR`,
-`WATCHDOG_DOCKER_SOCKET`, `WATCHDOG_DRY_RUN`, `WATCHDOG_PROJECT_DIR`,
-`WATCHDOG_RECREATE_SCRIPT`, `WATCHDOG_RECREATE_TIMEOUT`.
+`WATCHDOG_IMAGE_FILTER`, `WATCHDOG_WATCH_SIDECARS`, `WATCHDOG_BACKOFF_ATTEMPTS`,
+`WATCHDOG_MAX_ATTEMPTS`, `WATCHDOG_RESET_SECONDS`, `WATCHDOG_COMPOSE_PROJECT`,
+`WATCHDOG_STATE_DIR`, `WATCHDOG_DOCKER_SOCKET`, `WATCHDOG_DRY_RUN`,
+`WATCHDOG_PROJECT_DIR`, `WATCHDOG_RECREATE_SCRIPT`, `WATCHDOG_RECREATE_TIMEOUT`.
 
 `WATCHDOG_PROJECT_DIR` is the **host** path of this project, and the compose
 service mounts the project through at that same absolute path. Compose resolves
