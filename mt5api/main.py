@@ -10,6 +10,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from mt5api.backtest import jobs as backtest_jobs
 from mt5api.config import ACCOUNT, API_TOKEN, BROKER, HOST, INSTANCE, MODE, PORT
+from mt5api.handlers import compile as compile_handler
 from mt5api.logger import log
 from mt5api.mcp_server import build_mcp_server
 from mt5api.monitor import start_monitor
@@ -221,6 +222,12 @@ def main():
         name="backtest-cleanup",
         daemon=True,
     ).start()
+
+    # Absorbs MetaEditor's cold load before a real caller meets it. Self-gating:
+    # no-op unless a local compile cache is configured, delayed until the VM has
+    # finished launching terminals, and claimed once per VM so N API processes
+    # do not each launch their own MetaEditor.
+    compile_handler.start_warmup()
 
     log.info(
         "HTTP API listening on %s:%d (waitress, threads=%d, conn_limit=%d, max_queue_depth=%d)",

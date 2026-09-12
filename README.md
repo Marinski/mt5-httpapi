@@ -125,6 +125,7 @@ The old README became a massive wall of API shit, so the details now live in sep
 | Place/close shit and inspect orders, positions, and history | [Trading and history API](docs/trading-and-history.md) |
 | Run Strategy Tester jobs and get the artifacts back | [Backtesting](docs/backtesting.md) |
 | Throw giant parameter sweeps at the Strategy Tester | [Backtest optimization](docs/backtest-optimization.md) |
+| Turn MQL5 source into an `.ex5` without touching MetaEditor | [Compiling MQL5](docs/compiling.md) |
 | Wire the MCP endpoints into your agent of choice | [MCP and agent integrations](docs/mcp-and-agents.md) |
 | Copy working curl and Go examples instead of guessing | [Clients and examples](docs/clients-and-examples.md) |
 | Operate the bastard: Make targets, ports, remote access, concurrency, and logs | [Operations](docs/operations.md) |
