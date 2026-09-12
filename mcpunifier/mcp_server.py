@@ -39,6 +39,7 @@ _ROUTE_CATALOG: tuple[tuple[str, str], ...] = (
     ("POST", "/terminal/restart"),
     ("GET", "/account"),
     ("GET", "/symbols"),
+    ("POST", "/symbols/import"),
     ("GET", "/symbols/<symbol>"),
     ("GET", "/symbols/<symbol>/tick"),
     ("GET", "/symbols/<symbol>/rates"),

@@ -66,6 +66,85 @@ accounts:
 #   See docs/multi-vm-setup.md for multi-VM setup.
 # symbol_suffix: optional broker-specific suffix appended to [Tester].Symbol
 #   when missing. Examples: "p", ".p", "-mini". Use "" for no suffix.
+#   Most brokers suffix only part of their book — Eightcap Global has 56
+#   suffixed FX pairs (EURUSD.i) and 785 bare metals/indices/crypto (XAUUSD,
+#   ASX200) — so the suffix is skipped for any symbol the broker carries bare
+#   and does NOT carry suffixed. That check needs a symbol list, which a
+#   backtest-mode terminal cannot fetch (no SDK attached), so it reads the
+#   cache at <terminal>/mt5api-symbols.json. Until that cache exists the
+#   suffix is appended unconditionally, as it always was.
+#
+#   Priming the cache, by mode:
+#     mode: live      — GET /<broker>/<account>/symbols writes it as a side
+#                       effect of the unfiltered listing. Nothing else to do.
+#     mode: backtest  — GET /symbols is REFUSED with 409 there: it would
+#                       attach the SDK, spawn terminal64.exe and hold the
+#                       tester's single-instance data-dir lock, leaving the
+#                       next backtest run with an empty report. Prime it with
+#                       POST /symbols/import instead, which touches no SDK:
+#
+#     curl -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
+#       -H 'Content-Type: application/json' \
+#       -d '{"symbols": ["EURUSD", "GBPUSD", "XAUUSD"]}' \
+#       http://127.0.0.1:8888/<broker>/<account>/symbols/import
+#
+#   Source that list from a live terminal on the SAME broker/account —
+#   `curl $MT5_API_URL/symbols` against it returns exactly the JSON array
+#   this endpoint accepts under the "symbols" key — or from the broker's own
+#   symbol documentation.
+#
+#   The cache is trusted for symbol_cache_max_age (default 7d, also
+#   SYMBOL_CACHE_MAX_AGE in the environment); past that it counts as absent
+#   again — refresh it the same way you primed it — so a broker moving a
+#   symbol between bare and suffixed cannot be papered over by a years-old
+#   list.
+#
+# symbol_cache_max_age is read at the TOP LEVEL of this file, not per
+# terminal — it applies to every terminal. Uncomment it here, at the same
+# indentation as `terminals:` below; setting it inside a terminal entry is
+# silently ignored.
+# symbol_cache_max_age: "7d"
+
+# Per-request caps on POST /symbols/import. Also read at the TOP LEVEL, and
+# also settable in the environment under the uppercase name. Each is clamped to
+# a minimum of 1 rather than raising, so a typo here cannot take the only
+# priming path a backtest terminal has offline.
+#
+# symbol_import_max_body_bytes (default 2097152, 2 MiB) — an oversized body is
+#   refused with 413 from its declared Content-Length, before any of it is
+#   parsed. A request with no Content-Length at all (chunked) is refused with
+#   411. Sized to admit the largest legitimate payload, which is the count cap
+#   times the length cap plus JSON quoting (~1.4 MB).
+# symbol_import_max_symbols (default 20000) — maximum entries in the 'symbols'
+#   array, counted before deduplication; over the cap is a 400. No MT5 broker
+#   publishes anything close: the widest books seen here are low thousands.
+# symbol_import_max_symbol_length (default 64) — maximum characters per symbol,
+#   measured on the NORMALIZED (whitespace-stripped) name; over the cap is a
+#   400. MT5 itself caps a symbol name at 31 characters, so this is double the
+#   platform's own limit.
+# symbol_import_max_body_bytes: 2097152
+# symbol_import_max_symbols: 20000
+# symbol_import_max_symbol_length: 64
+
+# Global per-request body caps, applied to EVERY route in one place
+# (server.py's before_request hook) rather than endpoint by endpoint. A
+# per-endpoint cap only bounds the endpoint someone remembered to add one to;
+# this bounds the rest, including routes added later. An endpoint with a
+# tighter cap of its own — symbol_import_max_body_bytes above — still reports
+# that one, because it is checked inside the handler.
+#
+# Both are refused with 413 from the declared Content-Length, before the body
+# is parsed, and both take the uppercase name in the environment.
+#
+# max_request_body_bytes (default 4194304, 4 MiB) — everything that is not a
+#   file upload. Well above the largest legitimate JSON this API takes.
+# max_upload_body_bytes (default 26214400, 25 MiB) — multipart, i.e.
+#   POST /backtest, which carries a compiled .ex5 plus its .set and .ini.
+#   Matched to the client_max_body_size nginx already enforces in front of
+#   this API, so reaching the port directly gives the same answer as coming
+#   through the proxy.
+# max_request_body_bytes: 4194304
+# max_upload_body_bytes: 26214400
 terminals:
   - broker: ftmo
     account: tenkchallenge

@@ -12,3 +12,16 @@ pytest==9.0.3
 pytest-cov==7.1.0
 pyyaml==6.0.3
 testcontainers==4.14.2
+
+# Enough of the API's own runtime to import mt5api.server on the host and read
+# its Flask url_map. test_mcpunifier.py compares the routes the unifier's
+# `endpoints` MCP tool actually returns against that router, so the router has
+# to be the real one — a hand-copied list on this side would assert nothing.
+# MetaTrader5 is Windows-only and stays out: tests/conftest.py stubs it.
+#
+# Deliberately unpinned, unlike the four above: requirements-api.txt is the
+# source of truth for these and pins nothing, so pinning here would let the
+# version the test imports drift away from the version the VM installs.
+flask
+flask-compress
+psutil

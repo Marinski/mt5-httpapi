@@ -227,9 +227,14 @@ def test_error_endpoint_returns_the_last_sdk_error(api_client, patch_handler):
 # ── tests/real/test_symbols.py ───────────────────────────────────────────
 
 
-def test_list_symbols_returns_the_tradeable_names(api_client, patch_handler):
+def test_list_symbols_returns_the_tradeable_names(
+    api_client, patch_handler, monkeypatch, tmp_path
+):
     recorder = patch_handler(symbols_handler)
     recorder.set("symbols_get", [Symbol(name=SYMBOL), Symbol(name="OTHERUSD")])
+    # An unfiltered listing persists the symbol cache as a side effect; without
+    # this it writes into the real TERMINAL_DIR under the working directory.
+    monkeypatch.setattr(symbols_handler, "TERMINAL_DIR", str(tmp_path))
 
     resp = api_client.get("/symbols")
 

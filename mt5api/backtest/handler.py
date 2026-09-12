@@ -28,6 +28,7 @@ import psutil
 
 from flask import Response, abort, jsonify, request, send_file
 
+from mt5api import symbol_cache
 from mt5api.backtest import cache_parser, ini_builder, jobs, optimization_parser, set_builder
 from mt5api.config import (
     ACCOUNT,
@@ -214,6 +215,25 @@ def _normalize_symbol(parser):
         return
 
     remapped = f"{symbol}{suffix}"
+
+    # Few brokers suffix their whole book. Eightcap Global suffixes 56 FX pairs
+    # (EURUSD.i) and leaves 785 metals/indices/crypto bare (XAUUSD, ASX200), so
+    # appending unconditionally asks the tester for a symbol that cannot exist
+    # and the run comes back empty. Only skip the remap on positive evidence:
+    # a cached symbol list that HAS the bare name and LACKS the suffixed one.
+    # Absent cache => append, exactly as this did before the cache existed.
+    known = symbol_cache.load(TERMINAL_DIR)
+    if known is not None and remapped not in known and symbol in known:
+        log.info(
+            "backtest symbol kept unsuffixed broker=%s account=%s %s "
+            "(broker has no %s)",
+            BROKER,
+            ACCOUNT,
+            symbol,
+            remapped,
+        )
+        return
+
     tester["Symbol"] = remapped
     log.info(
         "backtest symbol remap broker=%s account=%s %s -> %s",
@@ -254,6 +274,52 @@ def _tail(text, limit=DIAGNOSTIC_TAIL_CHARS):
     return text if len(text) <= limit else text[-limit:]
 
 
+#: How much of a log file a tail is allowed to touch. A terminal writing a
+#: multi-year backtest grows its Tester log to gigabytes WHILE the run is
+#: polled, so tailing must stay O(tail), never O(file) — a whole-file read of
+#: one of those seizes the process for a minute per call (whole-file bytes +
+#: a decoded str copy + a splitlines() list, all while holding the GIL), which
+#: starves every other request including /ping and the container healthcheck.
+TAIL_MAX_BYTES = 256 * 1024
+
+
+def _read_tail_text(path, max_bytes=TAIL_MAX_BYTES):
+    """Decode at most the final ``max_bytes`` of ``path``.
+
+    Encoding is sniffed from the file's first two bytes: a BOM means
+    UTF-16-LE (how MT5 writes its logs), and so does a NUL second byte —
+    UTF-16-LE of any ASCII-leading text, which covers BOM-less UTF-16 logs.
+    Anything else decodes as UTF-8 (run.log). The read then seeks to the
+    final window, aligned to a 2-byte boundary so UTF-16 code units stay
+    intact. When the window starts mid-file, everything up to the first
+    newline is dropped — a truncated first line reads as garbage, and a tail
+    endpoint never needs it.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(2)
+            utf16 = head == b"\xff\xfe" or (len(head) == 2 and head[1] == 0)
+            size = handle.seek(0, os.SEEK_END)
+            offset = max(0, size - max_bytes)
+            if utf16 and offset % 2:
+                offset -= 1
+            handle.seek(offset)
+            raw = handle.read()
+    except OSError:
+        return ""
+
+    if utf16:
+        text = raw.decode("utf-16-le", errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+
+    if offset > 0:
+        first_break = text.find("\n")
+        if first_break != -1:
+            text = text[first_break + 1:]
+    return text
+
+
 def _tail_terminal_log(lines=20):
     """Tail of the terminal's most recently written run log.
 
@@ -286,12 +352,7 @@ def _tail_terminal_log(lines=20):
     except OSError:
         return ""
 
-    latest_path = newest.path
-    try:
-        with open(latest_path, "r", encoding="utf-16-le", errors="replace") as handle:
-            content = handle.read()
-    except OSError:
-        return ""
+    content = _read_tail_text(newest.path)
 
     tail_lines = [line.strip() for line in content.splitlines() if line.strip()]
     if not tail_lines:
@@ -832,19 +893,42 @@ def get_log(job_id):
 
 
 def _tail_dir_log(log_dir, lines):
-    """Return (path_used, last N non-empty lines) from the newest .log in log_dir."""
+    """Return (path_used, last N non-empty lines) from the newest .log in log_dir.
+
+    Newest by MODIFICATION TIME, excluding `metaeditor.log` — the same two
+    rules `_tail_terminal_log` already applies, and for the same reason: the
+    logs are `<date>.log` files plus a `metaeditor.log` that sorts after all
+    of them ("m" > "2") and never changes, so an alphabetical pick returned a
+    stale compile log instead of the run being polled.
+
+    Bounded read (`_read_tail_text`): this runs on the live /tail endpoint,
+    which the backend polls once a minute for every running job, against a
+    Tester log that reaches gigabytes mid-run. The prior whole-file read took
+    45-65 s per call on such a log, starving every thread in the process —
+    /ping and the container healthcheck included — which made a healthy
+    terminal look wedged from the outside.
+    """
     if not os.path.isdir(log_dir):
         return None, ""
     try:
-        candidates = sorted(f for f in os.listdir(log_dir) if f.lower().endswith(".log"))
+        candidates = [
+            entry
+            for entry in os.scandir(log_dir)
+            if entry.is_file()
+            and entry.name.lower().endswith(".log")
+            and entry.name.lower() != "metaeditor.log"
+        ]
     except OSError:
         return None, ""
     if not candidates:
         return None, ""
-    path = os.path.join(log_dir, candidates[-1])
-    content = _read_text_best_effort(path)
+    try:
+        newest = max(candidates, key=lambda entry: entry.stat().st_mtime)
+    except OSError:
+        return None, ""
+    content = _read_tail_text(newest.path)
     tail_lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
-    return path, "\n".join(tail_lines[-lines:])
+    return newest.path, "\n".join(tail_lines[-lines:])
 
 
 def get_tail(job_id):
@@ -865,11 +949,13 @@ def get_tail(job_id):
     if job is None:
         return jsonify({"error": f"Backtest job not found: {job_id}"}), 404
 
-    # run.log — stdout/stderr of terminal64.exe (sparse but useful on errors)
+    # run.log — stdout/stderr of terminal64.exe. Usually sparse, but "usually"
+    # is not a bound: a chatty terminal can grow it without limit, and this
+    # endpoint is polled — same O(tail) rule as _tail_dir_log.
     run_log = ""
     log_path = job.get("logPath")
     if log_path:
-        content = _read_text_best_effort(log_path)
+        content = _read_tail_text(log_path)
         run_tail = [ln.strip() for ln in content.splitlines() if ln.strip()]
         run_log = "\n".join(run_tail[-50:])
 

@@ -1,10 +1,14 @@
 import os
 import time
 
-from flask import Flask, abort, g, request
+from flask import Flask, abort, g, jsonify, request
 from flask_compress import Compress
 from mt5api.backtest import handler as backtest_handler
-from mt5api.config import API_TOKEN
+from mt5api.config import (
+    API_TOKEN,
+    MAX_REQUEST_BODY_BYTES,
+    MAX_UPLOAD_BODY_BYTES,
+)
 from mt5api.handlers import account, history, orders, positions, symbols, terminal
 from mt5api.logger import log
 
@@ -27,11 +31,52 @@ def _start_request():
         g.req_id, request.method, request.full_path,
         _client_ip(), request.headers.get("User-Agent", "-"),
     )
-    if not API_TOKEN:
-        return
-    auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {API_TOKEN}":
-        abort(401)
+    if API_TOKEN:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {API_TOKEN}":
+            abort(401)
+    return _refuse_oversized_body()
+
+
+def _refuse_oversized_body():
+    """Bound the request body before any handler parses it.
+
+    Deliberately here and not in each handler. A per-endpoint cap has to be
+    remembered on every route added afterwards, and the one that gets forgotten
+    is the hole — which is how POST /symbols/import came to accept a 2 MB
+    symbol name while six other JSON routes had no bound at all. An endpoint
+    that needs a tighter cap still declares one and it fires first, because it
+    is checked inside the handler; this only catches what nothing else bounded.
+
+    Content-Length is what makes this a PRE-PARSE gate: it is the one thing
+    known before a byte is read. A body with no declared length is left to the
+    endpoint (POST /symbols/import refuses it outright) and, in production, to
+    waitress, which de-chunks and supplies a length before Flask sees the
+    request at all.
+
+    Runs after the auth check so an unauthenticated caller cannot probe the
+    limits, and answers JSON because the client treats a non-JSON body as a
+    broken host.
+    """
+    declared = request.content_length
+    if declared is None:
+        return None
+    multipart = (request.mimetype or "").startswith("multipart/")
+    limit = MAX_UPLOAD_BODY_BYTES if multipart else MAX_REQUEST_BODY_BYTES
+    if declared <= limit:
+        return None
+    setting = "MAX_UPLOAD_BODY_BYTES" if multipart else "MAX_REQUEST_BODY_BYTES"
+    log.warning(
+        "%s rejected %d-byte body on %s %s (cap %d)",
+        getattr(g, "req_id", "--------"), declared,
+        request.method, request.path, limit,
+    )
+    return jsonify({
+        "error": (
+            f"request body is {declared} bytes; this server accepts at most "
+            f"{limit} ({setting})"
+        ),
+    }), 413
 
 
 @app.after_request
@@ -71,6 +116,7 @@ app.get("/account")(account.get_account)
 
 # ── Symbols ──────────────────────────────────────────────────────
 app.get("/symbols")(symbols.list_symbols)
+app.post("/symbols/import")(symbols.import_symbols)
 app.get("/symbols/<symbol>")(symbols.get_symbol)
 app.get("/symbols/<symbol>/tick")(symbols.get_tick)
 app.get("/symbols/<symbol>/rates")(symbols.get_rates)

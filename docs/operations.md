@@ -490,4 +490,19 @@ Override defaults via `docker-compose.yml`:
 
 Truncation is in-place (the archive is a copy, then the original is `:>`-truncated) so the Python API's open log handle keeps writing without reopening.
 
+#### Size cap on terminal journals
+
+Retention alone does not bound the terminal journals, because it will not consider a journal until it is `RETAIN_DAYS` old. A high-frequency grid strategy logs every order placement, modification and cancellation, so a single backtest can write tens of gigabytes into *today's* journal — and the disk fills a week before that file is even eligible for the age pass.
+
+So a journal still inside the retention window is reclaimed by size instead, once it goes quiet:
+
+- `MAX_LOG_BYTES` (default `2147483648`, 2 GiB) - truncate any single journal larger than this
+- `IDLE_MINUTES` (default `30`) - never touch a journal written more recently
+
+Both are set on the `log-rotator` service in `docker-compose.yml` alongside `RETAIN_DAYS`. All three are validated at startup: a non-positive or non-numeric value exits non-zero rather than silently falling back to a default and quietly pruning on the wrong terms.
+
+**What this does not do:** `IDLE_MINUTES` deliberately exempts a journal a backtest is actively writing, because truncating it destroys the diagnostics for the run producing it. So the cap reclaims the space *after* the run goes quiet — it will not stop a single runaway backtest filling the disk while it is still going. If that is your failure mode, the lever is the strategy's own logging, or a larger volume; the rotator only guarantees the space comes back afterwards instead of never. A journal over the cap and still active is logged as `over cap but still active, left alone` on each pass, so it is visible in `docker compose logs log-rotator` rather than silently skipped.
+
+Oversized journals are truncated in place rather than deleted: the terminal holds them open, so unlinking the inode would leave `terminal64.exe` writing to a deleted file and the space would not come back until it exited. The same exclusions as the age pass apply — MQL5 expert logs, MetaEditor logs, reports and backtest jobs are never touched.
+
 When shit breaks, check these first.

@@ -334,3 +334,50 @@ def test_container_healthcheck_probes_only_this_vms_ports():
     )
 
     assert "awk" in src and "groupfile=" in src, "healthcheck.sh no longer wires a groupfile into awk"
+
+
+
+def test_terminals_command_is_scoped_to_this_vms_group(
+    vm_grouped_terminals_config, tmp_path, monkeypatch, capsys
+):
+    """`terminals` drives what start.bat actually launches, so it must honour
+    the group file the same way check_health.py does.
+
+    Unfiltered, every VM in a multi-VM install prepares a data dir and starts an
+    API process for ALL terminals — including another VM's live-mode terminal,
+    whose portable dir sits on the same shared mount, so the two terminal64.exe
+    fight over MT5's single-instance lock and one exits silently with code 0.
+    Regression: the filter hooks shipped for check_health.py but this command
+    never called them.
+    """
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, "darwinex live\ndarwinex live b\n")
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(vm_grouped_terminals_config))
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    monkeypatch.setattr("sys.argv", ["config_helper.py", "terminals"])
+    helper.main()
+    out = capsys.readouterr().out.strip().splitlines()
+
+    # Only the fast VM's two terminals, and specifically NOT the bulk VM's.
+    assert out == [
+        "darwinex live default 6001 0 live",
+        "darwinex live b 6002 0 live",
+    ]
+
+
+def test_terminals_command_unfiltered_without_a_group_file(
+    vm_grouped_terminals_config, tmp_path, monkeypatch, capsys
+):
+    """No group file is a single-VM install: every terminal stays in scope, the
+    same no-filter fallback _vm_group_filter() documents."""
+    helper = _load_config_helper_module()
+    shared = _write_group_file(tmp_path, None)
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(vm_grouped_terminals_config))
+    monkeypatch.setattr(helper, "_SHARED_DIR", str(shared))
+
+    monkeypatch.setattr("sys.argv", ["config_helper.py", "terminals"])
+    helper.main()
+    out = capsys.readouterr().out.strip().splitlines()
+
+    assert len(out) == 4

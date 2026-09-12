@@ -296,6 +296,11 @@ def test_log_rotator_mounts_only_logs_and_terminal_journals(tmp_path, monkeypatc
         "LOG_DIR": "/logs",
         "TERMINALS_DIR": "/terminals",
         "RETAIN_DAYS": "7",
+        # Age alone leaves today's journal unbounded, and one backtest can
+        # write tens of gigabytes into it — so the rotator needs the size cap
+        # wired up too, not just the retention window.
+        "MAX_LOG_BYTES": "2147483648",
+        "IDLE_MINUTES": "30",
         "INTERVAL": "3600",
     }
     assert rotator["volumes"] == [
@@ -316,6 +321,11 @@ def test_default_compose_exposes_terminal_retention_to_the_rotator():
         "LOG_DIR": "/logs",
         "TERMINALS_DIR": "/terminals",
         "RETAIN_DAYS": "7",
+        # Age alone leaves today's journal unbounded, and one backtest can
+        # write tens of gigabytes into it — so the rotator needs the size cap
+        # wired up too, not just the retention window.
+        "MAX_LOG_BYTES": "2147483648",
+        "IDLE_MINUTES": "30",
         "INTERVAL": "3600",
     }
     assert compose["services"]["wickworks"]["image"] == WICKWORKS_IMAGE

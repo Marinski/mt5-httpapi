@@ -16,6 +16,11 @@ LOG_DIR="${LOG_DIR:-/logs}"
 TERMINALS_DIR="${TERMINALS_DIR:-/terminals}"
 RETAIN_DAYS="${RETAIN_DAYS:-7}"
 INTERVAL="${INTERVAL:-3600}"
+# Terminal journals need a size bound as well as an age one — see
+# cap_journal_size. IDLE_MINUTES is the "a backtest is still writing this"
+# guard; nothing touched more recently is truncated.
+MAX_LOG_BYTES="${MAX_LOG_BYTES:-2147483648}"
+IDLE_MINUTES="${IDLE_MINUTES:-30}"
 
 log() {
     printf '[%s] [rotator] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -27,6 +32,54 @@ is_positive_integer() {
     esac
 
     [ "$1" -gt 0 ]
+}
+
+# Age alone cannot bound these. A high-frequency strategy logs every order
+# placement, modification and cancellation, so a single backtest can write tens
+# of gigabytes into TODAY's journal — which the retention window deliberately
+# will not touch for RETAIN_DAYS, long after the disk has filled.
+#
+# This reclaims that space once the run goes quiet; it does NOT bound a journal
+# while its own backtest is still writing (see IDLE_MINUTES below), because
+# truncating a running job's log destroys the diagnostics for the very run
+# producing them.
+#
+# Truncate in place rather than delete: the terminal holds the journal open, so
+# unlinking the inode would leave the writer pointed at a deleted file and the
+# space would not come back until the terminal exited.
+cap_journal_size() {
+    journal=$1
+
+    # stat, not `wc -c`: busybox wc READS the whole file to count bytes, which
+    # costs ~18s on a 3 GB journal (measured in alpine:3.20) and would run for
+    # every in-window journal every INTERVAL — on exactly the multi-gigabyte
+    # files this function exists for. stat is one fstat on busybox and GNU
+    # alike. The test image has GNU coreutils, where `wc -c` is already O(1),
+    # so this cost is invisible to the suite and only appears in production.
+    size=$(stat -c %s "$journal" 2>/dev/null || echo 0)
+    [ "$size" -gt "$MAX_LOG_BYTES" ] || return 0
+
+    # Anything written inside the idle window belongs to a running backtest;
+    # truncating it would destroy the diagnostics for the very run producing
+    # them. Let it exceed the cap until it goes quiet.
+    if [ -n "$(find "$journal" -mmin "-${IDLE_MINUTES}" 2>/dev/null)" ]; then
+        log "over cap but still active, left alone (${size}B) $journal"
+        return 0
+    fi
+
+    # Restore the mtime afterwards. _tail_dir_log picks the newest .log in a
+    # directory by mtime, so bumping this one to now would make a just-emptied
+    # journal outrank the journal a running job is actually writing, and
+    # GET /backtest/<id>/tail would answer with nothing until that job's next
+    # write. Truncating is this script's housekeeping, not the terminal
+    # logging, so it should not look like the most recent activity.
+    mtime=$(stat -c %Y "$journal" 2>/dev/null || echo "")
+    if : >"$journal"; then
+        if [ -n "$mtime" ]; then
+            touch -d "@$mtime" "$journal" 2>/dev/null || true
+        fi
+        log "truncated oversized terminal journal (${size}B) $journal"
+    fi
 }
 
 prune_journal_dir() {
@@ -47,7 +100,11 @@ prune_journal_dir() {
         if [ "$journal_date" -lt "$cutoff" ]; then
             rm -f "$journal"
             log "pruned terminal journal $journal"
+            continue
         fi
+
+        # Still inside the retention window — bound it by size instead.
+        cap_journal_size "$journal"
     done
 }
 
@@ -113,7 +170,17 @@ if ! is_positive_integer "$RETAIN_DAYS"; then
     exit 1
 fi
 
-log "starting (log_dir=$LOG_DIR terminals_dir=$TERMINALS_DIR retain_days=$RETAIN_DAYS interval=${INTERVAL}s)"
+if ! is_positive_integer "$MAX_LOG_BYTES"; then
+    log "MAX_LOG_BYTES must be a positive integer, got: $MAX_LOG_BYTES"
+    exit 1
+fi
+
+if ! is_positive_integer "$IDLE_MINUTES"; then
+    log "IDLE_MINUTES must be a positive integer, got: $IDLE_MINUTES"
+    exit 1
+fi
+
+log "starting (log_dir=$LOG_DIR terminals_dir=$TERMINALS_DIR retain_days=$RETAIN_DAYS max_log=${MAX_LOG_BYTES}B idle_min=$IDLE_MINUTES interval=${INTERVAL}s)"
 while true; do
     if ! rotate_once; then
         log "rotate_once failed (continuing)"

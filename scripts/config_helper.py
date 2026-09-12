@@ -164,7 +164,17 @@ def main():
         sys.exit(1)
 
     if cmd == "terminals":
+        # Scope to this VM's group. start.bat launches a terminal and starts an
+        # API process for every line this prints, so without the filter each VM
+        # in a multi-VM install prepares and serves ALL terminals — including
+        # another VM's live-mode terminal, whose data dir is on the same shared
+        # mount, so the two fight over MT5's single-instance lock.
+        # check_health.py already applies exactly this filter; the two must
+        # agree or the status loop probes ports this VM never started.
+        allowed = _vm_group_filter()
         for t in cfg.get("terminals") or []:
+            if not _in_group(t, allowed):
+                continue
             utc = t.get("utc_offset")
             utc = "0" if utc is None else str(utc).replace(" ", "")
             mode = (t.get("mode") or "live").strip().lower() or "live"

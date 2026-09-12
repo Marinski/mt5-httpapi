@@ -87,6 +87,8 @@ services:
       LOG_DIR: /logs
       TERMINALS_DIR: /terminals
       RETAIN_DAYS: "7"
+      MAX_LOG_BYTES: "2147483648"
+      IDLE_MINUTES: "30"
       INTERVAL: "3600"
     volumes:
       - ./data/shared/logs:/logs

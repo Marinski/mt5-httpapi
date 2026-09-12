@@ -13,6 +13,7 @@ than taking the process with it.
 
 import base64
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -250,6 +251,94 @@ def test_a_mismatched_broker_account_pair_is_refused(unifier):
     )
 
     assert "unknown terminal" in json.dumps(result)
+
+
+# ── `endpoints` vs the real Flask router ─────────────────────────────
+#
+# `endpoints` is the only route discovery an agent on the unified endpoint
+# gets: it is the catalog the `request` escape hatch is driven from, so a route
+# the Flask app serves but the catalog omits is invisible to every such agent.
+# POST /symbols/import was exactly that.
+#
+# The unifier runs out-of-process and cannot read Flask's url_map, so its
+# catalog is hand-maintained — which is why it needs a test. This one is
+# black-box on the MCP side: it boots the shipped image, speaks the protocol,
+# and reads what the public tool returns, so it also fails if tool registration,
+# the transport, or response serialization breaks. (The version it replaced
+# AST-parsed mcpunifier/mcp_server.py for the `_ROUTE_CATALOG` literal, which
+# stayed green through all three of those.)
+
+# Flask reports these on every rule; they are not part of the callable surface.
+_NON_API_METHODS = frozenset({"HEAD", "OPTIONS"})
+# Werkzeug spells a placeholder with its converter, `<int:ticket>`; the catalog
+# spells it `<ticket>`. Normalize the Flask side to the catalog's form rather
+# than the reverse: what `endpoints` describes is a path an agent substitutes a
+# value into, and the converter is a routing-layer detail with no presence on
+# the wire. Stripping it keeps the parameter NAME, which agents do read, so
+# renaming `<symbol>` to `<x>` still fails this test.
+_CONVERTER_PREFIX = re.compile(r"<[a-zA-Z_][a-zA-Z0-9_]*:")
+
+
+def _flask_routes():
+    """(method, path) for every route the real mt5api Flask app registers.
+
+    Imported here rather than at module scope so the MT5 stub tests/conftest.py
+    installs is in place first — the SDK wheel is Windows-only.
+
+    Note what is deliberately NOT in url_map and so not expected in the
+    catalog: mt5api/main.py mounts the per-terminal MCP app at /mcp through
+    werkzeug's DispatcherMiddleware, outside Flask's router entirely. The
+    catalog lists the REST surface `request` can call, which is the same set.
+    """
+    from mt5api.server import app
+
+    routes = set()
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == "static":
+            continue
+        path = _CONVERTER_PREFIX.sub("<", str(rule.rule))
+        for method in rule.methods - _NON_API_METHODS:
+            routes.add((method, path))
+    return routes
+
+
+def test_the_endpoints_tool_returns_exactly_the_real_flask_routes(unifier):
+    """Call the public `endpoints` tool over MCP and compare what comes back to
+    the Flask router every terminal actually serves.
+
+    Equality, not containment, in both directions: a missing entry hides a real
+    route from agents, and a surplus entry sends them at a 404. Every route in
+    mt5api/server.py is registered unconditionally, so the two sides are
+    comparable exactly as they stand. If a route is ever registered behind a
+    config flag, this has to build the app under the configuration the catalog
+    documents rather than be relaxed to a subset check — a subset check would
+    pass the empty catalog.
+    """
+    payload = json.loads(_tool_text(_call_tool(unifier, "endpoints", {})))
+
+    reported = {
+        (entry["method"], entry["path"]) for entry in payload["endpoints"]
+    }
+    expected = _flask_routes()
+
+    assert reported == expected, (
+        "`endpoints` and the Flask router disagree.\n"
+        f"  only in the Flask app (invisible to agents): {sorted(expected - reported)}\n"
+        f"  only in the catalog (agents would 404):      {sorted(reported - expected)}"
+    )
+
+
+def test_the_endpoints_tool_lists_the_backtest_cache_priming_route(unifier):
+    """The specific regression the catalog missed, pinned by name.
+
+    GET /symbols answers 409 on a mode: backtest terminal and tells the caller
+    to use POST /symbols/import instead. An agent that can only reach the API
+    through `request` has no way to find that route if `endpoints` omits it, so
+    the advice in the 409 is unfollowable.
+    """
+    payload = json.loads(_tool_text(_call_tool(unifier, "endpoints", {})))
+
+    assert {"method": "POST", "path": "/symbols/import"} in payload["endpoints"]
 
 
 def test_the_endpoint_is_still_healthy_after_those_failures(unifier):

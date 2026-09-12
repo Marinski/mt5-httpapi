@@ -251,6 +251,84 @@ _MODE_RAW = (_args.mode or _terminal_config.get("mode") or os.environ.get("MT5_M
 MODE = str(_MODE_RAW).strip().lower() or "live"
 if MODE not in ("live", "backtest"):
     MODE = "live"
+def _symbol_cache_max_age():
+    """Finite trust window for the persisted broker symbol list, in seconds.
+
+    Clamped rather than raised on a bad value - config.py is imported by the
+    whole API, and a typo here must not stop trading. The floor keeps "0" or a
+    negative from making every cache read stale and silently re-enabling the
+    append-always behaviour the cache exists to fix.
+    """
+    raw = os.environ.get("SYMBOL_CACHE_MAX_AGE") or load_yaml_config().get(
+        "symbol_cache_max_age"
+    )
+    default = 7 * 24 * 3600
+    if raw in (None, ""):
+        return default
+    try:
+        parsed = parse_duration_to_seconds(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(60, parsed or default)
+
+
+SYMBOL_CACHE_MAX_AGE_SECONDS = _symbol_cache_max_age()
+
+
+def _positive_int_setting(env_name, yaml_key, default):
+    """A positive integer setting, clamped rather than raised on a bad value.
+
+    Same call as every other numeric setting in this module: config.py is
+    imported by the whole API, so a typo in one endpoint's tuning value must
+    not stop trading and backtesting. The floor keeps a bad value (0, a
+    negative, "none") from silently disabling /symbols/import outright, which
+    is the only way to prime a mode: backtest terminal's symbol cache.
+
+    Environment overrides the top-level config.yaml key, matching
+    _symbol_cache_max_age above.
+    """
+    raw = os.environ.get(env_name) or load_yaml_config().get(yaml_key)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
+
+
+# Per-request caps for POST /symbols/import. Without them one authenticated
+# request could hand the JSON parser an unbounded body, then persist the result
+# into <terminal>/mt5api-symbols.json — a file the backtest INI builder reads
+# and parses on every run, inside a Windows VM with a fixed disk. All three are
+# checked in handlers/symbols.py BEFORE the resource they bound is spent.
+#
+# SYMBOL_IMPORT_MAX_BODY_BYTES (2 MiB): refused from the declared
+#   Content-Length, before request.get_json() pulls the body into memory. Sized
+#   to comfortably admit the largest legitimate payload — the count cap times
+#   the length cap plus JSON quoting is ~1.4 MB — while keeping a single
+#   request inside what the VM can buffer without paging.
+# SYMBOL_IMPORT_MAX_SYMBOLS (20000): no MT5 broker publishes anything close.
+#   The widest books seen in this fleet are low thousands (Eightcap Global:
+#   841), so this is ~20x the real maximum: generous enough that no broker's
+#   full book is ever refused, small enough to bound the dedupe/sort and the
+#   cache file.
+# SYMBOL_IMPORT_MAX_SYMBOL_LENGTH (64): MT5 itself caps a symbol name at 31
+#   characters (CustomSymbolCreate), and real broker names run to ~15
+#   ("USDCNH.raw_ecn"). Double the platform's own limit leaves room for any
+#   suffix convention while rejecting the megabyte "symbol" that motivated
+#   this cap. Applied to the NORMALIZED (stripped) name, which is what
+#   actually reaches the cache.
+SYMBOL_IMPORT_MAX_BODY_BYTES = _positive_int_setting(
+    "SYMBOL_IMPORT_MAX_BODY_BYTES", "symbol_import_max_body_bytes", 2 * 1024 * 1024
+)
+SYMBOL_IMPORT_MAX_SYMBOLS = _positive_int_setting(
+    "SYMBOL_IMPORT_MAX_SYMBOLS", "symbol_import_max_symbols", 20000
+)
+SYMBOL_IMPORT_MAX_SYMBOL_LENGTH = _positive_int_setting(
+    "SYMBOL_IMPORT_MAX_SYMBOL_LENGTH", "symbol_import_max_symbol_length", 64
+)
+
 SYMBOL_SUFFIX_CONFIGURED = "symbol_suffix" in _terminal_config
 _SYMBOL_SUFFIX_RAW = _terminal_config.get("symbol_suffix")
 SYMBOL_SUFFIX = "" if _SYMBOL_SUFFIX_RAW is None else str(_SYMBOL_SUFFIX_RAW)
@@ -340,3 +418,32 @@ TIME_MAP = {
     "SPECIFIED": mt5.ORDER_TIME_SPECIFIED,
     "SPECIFIED_DAY": mt5.ORDER_TIME_SPECIFIED_DAY,
 }
+
+
+# Global per-request body caps, enforced once in server.py's before_request
+# hook rather than per handler.
+#
+# Every JSON endpoint used to hand request.get_json() whatever arrived:
+# POST /orders, PUT /orders/<id>, PUT|DELETE /positions/<id>,
+# POST /symbols/<symbol>/rates/ta, POST /backtest/build-ini and
+# /backtest/build-set all parsed an unbounded body. POST /symbols/import was
+# fixed with its own cap, but a per-endpoint check has to be remembered on
+# every route added afterwards, and the one that gets forgotten is the hole.
+# This is the backstop that cannot be forgotten; endpoints keep their own
+# tighter caps where the payload shape justifies one, and those fire first.
+#
+# MAX_REQUEST_BODY_BYTES (4 MiB) covers everything that is not a file upload.
+#   Comfortably above the largest legitimate JSON this API takes — the
+#   /symbols/import cap is 2 MiB and every other body is a handful of KB — so
+#   it bounds the parser without second-guessing any endpoint.
+# MAX_UPLOAD_BODY_BYTES (25 MiB) covers multipart, i.e. POST /backtest, which
+#   carries a compiled .ex5 plus its .set and .ini. Matched to the
+#   client_max_body_size nginx already enforces in front of this API, so a
+#   caller reaching the port directly gets the same answer as one coming
+#   through the proxy instead of a larger one.
+MAX_REQUEST_BODY_BYTES = _positive_int_setting(
+    "MAX_REQUEST_BODY_BYTES", "max_request_body_bytes", 4 * 1024 * 1024
+)
+MAX_UPLOAD_BODY_BYTES = _positive_int_setting(
+    "MAX_UPLOAD_BODY_BYTES", "max_upload_body_bytes", 25 * 1024 * 1024
+)

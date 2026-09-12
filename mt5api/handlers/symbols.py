@@ -7,7 +7,13 @@ from flask import jsonify, request
 
 import MetaTrader5 as mt5
 
+from mt5api import symbol_cache
 from mt5api.config import (
+    MODE,
+    SYMBOL_IMPORT_MAX_BODY_BYTES,
+    SYMBOL_IMPORT_MAX_SYMBOL_LENGTH,
+    SYMBOL_IMPORT_MAX_SYMBOLS,
+    TERMINAL_DIR,
     TIMEFRAME_MAP,
     TIMEFRAME_SECONDS,
     WICKWORKS_TIMEOUT_SECONDS,
@@ -80,13 +86,148 @@ def _parse_anchor(s):
         return None
 
 
-@with_mt5
 def list_symbols():
+    """Refuse on a backtest terminal, otherwise serve the live SDK listing.
+
+    Deliberately NOT @with_mt5: that decorator enters session(), which blocks
+    on the global MT5 lock for up to SESSION_ACQUIRE_TIMEOUT before the
+    handler body runs at all. A backtest terminal sitting behind a stuck SDK
+    request would then answer this refusal with a 503 a minute later instead
+    of an immediate 409 — the refusal needs no SDK, so it must not queue for
+    one. The live path keeps the lock, via _list_symbols_live below.
+    """
+    # mode: backtest never attaches the SDK — ensure_initialized() finding no
+    # terminal_info() would fall through to a full mt5.initialize(), which
+    # spawns terminal64.exe and holds the tester's single-instance lock. That
+    # used to be the documented way to prime this terminal's symbol cache;
+    # instead it wedged the terminal, so it is refused before any SDK call.
+    # Use POST /symbols/import to prime the cache without touching MT5.
+    if MODE == "backtest":
+        return jsonify({
+            "error": (
+                "GET /symbols is unsafe on a mode:backtest terminal: it "
+                "would initialize the MT5 SDK and hold the tester's "
+                "single-instance lock, leaving the next backtest run with "
+                "an empty report. Use POST /symbols/import to prime the "
+                "cache without touching MT5."
+            ),
+        }), 409
+    return _list_symbols_live()
+
+
+@with_mt5
+def _list_symbols_live():
     if not ensure_initialized():
         return jsonify({"error": "MT5 not initialized"}), 503
     group = request.args.get("group")
     syms = m(mt5.symbols_get, group=group) if group else m(mt5.symbols_get)
-    return jsonify([s.name for s in syms] if syms else [])
+    names = [s.name for s in syms] if syms else []
+    # Persist only the UNFILTERED list: the backtest INI builder uses this to
+    # decide a symbol does not exist, and a group-filtered subset would make it
+    # draw that conclusion about every symbol the filter excluded.
+    if not group and names:
+        symbol_cache.save(TERMINAL_DIR, names)
+    return jsonify(names)
+
+
+def import_symbols():
+    """Prime this terminal's symbol cache without touching the MT5 SDK.
+
+    Deliberately NOT @with_mt5 and calls no mt5.* function: this is the safe
+    priming path for a mode:backtest terminal, which must never need an SDK
+    request (see list_symbols above). Feed it a symbol list sourced elsewhere
+    — GET /symbols against a live terminal on the same broker/account, or the
+    broker's own symbol documentation.
+
+    Bounded on three axes, all configurable (see mt5api/config.py) and all
+    checked before the resource they bound is spent: the raw body, the number
+    of entries, and the length of each normalized name.
+    """
+    # ── Body size, BEFORE request.get_json() ──────────────────────────
+    # get_json() pulls the entire body into memory and builds a Python object
+    # graph from it, so a check placed after it has already paid the cost the
+    # cap exists to prevent. Content-Length is the only thing available before
+    # a single byte is parsed, so that is what this gate reads.
+    declared = request.content_length
+    if declared is None and request.headers.get("Transfer-Encoding"):
+        # No declared length AND a transfer encoding: a streamed body whose
+        # size is unknowable until it has all been read, so there is nothing
+        # for this gate to check. Deliberately refused rather than waved
+        # through — waving it through is precisely the hole the cap closes.
+        # This endpoint's body is one small JSON object and every real client
+        # (curl -d, requests, the unifier's `request` tool) sends it with a
+        # Content-Length; 411 is the code RFC 9110 defines for exactly this.
+        # (content_length is also None for a request with no body at all,
+        # which carries no Transfer-Encoding and needs no bounding — it falls
+        # through to the same 400 an empty body has always produced.)
+        return jsonify({
+            "error": (
+                "request must declare a Content-Length; chunked bodies are "
+                "not accepted on this endpoint"
+            ),
+        }), 411
+    if declared is not None and declared > SYMBOL_IMPORT_MAX_BODY_BYTES:
+        log.warning(
+            "symbols/import: rejected %d-byte body (cap %d)",
+            declared, SYMBOL_IMPORT_MAX_BODY_BYTES,
+        )
+        return jsonify({
+            "error": (
+                f"request body is {declared} bytes; this server accepts at "
+                f"most {SYMBOL_IMPORT_MAX_BODY_BYTES} "
+                "(SYMBOL_IMPORT_MAX_BODY_BYTES)"
+            ),
+        }), 413
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        # get_json(silent=True) happily returns a bare list/number/string for
+        # syntactically valid JSON that isn't an object — body.get() below
+        # would then raise AttributeError instead of a clean 400.
+        return jsonify({"error": "request body must be a JSON object with a 'symbols' array"}), 400
+    names = body.get("symbols")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        return jsonify({"error": "request body must include a 'symbols' array of strings"}), 400
+    # Counted on the raw array, not the deduplicated result: this bounds the
+    # strip/dedupe/sort work below, which happens before any dedupe can shrink
+    # the list, and "items in 'symbols'" is what the caller actually sent.
+    if len(names) > SYMBOL_IMPORT_MAX_SYMBOLS:
+        log.warning(
+            "symbols/import: rejected %d symbols (cap %d)",
+            len(names), SYMBOL_IMPORT_MAX_SYMBOLS,
+        )
+        return jsonify({
+            "error": (
+                f"'symbols' has {len(names)} entries; this server accepts at "
+                f"most {SYMBOL_IMPORT_MAX_SYMBOLS} (SYMBOL_IMPORT_MAX_SYMBOLS)"
+            ),
+        }), 400
+    # This is operator/copy-paste input, unlike the SDK-sourced names
+    # GET /symbols persists — strip stray whitespace so it cannot silently
+    # defeat the exact-match lookup in backtest.handler._normalize_symbol.
+    cleaned = sorted({n.strip() for n in names if n.strip()})
+    if not cleaned:
+        return jsonify({"error": "'symbols' must contain at least one non-empty name"}), 400
+    # Measured on the NORMALIZED name — the stripped form is what lands in the
+    # cache and what the INI builder matches against, so padding a legal name
+    # with whitespace must not fail, and padding an illegal one must not pass.
+    too_long = [n for n in cleaned if len(n) > SYMBOL_IMPORT_MAX_SYMBOL_LENGTH]
+    if too_long:
+        log.warning(
+            "symbols/import: rejected %d oversized symbol name(s) (cap %d)",
+            len(too_long), SYMBOL_IMPORT_MAX_SYMBOL_LENGTH,
+        )
+        return jsonify({
+            "error": (
+                f"{len(too_long)} symbol name(s) exceed "
+                f"{SYMBOL_IMPORT_MAX_SYMBOL_LENGTH} characters "
+                "(SYMBOL_IMPORT_MAX_SYMBOL_LENGTH); longest is "
+                f"{max(len(n) for n in too_long)}"
+            ),
+        }), 400
+    if not symbol_cache.save(TERMINAL_DIR, cleaned):
+        return jsonify({"error": "failed to write symbol cache"}), 500
+    return jsonify({"imported": len(cleaned)})
 
 
 @with_mt5
