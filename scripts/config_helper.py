@@ -254,6 +254,14 @@ def main():
                     f"            proxy_pass $vm_upstream;\n"
                     f"            proxy_set_header Host $host;\n"
                     f"            proxy_set_header X-Forwarded-For $remote_addr;\n"
+                    # POST /compile is synchronous and serialized behind one
+                    # lock, so a queue of compiles can outlive nginx's 60s
+                    # default. When it does, the caller gets nginx's HTML error
+                    # page instead of the JSON the endpoint documents - and the
+                    # API's own 504, which IS JSON, never gets to be sent.
+                    # Long enough for a queue; the handler still bounds itself.
+                    f"            proxy_read_timeout 300s;\n"
+                    f"            proxy_send_timeout 300s;\n"
                     f"        }}"
                 )
 

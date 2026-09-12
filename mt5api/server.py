@@ -1,11 +1,19 @@
 import os
 import time
 
-from flask import Flask, abort, g, request
+from flask import Flask, abort, g, jsonify, request
 from flask_compress import Compress
 from mt5api.backtest import handler as backtest_handler
-from mt5api.config import API_TOKEN
-from mt5api.handlers import account, history, orders, positions, symbols, terminal
+from mt5api.config import API_TOKEN, COMPILE_API_TOKEN
+from mt5api.handlers import (
+    account,
+    compile as compile_handler,
+    history,
+    orders,
+    positions,
+    symbols,
+    terminal,
+)
 from mt5api.logger import log
 
 app = Flask(__name__)
@@ -27,9 +35,25 @@ def _start_request():
         g.req_id, request.method, request.full_path,
         _client_ip(), request.headers.get("User-Agent", "-"),
     )
+    auth = request.headers.get("Authorization", "")
+
+    # /compile carries a SECOND, compile-only credential.
+    #
+    # A caller that only needs to compile must not hold a token that can also
+    # place orders, close positions or restart a terminal. So API_TOKEN
+    # is accepted everywhere including here, while COMPILE_API_TOKEN is accepted
+    # ONLY on this path - every other route falls through to the original check
+    # below, which compares against API_TOKEN alone and therefore rejects it.
+    if request.path == "/compile":
+        accepted = [f"Bearer {t}" for t in (API_TOKEN, COMPILE_API_TOKEN) if t]
+        if accepted and auth not in accepted:
+            # JSON rather than Flask's HTML error page: the client is documented
+            # to treat a non-JSON body as a broken host.
+            return jsonify({"ok": False, "log": "unauthorized"}), 401
+        return
+
     if not API_TOKEN:
         return
-    auth = request.headers.get("Authorization", "")
     if auth != f"Bearer {API_TOKEN}":
         abort(401)
 
@@ -93,6 +117,11 @@ app.delete("/orders/<int:ticket>")(orders.cancel_order)
 # ── History ──────────────────────────────────────────────────────
 app.get("/history/orders")(history.get_orders)
 app.get("/history/deals")(history.get_deals)
+
+# ── Compile ──────────────────────────────────────────────────────
+# Source text in, .ex5 out. Auth for this one route is handled in
+# _start_request above; it accepts COMPILE_API_TOKEN as well as API_TOKEN.
+app.post("/compile")(compile_handler.compile_source)
 
 # ── Backtest ─────────────────────────────────────────────────────
 app.post("/backtest/build-ini")(backtest_handler.build_ini_route)

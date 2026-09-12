@@ -8,6 +8,81 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+### Added
+
+- **`POST /compile` — MQL5 source in, `.ex5` out.** MetaEditor is the only
+  thing that can produce an `.ex5` and it only runs on Windows, which this
+  stack already has. Anything that generates or patches EA source elsewhere —
+  CI, a code generator, a web app, an agent — can now get a binary back over
+  HTTP instead of putting a human on an RDP session.
+
+  Source text only: no caller-supplied path, no file reads, and no control over
+  MetaEditor's arguments. `filename` is cosmetic and gets stripped to a bare
+  stem, so it cannot escape the per-request temp directory, which is removed on
+  every exit path including timeouts. The handler never touches the MT5 SDK, so
+  it cannot trade or restart a terminal.
+
+  Three MetaEditor behaviours the implementation absorbs, because each one
+  produces a wrong answer if you take the obvious path:
+
+  - It exits NON-ZERO on warnings as well as errors, so the exit code cannot
+    decide success. The log is parsed for counts and the produced binary is the
+    tiebreaker. A warning-only build is a success.
+  - It writes its log as UTF-16LE with a BOM. Decoded as UTF-8 you get
+    NUL-riddled mojibake and every count regex silently stops matching.
+  - It can report success and produce no file. That is returned as a failure
+    with a non-zero error count, never as `ok: true` — a caller that trusts
+    `ok` and finds no binary has nothing to fall back to.
+
+  Compiles serialize behind one lock and the request stays synchronous.
+  MetaEditor compiles are sub-second for normal EAs, so a job queue would add
+  lost jobs, status polling and restart recovery to buy nothing. A caller that
+  waits longer than the deadline plus 30s gets a 504 rather than a hung
+  connection.
+
+  `compile_local_cache` mirrors the toolchain onto local disk on first use, for
+  installs whose terminals sit on a network or host-shared mount. Measured on a
+  docker-hosted Windows VM with terminals on a 9p share, a compile MetaEditor
+  timed at 4.1s took 29s wall-clock on every request — the cost is loading a
+  105MB binary across the mount, not compiling. Mirroring takes it to local
+  disk once per process, and a mirror that cannot be built falls back to the
+  shared copy rather than failing the request.
+
+  Documented in [docs/compiling.md](docs/compiling.md).
+
+- **`compile_api_token` — a second, compile-only credential.** `api_token`
+  unlocks order placement, position management and terminal restart. Handing
+  that to something whose only job is compiling hands it the trading account
+  too. `compile_api_token` is accepted on `/compile` and rejected on every
+  other route; `api_token` keeps working everywhere including `/compile`.
+  Existing auth behaviour for existing routes is unchanged, and leaving the new
+  token empty changes nothing.
+
+  Compile target, include directory, work directory and timeout are overridable
+  via `COMPILE_TERMINAL_DIR`, `COMPILE_INCLUDE_DIR`, `COMPILE_WORK_DIR` and
+  `COMPILE_TIMEOUT` (default `30s`, hard ceiling `60s`).
+
+- **Per-request size caps, and a generic 500.** `COMPILE_MAX_SOURCE_BYTES`
+  (default 2 MB) rejects an oversized request with 413 from its declared
+  `Content-Length` — before parsing, and before anything reaches disk.
+  `COMPILE_MAX_EX5_BYTES` (default 16 MB) refuses to return a larger compiled
+  binary, checked on disk before it would be read into memory and
+  base64-inflated into the response. Without these, one authenticated request
+  could consume unbounded disk, memory and response bandwidth. Unexpected
+  server errors now return a bare `"internal error"`; the exception class and
+  message — which for an `OSError` is an internal path — stay in the server
+  log.
+
+- **Contract tests** (`tests/test_compile.py`) covering the response contract
+  and the MetaEditor quirks above: real UTF-16LE log bytes decoded and parsed,
+  warnings not failing a build, `ok: true` never returned without a binary,
+  temp directories removed after success, failure and timeout, `/log:` and
+  `/inc:` unreachable from the request body, path traversal in `filename`
+  neutralised, the compile token refused on `/account`, `/positions`,
+  `/orders`, `POST /orders`, `/terminal` and `/terminal/restart`, both size
+  caps enforced before the write / before the read, and the 500 path leaking
+  neither exception class nor message nor paths.
+
 ## [v4.13.1]: 2026-09-10
 
 ### Changed
