@@ -150,6 +150,13 @@ def test_get_first_account_prefers_configured_account(monkeypatch):
     assert mc.get_first_account() == {"login": 2}
 
 
+def test_get_first_account_drops_fields_init_mt5_does_not_take(monkeypatch):
+    accounts = {"raw": {"login": 1, "password": "p", "server": "S", "symbol_map": {"XAUUSD": "XAUUSD.r"}}}
+    monkeypatch.setattr(mc, "load_accounts", lambda: accounts)
+    monkeypatch.setattr(mc, "ACCOUNT", "raw")
+    assert mc.get_first_account() == {"login": 1, "password": "p", "server": "S"}
+
+
 def test_get_first_account_falls_back_to_first_when_account_unset(monkeypatch):
     accounts = {"live": {"login": 1}, "demo": {"login": 2}}
     monkeypatch.setattr(mc, "load_accounts", lambda: accounts)

@@ -228,13 +228,21 @@ def load_accounts():
     return accounts.get(BROKER, {}) or {}
 
 
+# The account fields init_mt5() takes. config.yaml accounts may carry more
+# (e.g. symbol_map, read by the backtest manager), which init_mt5(**account)
+# would reject with a TypeError.
+_LOGIN_FIELDS = ("login", "password", "server")
+
+
 def get_first_account():
     accounts = load_accounts()
     if not accounts:
         return None
     if ACCOUNT and ACCOUNT in accounts:
-        return accounts[ACCOUNT]
-    return next(iter(accounts.values()))
+        account = accounts[ACCOUNT]
+    else:
+        account = next(iter(accounts.values()))
+    return {k: account[k] for k in _LOGIN_FIELDS if k in account}
 
 
 def _run_with_timeout(fn, timeout=INIT_TIMEOUT, name="?", allow_wedged=False):
