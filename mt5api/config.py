@@ -291,46 +291,6 @@ COMPILE_INCLUDE_DIGESTS = _compile_setting(
     "COMPILE_INCLUDE_DIGESTS", "compile_include_digests"
 )
 
-# Default 30s, hard ceiling 60s. MetaEditor compiles are seconds; anything
-# approaching the ceiling means something is wrong, and holding the connection
-# longer does not help the caller.
-COMPILE_TIMEOUT_CEILING_SECONDS = 60
-COMPILE_TIMEOUT_SECONDS = max(
-    1,
-    min(
-        COMPILE_TIMEOUT_CEILING_SECONDS,
-        parse_duration_to_seconds(_compile_setting("COMPILE_TIMEOUT", "compile_timeout", "30s")) or 30,
-    ),
-)
-
-
-def _compile_byte_limit(env_name, yaml_key, default):
-    """A positive per-request byte cap, clamped rather than raised.
-
-    Same call as the other numeric settings in this module: config.py is
-    imported by the whole API, so a typo in an optional endpoint's tuning
-    value must not stop trading and backtesting. The floor keeps a bad value
-    from silently disabling /compile outright.
-    """
-    raw = _compile_setting(env_name, yaml_key, str(default))
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return default
-    return max(1024, value)
-
-
-# Per-request caps for /compile, so one authenticated request cannot consume
-# unbounded disk (the source is written to a temp dir), memory (the .ex5 is
-# read back whole), or response bandwidth (it is base64-encoded into the JSON
-# body). Checked before the write and before the read respectively - see
-# handlers/compile.py. Documented in docs/compiling.md.
-COMPILE_MAX_SOURCE_BYTES = _compile_byte_limit(
-    "COMPILE_MAX_SOURCE_BYTES", "compile_max_source_bytes", 2 * 1024 * 1024
-)
-COMPILE_MAX_EX5_BYTES = _compile_byte_limit(
-    "COMPILE_MAX_EX5_BYTES", "compile_max_ex5_bytes", 16 * 1024 * 1024
-)
 UTC_OFFSET_RAW = _args.utc_offset if _args.utc_offset is not None else os.environ.get("UTC_OFFSET", "")
 UTC_OFFSET_SECONDS = parse_duration_to_seconds(UTC_OFFSET_RAW)
 UTC_OFFSET_HOURS = UTC_OFFSET_SECONDS / 3600.0
@@ -436,6 +396,66 @@ def _positive_int_setting(env_name, yaml_key, default):
         )
         return default
     return value
+
+
+# ── POST /compile limits ─────────────────────────────────────────
+# Like the settings above, a bad value is logged and replaced by the default;
+# it never stops the API, since trading imports this module too.
+
+COMPILE_TIMEOUT_DEFAULT_SECONDS = 30
+
+# MetaEditor compiles are seconds; anything approaching the ceiling means
+# something is wrong, and holding the connection longer does not help the
+# caller.
+COMPILE_TIMEOUT_CEILING_SECONDS = 60
+
+
+def _compile_timeout():
+    """Per-compile deadline in seconds: a bare number is seconds, or e.g. "45s".
+
+    Zero, a negative or an unparseable value falls back to the default with a
+    warning; a value above the ceiling is lowered to it, also with a warning.
+    """
+    raw = _compile_setting("COMPILE_TIMEOUT", "compile_timeout")
+    default = COMPILE_TIMEOUT_DEFAULT_SECONDS
+    if raw in (None, ""):
+        return default
+    text = str(raw).strip()
+    try:
+        # parse_duration_to_seconds reads a bare number as hours (it was
+        # written for broker offsets), so COMPILE_TIMEOUT=10 would mean ten
+        # hours. Bare numbers are seconds here.
+        parsed = int(text) if re.fullmatch(r"[+-]?\d+", text) else parse_duration_to_seconds(text)
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None or parsed <= 0:
+        _setting_warning(
+            "compile_timeout=%r is not a positive duration (seconds, or e.g. "
+            "'45s'); using the default %ds", raw, default,
+        )
+        return default
+    if parsed > COMPILE_TIMEOUT_CEILING_SECONDS:
+        _setting_warning(
+            "compile_timeout=%r is above the %ds ceiling; using %ds",
+            raw, COMPILE_TIMEOUT_CEILING_SECONDS, COMPILE_TIMEOUT_CEILING_SECONDS,
+        )
+        return COMPILE_TIMEOUT_CEILING_SECONDS
+    return int(parsed)
+
+
+COMPILE_TIMEOUT_SECONDS = _compile_timeout()
+
+# Per-request caps for /compile, so one authenticated request cannot consume
+# unbounded disk (the source is written to a temp dir), memory (the .ex5 is
+# read back whole), or response bandwidth (it is base64-encoded into the JSON
+# body). Checked before the write and before the read respectively - see
+# handlers/compile.py. Documented in docs/compiling.md.
+COMPILE_MAX_SOURCE_BYTES = _positive_int_setting(
+    "COMPILE_MAX_SOURCE_BYTES", "compile_max_source_bytes", 2 * 1024 * 1024
+)
+COMPILE_MAX_EX5_BYTES = _positive_int_setting(
+    "COMPILE_MAX_EX5_BYTES", "compile_max_ex5_bytes", 16 * 1024 * 1024
+)
 
 
 # Per-request caps for POST /symbols/import. Without them one authenticated

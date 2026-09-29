@@ -23,24 +23,28 @@ def _handler():
     return handler
 
 
-def run(editor, hold_seconds, barrier, results):
+def run(hold_seconds, barrier, results, die_holding=False):
     """Acquire the cross-process compile lock, hold it, and record the exact
     window during which this process believed it owned it.
 
-    The caller decides what state the lock starts in: an empty directory
-    exercises the uncontended path, a pre-staled lock file exercises the
-    stale-takeover path, which is where a bare `os.remove` sweep lets several
-    winners through at once.
+    With `die_holding`, exit the interpreter while holding the lock and
+    without releasing it, as a killed API process would.
     """
     handler = _handler()
 
     # timeout, not a bare wait(): if a sibling dies during import the rest must
     # fail the test rather than block forever and hang pytest at exit.
     barrier.wait(timeout=120)
-    lock = handler._acquire_cross_process_lock(editor, time.monotonic() + 60)
+    if not die_holding:
+        # Let the dying worker take the lock first.
+        time.sleep(0.2)
+    lock = handler._acquire_cross_process_lock(time.monotonic() + 60)
     if lock is None:
         results.append(("timeout", 0.0, 0.0))
         return
+    if die_holding:
+        time.sleep(hold_seconds)
+        os._exit(9)
     entered = time.time()
     time.sleep(hold_seconds)  # stands in for the MetaEditor subprocess
     exited = time.time()

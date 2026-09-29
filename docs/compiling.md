@@ -40,7 +40,7 @@ curl -sS -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
 | --- | --- | --- | --- |
 | `source` | string | yes | The complete `.mq5` text. Capped at `COMPILE_MAX_SOURCE_BYTES` (default 2 MB). |
 | `filename` | string | no | Cosmetic. Reduced to a bare stem — see [Security](#security). Defaults to `ea.mq5`. |
-| `ea_version` | string | no | Recorded in the server log to correlate a compile with your build. Not passed to the compiler. |
+| `ea_version` | string | no | Recorded in the server log to correlate a compile with your build. Not passed to the compiler. 1–64 characters of `A-Z a-z 0-9 . _ + -`; anything else is a 400. |
 
 ## Responses
 
@@ -96,8 +96,10 @@ sha256 over the relative paths and contents of everything under the `/inc:`
 root. Record it with the build and "which artifacts used a library that has
 since changed" becomes a comparison instead of an assumption. It is computed
 from the tree the compiler actually read, so if the mirror were stale the hash
-reports the stale tree rather than claiming the current one. Omitted if the
-tree cannot be read; never guessed.
+reports the stale tree rather than claiming the current one. It follows the
+tree as it is at each compile: an edit made in the terminal's `MQL5` folder, or
+a mirror refresh done by another API process, shows up in the next response.
+Omitted if the tree cannot be read; never guessed.
 
 **422 — the source did not compile.** This is your code being wrong, not the
 server. `log` carries MetaEditor's own diagnostics.
@@ -127,7 +129,18 @@ in both cases before anything reaches disk. The log names the limit:
 {"ok": false, "log": "source is 3145728 bytes; this server accepts at most 2097152 (COMPILE_MAX_SOURCE_BYTES)"}
 ```
 
-**400 — malformed request** (no `source`, or not a string).
+**429 — too many compiles waiting.** One compile runs and at most two wait
+behind it; a request beyond that is answered at once, with a `Retry-After`
+header, instead of holding a server thread. See [Concurrency](#concurrency).
+
+```json
+{"ok": false, "log": "compile busy: 2 requests are already waiting; retry shortly"}
+```
+
+**400 — malformed or refused request**: no `source`, a malformed `ea_version`,
+or source whose `#include`, `#resource` or `#property icon` names a file
+outside the allowed trees (see [What the source can reach](#what-the-source-can-reach)).
+The log names the directive and the path.
 **401 — bad or missing credentials.**
 **500 — the host cannot compile** (MetaEditor missing, unreadable,
 unlaunchable), an unexpected server error (reported as a generic
@@ -162,9 +175,14 @@ Environment overrides, all optional:
 | `COMPILE_WORK_DIR` | `logs/compile-work` | Parent of the per-request temp directories. |
 | `COMPILE_LOCAL_CACHE` | unset | Mirror the toolchain onto local disk — see [Performance](#performance). |
 | `COMPILE_INCLUDE_DIGESTS` | unset | Comma-separated globs (relative to the include root) whose per-file digests are reported as `include_files`. |
-| `COMPILE_TIMEOUT` | `30s` | Per-compile deadline. Hard ceiling 60s. |
+| `COMPILE_TIMEOUT` | `30s` | Per-compile deadline. A bare number is seconds (`45`), or give units (`45s`, `1m`). Hard ceiling 60s. |
 | `COMPILE_MAX_SOURCE_BYTES` | `2097152` (2 MB) | Reject a larger `source` with 413, before it is written to disk. |
 | `COMPILE_MAX_EX5_BYTES` | `16777216` (16 MB) | Refuse to return a larger compiled binary, before it is read or encoded. |
+
+A zero, negative or unparseable `COMPILE_TIMEOUT`, `COMPILE_MAX_SOURCE_BYTES` or
+`COMPILE_MAX_EX5_BYTES` falls back to its default with a warning in the API
+log, and a timeout above 60s is lowered to 60s, also with a warning. None of
+them stops the API from starting.
 
 ### Which terminal compiles
 
@@ -230,11 +248,12 @@ That warm-up is deliberately gated, and the gates matter more than the compile:
 - **Delayed**, because the VM launches every terminal at boot and a MetaEditor
   run added to that contention slows the guest exactly when its health probe is
   most marginal.
-- **Claimed once per VM**, via an exclusive file in the cache directory. Every
-  API process exposes `/compile` and they share that directory, so an ungated
-  warm-up starts one MetaEditor per terminal — twenty at once on a busy host.
-  The claim expires after an hour so a process killed mid-warm-up cannot
-  disable warm-up permanently.
+- **Claimed once per VM per boot**, via an exclusive file in the cache
+  directory. Every API process exposes `/compile` and they share that
+  directory, so an ungated warm-up starts one MetaEditor per terminal — twenty
+  at once on a busy host. The claim records the boot it was made in, so the
+  next boot warms up again however soon it comes (with `reboot_interval: 30`,
+  an age-based expiry would skip every other boot).
 - **Yields to real work.** It takes the compile lock non-blocking and gives up
   if a compile is running; a caller queuing behind a warm-up would defeat it.
 
@@ -256,6 +275,20 @@ nothing, because the work itself cannot overlap. Concurrent callers wait; a
 caller that waits longer than the compile deadline plus 30s gets a 504 rather
 than a hung connection.
 
+At most two callers wait. A waiting compile holds one of the API's server
+threads, which every route shares, so an unbounded wait would let a caller
+holding only the compile token tie up the pool and stall orders, positions and
+`/ping`. The third waiter and beyond get an immediate `429` with `Retry-After`.
+
+The lock covers every API process using the same toolchain, not just one:
+MetaEditor is single-instance per installation directory, and every process
+on a VM serves `/compile`. It is an operating-system byte-range lock on
+`.compile-inflight.lock` in the local mirror (or, without one, beside
+`MetaEditor64.exe`), so the OS releases it the moment its holder exits or is
+killed; there is no timeout after which a holder is presumed dead. Refreshing
+the mirror happens under the same lock, so no process's MetaEditor reads a
+header while another process rewrites it.
+
 **Tell callers to compile one at a time.** Since the lock serializes them
 anyway, concurrency buys no throughput — but it does stack waits on top of a
 fixed deadline, so the callers at the back of the queue start returning 504
@@ -270,9 +303,12 @@ merely busy — converting a slow batch into an outage. Give the probe enough
 timeout to survive a CPU-saturated host.
 
 If you put a reverse proxy in front of this, give `/compile` a read
-timeout longer than your compile deadline. nginx defaults to 60s, which a
-queue of slow compiles will cross — and then the caller gets the proxy's
-HTML error page instead of the JSON documented here.
+timeout longer than the handler's worst case: the lock wait (deadline + 30s)
+plus the compile itself, 150s at the 60s ceiling. nginx defaults to 60s,
+which a wait will cross — and then the caller gets the proxy's HTML error
+page instead of the JSON documented here. The nginx config this project
+generates gives `/<broker>/<account>[/<instance>]/compile` 180s and leaves
+every other route at nginx's default.
 
 Each request compiles inside its own temp directory, which is removed on every
 exit path including timeouts and crashes. Two callers compiling different
@@ -288,10 +324,60 @@ The endpoint accepts source text and nothing else. Specifically:
 - **No caller-controlled compiler arguments.** `/compile:`, `/log:` and `/inc:`
   are all computed server-side. Sending `log` or `include` in the body does
   nothing.
-- **No file reads on your behalf.** The only files touched are the ones written
-  into the request's own temp directory.
+- **No file reads on your behalf.** The handler only touches the request's own
+  temp directory. MetaEditor itself resolves `#include`, `#resource` and
+  `#property icon`, so those are checked before it runs — see
+  [What the source can reach](#what-the-source-can-reach).
 - **No trading surface.** The handler never touches the MT5 SDK. It cannot
   place an order, modify a position, or restart a terminal.
+
+### What the source can reach
+
+Three directives make MetaEditor read a file named in the source, with the
+API process's file access: `#include` compiles it in, and `#resource` and
+`#property icon` embed it in the `.ex5`. MetaEditor resolves `"file"` against
+the source's directory (the request's temp directory), and `<file>` and a
+leading `\` against the `/inc:` tree.
+
+Measured against MetaEditor 5.00 build 5836, before the handler checked
+anything:
+
+| Directive | Absolute path | `..` walk | `\\server\share` |
+| --- | --- | --- | --- |
+| `#include "…"` | **read** | **read** | not found (joined to the temp directory) |
+| `#include <…>` | **read** | **read** | — |
+| `#resource` | refused (`error 313`) | refused (`error 313`) | refused |
+| `#property icon` | not found (joined to the temp directory) | **read** | — |
+
+Forward slashes, indentation and a comment before the `#` made no difference.
+The icon reads fail on anything that is not a valid `.ico` (`error 342: invalid
+icon format`), which still tells the caller the file exists, and a real icon
+from anywhere on the disk is embedded in the returned `.ex5`.
+
+A file that is read but is not MQL5 still does not compile, but the
+diagnostics in `log` quote its tokens back: `#include "C:\Windows\win.ini"`
+answered with `win.ini(1,3) : error 175: 'for' - expressions are not allowed
+on a global scope`. An include of the API's own `config.yaml` would do the same
+with the tokens in it.
+
+So the handler refuses, with a 400 and before MetaEditor runs, any of these
+directives whose path has a drive letter or `:`, starts with `\\` or `//`, has a
+`..` segment (or any segment made only of dots and spaces, which Windows may
+trim to one), names a
+Windows device such as `CON`, or is not a literal `"path"` / `<path>`. An
+`#include` path may not start with `\` or `/` either; for `#resource` and
+`#property icon` a leading `\` means the `/inc:` tree and is allowed. The
+check runs on the source with comments removed, and matches the directive
+more loosely than MetaEditor does (any case, spaces after `#`), so a directive
+MetaEditor would ignore can be refused but one it honours cannot slip past.
+
+`tests/real_compile/` runs these cases against a deployed endpoint. Against
+build 5836 without this check, MetaEditor ran on all sixteen and read the
+target in nine.
+
+`#import` is not checked. It names a DLL or `.ex5` to load when the program
+runs, not a file MetaEditor reads: an `#import` of a file that does not exist
+compiles.
 
 ### A compile-only credential
 

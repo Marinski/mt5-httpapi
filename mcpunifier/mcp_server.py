@@ -63,6 +63,7 @@ _ROUTE_CATALOG: tuple[tuple[str, str], ...] = (
     ("GET", "/backtest/<job_id>/report"),
     ("GET", "/backtest/<job_id>/log"),
     ("GET", "/backtest/<job_id>/tail"),
+    ("POST", "/compile"),
 )
 
 _INSTRUCTIONS = """\

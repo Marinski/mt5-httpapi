@@ -225,8 +225,8 @@ def main():
 
     # Absorbs MetaEditor's cold load before a real caller meets it. Self-gating:
     # no-op unless a local compile cache is configured, delayed until the VM has
-    # finished launching terminals, and claimed once per VM so N API processes
-    # do not each launch their own MetaEditor.
+    # finished launching terminals, and claimed once per VM per boot so N API
+    # processes do not each launch their own MetaEditor.
     compile_handler.start_warmup()
 
     log.info(

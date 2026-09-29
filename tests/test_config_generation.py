@@ -123,6 +123,36 @@ def test_every_terminal_route_carries_a_resolver(
         assert re.search(r"proxy_pass\s+\$", block), "route lacks a variable upstream"
 
 
+def test_only_the_compile_route_waits_longer_than_nginx_default(
+    single_terminal_config, tmp_path, monkeypatch
+):
+    """POST /compile can wait its turn behind other compiles, so it needs more
+    than nginx's 60s read timeout. Every other route keeps the default: a
+    stuck order or history call should not hold its connection for minutes.
+    """
+    helper = _load_config_helper_module()
+
+    content = _generate_nginx_conf(helper, single_terminal_config, tmp_path, monkeypatch)
+
+    blocks = dict(
+        re.findall(r"        (location [^{]*?) \{(.*?)\n        \}", content, re.S)
+    )
+    compile_routes = {k: v for k, v in blocks.items() if k.endswith("compile")}
+    other_routes = {
+        k: v for k, v in blocks.items() if k.startswith("location /acme/")
+    }
+    assert set(compile_routes) == {
+        "location = /acme/main/default/compile",
+        "location = /acme/main/compile",
+    }
+    for block in compile_routes.values():
+        assert f"proxy_read_timeout {helper.COMPILE_PROXY_TIMEOUT};" in block
+        assert "rewrite ^/acme/main/" in block
+    assert other_routes
+    for name, block in other_routes.items():
+        assert "proxy_read_timeout" not in block, f"{name} got the compile timeout"
+
+
 def test_terminals_route_to_their_own_vm_container(tmp_path, monkeypatch):
     helper = _load_config_helper_module()
     config_path = _write_config(

@@ -10,78 +10,14 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ### Added
 
-- **`POST /compile` — MQL5 source in, `.ex5` out.** MetaEditor is the only
-  thing that can produce an `.ex5` and it only runs on Windows, which this
-  stack already has. Anything that generates or patches EA source elsewhere —
-  CI, a code generator, a web app, an agent — can now get a binary back over
-  HTTP instead of putting a human on an RDP session.
+- `POST /compile` takes MQL5 source as JSON and returns the compiled `.ex5`, base64-encoded, with MetaEditor's log. Warnings do not fail a build, since MetaEditor exits non-zero on warnings too: success means a clean log and an actual binary. The log is decoded from MetaEditor's UTF-16LE. A compile error is a `422` carrying the diagnostics, the deadline is a `504`, and every response is JSON. See [Compiling MQL5](docs/compiling.md).
 
-  Source text only: no caller-supplied path, no file reads, and no control over
-  MetaEditor's arguments. `filename` is cosmetic and gets stripped to a bare
-  stem, so it cannot escape the per-request temp directory, which is removed on
-  every exit path including timeouts. The handler never touches the MT5 SDK, so
-  it cannot trade or restart a terminal.
-
-  Three MetaEditor behaviours the implementation absorbs, because each one
-  produces a wrong answer if you take the obvious path:
-
-  - It exits NON-ZERO on warnings as well as errors, so the exit code cannot
-    decide success. The log is parsed for counts and the produced binary is the
-    tiebreaker. A warning-only build is a success.
-  - It writes its log as UTF-16LE with a BOM. Decoded as UTF-8 you get
-    NUL-riddled mojibake and every count regex silently stops matching.
-  - It can report success and produce no file. That is returned as a failure
-    with a non-zero error count, never as `ok: true` — a caller that trusts
-    `ok` and finds no binary has nothing to fall back to.
-
-  Compiles serialize behind one lock and the request stays synchronous.
-  MetaEditor compiles are sub-second for normal EAs, so a job queue would add
-  lost jobs, status polling and restart recovery to buy nothing. A caller that
-  waits longer than the deadline plus 30s gets a 504 rather than a hung
-  connection.
-
-  `compile_local_cache` mirrors the toolchain onto local disk on first use, for
-  installs whose terminals sit on a network or host-shared mount. Measured on a
-  docker-hosted Windows VM with terminals on a 9p share, a compile MetaEditor
-  timed at 4.1s took 29s wall-clock on every request — the cost is loading a
-  105MB binary across the mount, not compiling. Mirroring takes it to local
-  disk once per process, and a mirror that cannot be built falls back to the
-  shared copy rather than failing the request.
-
-  Documented in [docs/compiling.md](docs/compiling.md).
-
-- **`compile_api_token` — a second, compile-only credential.** `api_token`
-  unlocks order placement, position management and terminal restart. Handing
-  that to something whose only job is compiling hands it the trading account
-  too. `compile_api_token` is accepted on `/compile` and rejected on every
-  other route; `api_token` keeps working everywhere including `/compile`.
-  Existing auth behaviour for existing routes is unchanged, and leaving the new
-  token empty changes nothing.
-
-  Compile target, include directory, work directory and timeout are overridable
-  via `COMPILE_TERMINAL_DIR`, `COMPILE_INCLUDE_DIR`, `COMPILE_WORK_DIR` and
-  `COMPILE_TIMEOUT` (default `30s`, hard ceiling `60s`).
-
-- **Per-request size caps, and a generic 500.** `COMPILE_MAX_SOURCE_BYTES`
-  (default 2 MB) rejects an oversized request with 413 from its declared
-  `Content-Length` — before parsing, and before anything reaches disk.
-  `COMPILE_MAX_EX5_BYTES` (default 16 MB) refuses to return a larger compiled
-  binary, checked on disk before it would be read into memory and
-  base64-inflated into the response. Without these, one authenticated request
-  could consume unbounded disk, memory and response bandwidth. Unexpected
-  server errors now return a bare `"internal error"`; the exception class and
-  message — which for an `OSError` is an internal path — stay in the server
-  log.
-
-- **Contract tests** (`tests/test_compile.py`) covering the response contract
-  and the MetaEditor quirks above: real UTF-16LE log bytes decoded and parsed,
-  warnings not failing a build, `ok: true` never returned without a binary,
-  temp directories removed after success, failure and timeout, `/log:` and
-  `/inc:` unreachable from the request body, path traversal in `filename`
-  neutralised, the compile token refused on `/account`, `/positions`,
-  `/orders`, `POST /orders`, `/terminal` and `/terminal/restart`, both size
-  caps enforced before the write / before the read, and the 500 path leaking
-  neither exception class nor message nor paths.
+  The caller sends source text only. `filename` is reduced to a bare stem inside a per-request temp directory that is removed on every exit, and `/compile:`, `/log:` and `/inc:` are computed by the server. `#include`, `#resource` and `#property icon` paths that are absolute, UNC, contain a `..` segment or name a device are refused with a `400` before MetaEditor runs: measured on MetaEditor build 5836, `#include` otherwise reads any file the API process can, and quotes its tokens back in the log. `tests/real_compile/` checks this against a live deployment. `ea_version` is only logged, and must be 1–64 characters of `A-Z a-z 0-9 . _ + -`.
+- Compiles are serialized across processes, not just threads: MetaEditor is single-instance per installation directory and every API process on a VM serves `/compile`. The lock is an OS byte-range lock on `.compile-inflight.lock` in the local mirror, or beside `MetaEditor64.exe` without one, which the OS releases when its holder exits or is killed. The mirror is refreshed under the same lock. At most two compiles wait behind the running one; the rest get an immediate `429` with `Retry-After`, so compile traffic cannot occupy every server thread.
+- `compile_api_token`, a second bearer token accepted only on `/compile`, so a build pipeline or code generator can compile without holding the token that can trade. `api_token` keeps working everywhere, and leaving the new token empty changes nothing.
+- Compile settings: `compile_terminal_dir` (default `terminals/metaquotes/base`), `compile_include_dir`, `compile_work_dir`, `compile_timeout` (default `30s`, ceiling 60s; a bare number is seconds), `compile_max_source_bytes` (2 MB, `413` before anything is written), `compile_max_ex5_bytes` (16 MB, checked before the binary is read), `compile_local_cache` and `compile_include_digests`. An invalid timeout or byte cap falls back to its default with a warning in the API log.
+- A successful compile reports `include_hash`, a sha256 over the include tree MetaEditor was given, recomputed whenever a file in that tree changes. `compile_include_digests` names headers whose own digests are reported as `include_files`, so a caller can tell an edit of its own header from an upgrade of the stock library.
+- `compile_local_cache` mirrors MetaEditor, its `Config` and the `MQL5` tree onto local disk, for installs whose terminals sit on a network or host-shared mount. On a 9p share a compile MetaEditor timed at 4.1s took 29s wall-clock, all of it loading the 105 MB binary. The include tree is re-checked against the source at most once a minute. A mirror that cannot be built falls back to the shared copy.
 - `POST /symbols/import` fills a terminal's symbol cache from a JSON list without calling the MT5 SDK, so a `mode: backtest` terminal can be primed. Each import is merged into the existing cache. `"complete": true` says the list is the broker's full book and replaces the cache instead. The body is bounded by `symbol_import_max_body_bytes` (2 MiB, `413` before parsing, `411` without a `Content-Length`), `symbol_import_max_symbols` (20000) and `symbol_import_max_symbol_length` (64). See [Market data](docs/market-data.md).
 - Every request body is capped before it is parsed: `max_request_body_bytes` (4 MiB) for JSON, `max_upload_body_bytes` (25 MiB, matching nginx's `client_max_body_size`) for multipart `POST /backtest`. Over the cap is a `413`.
 
@@ -92,6 +28,8 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ### Changed
 
+- **Every API process schedules a MetaEditor warm-up** when `compile_local_cache` is set: 180s after start, one throwaway compile, so the first real caller does not pay the 30–55s cold load. One process per VM per boot runs it, claimed by a file in the cache that records the boot. It skips itself if a compile is running and logs, never raises, on failure.
+- **nginx gives `/<broker>/<account>[/<instance>]/compile` a 180s read and send timeout.** The handler's worst case at the 60s ceiling is 150s. Every other route keeps nginx's 60s default.
 - **`GET /symbols` returns `409` on a `mode: backtest` terminal.** It used to call `mt5.initialize()` there, which starts `terminal64.exe` and holds the tester's data-dir lock, so every later backtest on that terminal came back empty. Callers that listed symbols on a backtest terminal get a `409` now and should use `POST /symbols/import`. The refusal does not wait for the MT5 lock.
 - **`start.bat` launches only the terminals in its VM's group.** `config_helper.py terminals` now applies the same `config/vm-group.txt` filter that `check_health.py` and the container healthcheck already use. Before, every VM in a multi-VM install prepared and served every terminal, including another VM's live terminal on the same shared data dir. A single-VM install, or one with no group file, still gets every terminal.
 

@@ -26,6 +26,7 @@ import time
 
 import pytest
 
+from mt5api import config
 from mt5api.handlers import compile as compile_handler
 from tests import compile_lock_worker
 
@@ -753,7 +754,12 @@ def test_the_include_recheck_is_rate_limited(client, compile_env, monkeypatch, t
     )
     for _ in range(5):
         _post(client, {"source": "void OnTick(){}"})
-    assert walks == [], f"re-walked the include tree {len(walks)} time(s) inside the window"
+    # The mirror itself (local disk) is stat'ed for include_hash on every
+    # compile; the source tree on the slow mount must not be.
+    source_walks = [w for w in walks if str(w).startswith(str(shared / "MQL5"))]
+    assert source_walks == [], (
+        f"re-walked the source include tree {len(source_walks)} time(s) inside the window"
+    )
 
 
 # ── include_hash: which library was this binary built against? ───────────────
@@ -865,22 +871,42 @@ def test_only_one_process_claims_the_warmup(monkeypatch, tmp_path):
     assert winners.count(True) == 1, f"{winners.count(True)} processes claimed the warm-up"
 
 
-def test_an_abandoned_claim_does_not_disable_warmup_forever(monkeypatch, tmp_path):
-    """The cache survives reboots, so the claim inside it must not be permanent.
-
-    A process killed mid-warm-up leaves the file behind; without expiry that
-    would silently disable warm-up on this VM for good.
-    """
-    cache = tmp_path / "stale"
+def test_a_claim_from_an_earlier_boot_does_not_block_this_boots_warmup(monkeypatch, tmp_path):
+    """The cache survives reboots, so a claim must only count for the boot
+    that made it. With reboot_interval at 30 minutes, the old one-hour expiry
+    skipped the warm-up on every other boot."""
+    cache = tmp_path / "boots"
     monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(cache))
+    monkeypatch.setattr(compile_handler, "_boot_time", lambda: 1_000_000)
     assert compile_handler._claim_warmup() is True
+    assert compile_handler._claim_warmup() is False, "claimed twice in one boot"
+
+    # 30 minutes later the VM reboots; the claim file is only seconds old.
+    monkeypatch.setattr(compile_handler, "_boot_time", lambda: 1_000_000 + 1800)
+    assert compile_handler._claim_warmup() is True, "the previous boot's claim blocked warm-up"
     assert compile_handler._claim_warmup() is False
 
-    claim = cache / compile_handler._WARMUP_CLAIM
-    old = time.time() - (compile_handler.WARMUP_CLAIM_TTL_SECONDS + 60)
-    os.utime(claim, (old, old))
 
-    assert compile_handler._claim_warmup() is True, "an expired claim still blocked warm-up"
+def test_boot_time_jitter_does_not_look_like_a_reboot(monkeypatch, tmp_path):
+    """Windows derives boot time from the uptime counter, so two processes of
+    one boot can read it a second apart."""
+    cache = tmp_path / "jitter"
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(cache))
+    monkeypatch.setattr(compile_handler, "_boot_time", lambda: 1_000_000)
+    assert compile_handler._claim_warmup() is True
+    monkeypatch.setattr(compile_handler, "_boot_time", lambda: 1_000_002)
+    assert compile_handler._claim_warmup() is False
+
+
+def test_a_claim_in_the_old_format_is_replaced(monkeypatch, tmp_path):
+    cache = tmp_path / "garbage"
+    cache.mkdir()
+    (cache / compile_handler._WARMUP_CLAIM).write_text("2026-09-29T10:00:00")
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(cache))
+    monkeypatch.setattr(compile_handler, "_boot_time", lambda: 1_000_000)
+    # The timestamp an earlier version wrote cannot be this boot's claim.
+    assert compile_handler._claim_warmup() is True
+    assert compile_handler._claim_warmup() is False
 
 
 def test_warmup_yields_to_a_real_compile(monkeypatch, tmp_path):
@@ -1041,61 +1067,78 @@ def test_a_configured_header_missing_from_the_tree_is_absent_not_null(
 # MetaEditor is single-instance per installation directory, but _COMPILE_LOCK
 # is a threading.Lock: it only serializes calls inside ONE process. Every
 # mt5api process on a VM exposes /compile and, by default, all of them
-# resolve to the SAME installation directory -- verified live (deep-qa audit)
-# by running two real, separate OS processes against a stand-in MetaEditor
-# sharing one directory: with no cross-process lock they ran fully
-# concurrently (identical START/END timestamps); with it, they serialized
-# (zero time overlap). These pin the mechanism at the unit level.
+# resolve to the SAME installation directory. The cross-process lock is an OS
+# byte-range lock (flock here, msvcrt on Windows), which the OS releases when
+# its holder's handle closes or the process dies. There is no stale window,
+# heartbeat or reaper left to get wrong.
 
-def test_cross_process_lock_is_exclusive(tmp_path):
-    editor = str(tmp_path / "MetaEditor64.exe")
+
+@pytest.fixture
+def lock_env(monkeypatch, tmp_path):
+    """No local cache, so the lock sits beside the configured MetaEditor."""
+    editor = tmp_path / "MetaEditor64.exe"
+    editor.write_bytes(b"MZ")
+    monkeypatch.setattr(compile_handler, "COMPILE_METAEDITOR", str(editor))
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    return tmp_path
+
+
+def test_cross_process_lock_is_exclusive(lock_env):
     far_future = time.monotonic() + 60
 
-    held = compile_handler._acquire_cross_process_lock(editor, far_future)
+    held = compile_handler._acquire_cross_process_lock(far_future)
     assert held is not None
 
-    # Same scope, already held: a near-past deadline must fail fast, not
-    # block for the full 60s budget above.
-    blocked = compile_handler._acquire_cross_process_lock(editor, time.monotonic())
-    assert blocked is None
+    # Already held: a deadline in the past must fail fast, not block for the
+    # full budget above.
+    assert compile_handler._acquire_cross_process_lock(time.monotonic()) is None
 
     compile_handler._release_cross_process_lock(held)
 
-    reacquired = compile_handler._acquire_cross_process_lock(editor, far_future)
+    reacquired = compile_handler._acquire_cross_process_lock(far_future)
     assert reacquired is not None
     compile_handler._release_cross_process_lock(reacquired)
 
 
-def test_cross_process_lock_scope_is_the_installation_directory(tmp_path):
-    """Two DIFFERENT installation directories must not contend with each
-    other -- only processes sharing the same one are the actual risk."""
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    editor_a = str(tmp_path / "a" / "MetaEditor64.exe")
-    editor_b = str(tmp_path / "b" / "MetaEditor64.exe")
-
-    held_a = compile_handler._acquire_cross_process_lock(editor_a, time.monotonic() + 5)
-    held_b = compile_handler._acquire_cross_process_lock(editor_b, time.monotonic())
-    assert held_a is not None
-    assert held_b is not None, "an unrelated installation directory was blocked"
-    compile_handler._release_cross_process_lock(held_a)
-    compile_handler._release_cross_process_lock(held_b)
+def test_the_lock_covers_the_local_cache_when_one_is_configured(lock_env, monkeypatch):
+    """The mirror is refreshed under this lock, so the lock has to sit with
+    the mirror every process shares, not with whichever copy one process
+    ended up compiling from."""
+    cache = lock_env / "cache"
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(cache))
+    assert compile_handler._cross_process_lock_path() == str(
+        cache / compile_handler._CROSS_PROCESS_LOCK_BASENAME
+    )
 
 
-def test_an_abandoned_cross_process_lock_does_not_wedge_the_endpoint_forever(tmp_path):
-    """A process killed mid-compile leaves the lock file behind; without
-    expiry every future compile from every process sharing this install
-    would report 'busy' forever."""
-    editor = str(tmp_path / "MetaEditor64.exe")
-    held = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 5)
+def test_an_old_lock_file_is_not_a_held_lock(lock_env):
+    """Holding is the OS lock, not the file. A file left behind by an earlier
+    version, or by a holder that died, blocks nobody."""
+    path = pathlib.Path(compile_handler._cross_process_lock_path())
+    path.write_text("deadbeef" * 4)
+    old = time.time() - 86400
+    os.utime(path, (old, old))
+
+    held = compile_handler._acquire_cross_process_lock(time.monotonic())
     assert held is not None
+    compile_handler._release_cross_process_lock(held)
+    assert path.exists(), "the lock file must never be deleted"
 
-    old = time.time() - (compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS + 60)
-    os.utime(held.path, (old, old))
 
-    reacquired = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 5)
-    assert reacquired is not None, "an expired cross-process lock still blocked a compile"
-    compile_handler._release_cross_process_lock(reacquired)
+def test_a_long_hold_is_never_taken_over(lock_env):
+    """Review item 2 and 3. The old lock was judged by the file's mtime: a
+    holder whose heartbeat stopped (one failed read ended it for good) was
+    reaped 60s later mid-compile, and the rename-based reaper could strand a
+    live lock. Now age means nothing: however old the file looks, a live
+    holder keeps the lock until it lets go."""
+    held = compile_handler._acquire_cross_process_lock(time.monotonic() + 5)
+    assert held is not None
+    ancient = time.time() - 86400
+    os.utime(held.path, (ancient, ancient))
+    try:
+        assert compile_handler._acquire_cross_process_lock(time.monotonic() + 0.5) is None
+    finally:
+        compile_handler._release_cross_process_lock(held)
 
 
 def test_a_real_compile_waits_for_the_cross_process_lock_then_proceeds(
@@ -1103,9 +1146,10 @@ def test_a_real_compile_waits_for_the_cross_process_lock_then_proceeds(
 ):
     """HTTP-level: proves POST /compile itself engages the cross-process lock
     (not just that the helper functions work in isolation)."""
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
     monkeypatch.setattr(compile_handler.subprocess, "run", _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"))
 
-    held = compile_handler._acquire_cross_process_lock(compile_env["editor"], time.monotonic() + 60)
+    held = compile_handler._acquire_cross_process_lock(time.monotonic() + 60)
     assert held is not None
 
     result = {}
@@ -1130,10 +1174,11 @@ def test_a_real_compile_waits_for_the_cross_process_lock_then_proceeds(
 def test_compile_returns_504_when_the_cross_process_lock_never_frees(
     client, compile_env, monkeypatch
 ):
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
     monkeypatch.setattr(compile_handler, "COMPILE_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(compile_handler, "_LOCK_WAIT_MARGIN_SECONDS", 0)
 
-    held = compile_handler._acquire_cross_process_lock(compile_env["editor"], time.monotonic() + 60)
+    held = compile_handler._acquire_cross_process_lock(time.monotonic() + 60)
     assert held is not None
     try:
         resp = _post(client, {"source": "void OnTick(){}"})
@@ -1143,189 +1188,127 @@ def test_compile_returns_504_when_the_cross_process_lock_never_frees(
         compile_handler._release_cross_process_lock(held)
 
 
-def test_slow_toolchain_resolution_extends_the_lock_deadline_instead_of_starving_it(
-    client, compile_env, monkeypatch
+def test_the_mirror_is_refreshed_inside_the_cross_process_lock(
+    client, compile_env, monkeypatch, tmp_path
 ):
-    """_local_toolchain() runs (and, on a first call with a mirror configured,
-    can take real wall-clock time copying ~100MB over a slow mount) AFTER
-    `deadline` is computed in _compile_source_inner, but BEFORE the
-    cross-process lock is acquired in _run_compile. Without extending
-    `deadline` by however long that took, a slow-but-otherwise-uncontended
-    mirror build could burn the whole lock-wait budget by itself and produce
-    a spurious 504 that was never actual lock contention -- counter-review
-    finding from the deep-qa audit that added the cross-process lock.
+    """Review item 7. Refreshing the mirror copies into and prunes the shared
+    include tree, so it must not run while another process's MetaEditor is
+    reading it: _local_toolchain() has to run with the lock already held."""
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(tmp_path / "mirror"))
+    seen = []
 
-    The lock must be genuinely CONTENDED to prove this: an uncontended
-    O_CREAT|O_EXCL acquires on its very first attempt regardless of how much
-    of `deadline` is left (even a deadline already in the past), since the
-    deadline is only ever consulted after a FAILED attempt. So this holds the
-    lock in a background thread, releasing it only after toolchain
-    resolution's slow stub has already run — the extension is what buys the
-    remaining wait for that release.
-    """
-    monkeypatch.setattr(compile_handler, "COMPILE_TIMEOUT_SECONDS", 1)
-    monkeypatch.setattr(compile_handler, "_LOCK_WAIT_MARGIN_SECONDS", 0)  # total budget: 1s
+    def _probe_toolchain():
+        # Another process trying now must be shut out.
+        other = compile_handler._acquire_cross_process_lock(time.monotonic())
+        seen.append(other is None)
+        if other is not None:
+            compile_handler._release_cross_process_lock(other)
+        return None
 
-    held = compile_handler._acquire_cross_process_lock(
-        compile_env["editor"], time.monotonic() + 10
-    )
-    assert held is not None
-
-    def _release_after_delay():
-        time.sleep(1.5)  # after the 1.2s toolchain stub below finishes
-        compile_handler._release_cross_process_lock(held)
-
-    threading.Thread(target=_release_after_delay, daemon=True).start()
-
-    real_local_toolchain = compile_handler._local_toolchain
-
-    def _slow_local_toolchain():
-        time.sleep(1.2)  # alone, already exceeds the 1s total budget
-        return real_local_toolchain()
-
-    monkeypatch.setattr(compile_handler, "_local_toolchain", _slow_local_toolchain)
+    monkeypatch.setattr(compile_handler, "_local_toolchain", _probe_toolchain)
     monkeypatch.setattr(
         compile_handler.subprocess, "run",
         _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"),
     )
+    assert _post(client, {"source": "void OnTick(){}"}).status_code == 200
+    assert seen == [True], "the mirror was touched without the cross-process lock"
 
-    resp = _post(client, {"source": "void OnTick(){}"})
-    assert resp.status_code == 200, resp.get_json()
+
+def test_the_warmup_refreshes_the_mirror_inside_the_cross_process_lock(monkeypatch, tmp_path):
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(tmp_path / "mirror"))
+    monkeypatch.setattr(compile_handler, "WARMUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(compile_handler, "_boot_time", lambda: 1)
+    monkeypatch.setattr(compile_handler, "COMPILE_WORK_DIR", str(tmp_path / "work"))
+    seen = []
+
+    def _probe_toolchain():
+        other = compile_handler._acquire_cross_process_lock(time.monotonic())
+        seen.append(other is None)
+        if other is not None:
+            compile_handler._release_cross_process_lock(other)
+        return None
+
+    monkeypatch.setattr(compile_handler, "_local_toolchain", _probe_toolchain)
+    monkeypatch.setattr(compile_handler, "COMPILE_METAEDITOR", str(tmp_path / "missing.exe"))
+    compile_handler._warmup()
+    assert seen == [True]
+    # Released afterwards, whatever the warm-up did.
+    again = compile_handler._acquire_cross_process_lock(time.monotonic())
+    assert again is not None
+    compile_handler._release_cross_process_lock(again)
 
 
-def test_cross_process_lock_logs_unexpected_errors_not_just_contention(monkeypatch, tmp_path):
-    """A FileExistsError from a held lock is ordinary and silent. Anything
-    else (permission denied, a bad path, ENOSPC) means the lock mechanism
-    itself is broken and every compile would silently report generic "busy"
-    forever -- that must be visible in the logs, not indistinguishable from
-    ordinary contention.
-    """
-    editor = str(tmp_path / "MetaEditor64.exe")
+def test_cross_process_lock_logs_unexpected_errors_not_just_contention(
+    monkeypatch, lock_env
+):
+    """Contention is ordinary and silent. Anything else (permission denied, a
+    bad path, a share that refuses locks) means the lock mechanism itself is
+    broken and every compile would report a generic "busy" forever - that has
+    to be visible in the log."""
     warnings = []
     monkeypatch.setattr(
         compile_handler.log, "warning", lambda *a, **k: warnings.append((a, k))
     )
 
-    lock_path = compile_handler._cross_process_lock_path(editor)
+    lock_path = compile_handler._cross_process_lock_path()
     real_open = os.open
 
     def _flaky_open(path, flags, mode=0o777):
         if path == lock_path:
-            raise PermissionError("simulated: lock dir not writable")
+            raise PermissionError(13, "simulated: lock dir not writable")
         return real_open(path, flags, mode)
 
     monkeypatch.setattr(compile_handler.os, "open", _flaky_open)
 
-    result = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 0.3)
-
-    assert result is None
-    assert warnings, "no warning logged for a non-contention OSError during lock acquisition"
+    assert compile_handler._acquire_cross_process_lock(time.monotonic() + 0.3) is None
     assert any("unusable" in str(args) for args, _kwargs in warnings)
 
 
-# ── Ownership: the race psyb0t reproduced on the first revision ──────
-#
-# The stale window was COMPILE_TIMEOUT_SECONDS + 120, identical to the warm-up
-# budget, so a slow-but-live holder could be declared stale mid-compile. A
-# second process then reaped that lock and created its own -- and the first
-# holder's release unlinked the path unconditionally, deleting the SECOND
-# holder's lock and letting a third compiler in alongside it.
-
-
-def test_a_late_holder_does_not_delete_the_lock_that_replaced_its_own(tmp_path):
-    """The exact sequence from the review: acquire, force-stale, let a second
-    owner take it, then release the first. The first holder must NOT remove
-    the second owner's lock, and a third caller must still be shut out.
-    """
-    editor = str(tmp_path / "MetaEditor64.exe")
-
-    first = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 5)
-    assert first is not None
-
-    # Force the false-stale condition the old stale window allowed.
-    old = time.time() - (compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS + 60)
-    os.utime(first.path, (old, old))
-
-    second = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 5)
-    assert second is not None, "the stale reaper should still recover an abandoned lock"
-    assert second.token != first.token
-
-    # The late holder finishes and releases. This must be a no-op on someone
-    # else's lock.
-    compile_handler._release_cross_process_lock(first)
-
-    assert os.path.exists(second.path), "the late holder deleted the live owner's lock"
-    assert compile_handler._read_lock_token(second.path) == second.token
-
-    third = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 0.5)
-    assert third is None, "a third compiler entered while the second was still live"
-
-    compile_handler._release_cross_process_lock(second)
-
-
-def test_a_live_holder_is_not_reaped_as_stale_while_it_works(tmp_path):
-    """The other half: a holder that outlives the stale window keeps its lock,
-    because its heartbeat keeps the mtime moving. Without that, exclusion
-    depends on a compile finishing faster than a fixed guess."""
-    editor = str(tmp_path / "MetaEditor64.exe")
-    # A stale window shorter than the hold, and a heartbeat inside it.
-    monkeypatch_stale = compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS
-    monkeypatch_beat = compile_handler._CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS
-    compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS = 5
-    compile_handler._CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS = 0.25
+def test_contention_itself_is_not_logged(monkeypatch, lock_env):
+    warnings = []
+    monkeypatch.setattr(
+        compile_handler.log, "warning", lambda *a, **k: warnings.append((a, k))
+    )
+    held = compile_handler._acquire_cross_process_lock(time.monotonic() + 5)
     try:
-        held = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 5)
-        assert held is not None
-        time.sleep(7)  # comfortably longer than the stale window
-
-        blocked = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 0.3)
-        assert blocked is None, "a live holder was reaped as stale despite its heartbeat"
-
-        compile_handler._release_cross_process_lock(held)
+        assert compile_handler._acquire_cross_process_lock(time.monotonic() + 0.3) is None
     finally:
-        compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS = monkeypatch_stale
-        compile_handler._CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS = monkeypatch_beat
+        compile_handler._release_cross_process_lock(held)
+    assert warnings == []
 
 
 # ── Real multi-process mutual exclusion ──────────────────────────────
 
 
-def _run_lock_race(tmp_path, monkeypatch, workers, hold, pre_stale):
+def _run_lock_race(tmp_path, monkeypatch, workers, hold, die_holding=False):
     """Start `workers` real interpreters that all grab the compile lock at once,
     and return their (pid, entered, exited) intervals."""
     ctx = multiprocessing.get_context("spawn")
-    editor = str(tmp_path / "MetaEditor64.exe")
-
-    if pre_stale:
-        # A lock left behind by a process that died mid-compile. Every worker
-        # will judge it stale in the same instant.
-        lock_path = compile_handler._cross_process_lock_path(editor)
-        with open(lock_path, "w", encoding="ascii") as handle:
-            handle.write("deadbeef" * 4)
-        old = time.time() - (compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS + 60)
-        os.utime(lock_path, (old, old))
+    editor = tmp_path / "MetaEditor64.exe"
+    editor.write_bytes(b"MZ")
 
     monkeypatch.setenv("MT5_REPO_ROOT", str(pathlib.Path(__file__).resolve().parents[1]))
+    monkeypatch.setenv("COMPILE_TERMINAL_DIR", str(tmp_path))
+    monkeypatch.delenv("COMPILE_LOCAL_CACHE", raising=False)
     with ctx.Manager() as manager:
         results = manager.list()
         barrier = manager.Barrier(workers)
         procs = [
             ctx.Process(
                 target=compile_lock_worker.run,
-                args=(editor, hold, barrier, results),
+                args=(hold, barrier, results, die_holding and index == 0),
             )
-            for _ in range(workers)
+            for index in range(workers)
         ]
         for proc in procs:
             proc.start()
         for proc in procs:
             proc.join(timeout=180)
-            assert proc.exitcode == 0, f"worker exited {proc.exitcode}"
         intervals = sorted(list(results), key=lambda row: row[1])
+        exit_codes = [proc.exitcode for proc in procs]
 
-    assert len(intervals) == workers
     assert all(row[0] != "timeout" for row in intervals), f"a worker never got the lock: {intervals}"
-    return intervals
+    return intervals, exit_codes
 
 
 def _assert_no_overlap(intervals, hold):
@@ -1341,118 +1324,306 @@ def _assert_no_overlap(intervals, hold):
 def test_separate_processes_never_hold_the_compile_lock_at_the_same_time(
     tmp_path, monkeypatch
 ):
-    """The cross-process proof the review asked for: real OS processes, started
-    together on a barrier, each recording when it entered and left the critical
-    section. Any overlap means two MetaEditors could have run concurrently.
-
-    A helper-level test cannot show this -- it shares one interpreter, so it
-    proves nothing about the file lock that is the actual mechanism.
-    """
+    """Real OS processes, started together on a barrier, each recording when it
+    entered and left the critical section. Any overlap means two MetaEditors
+    could have run concurrently."""
     hold = 0.4
-    intervals = _run_lock_race(tmp_path, monkeypatch, workers=4, hold=hold, pre_stale=False)
+    intervals, exit_codes = _run_lock_race(tmp_path, monkeypatch, workers=4, hold=hold)
+    assert exit_codes == [0, 0, 0, 0]
+    assert len(intervals) == 4
     _assert_no_overlap(intervals, hold)
 
 
-def test_separate_processes_do_not_all_win_a_stale_lock_at_once(tmp_path, monkeypatch):
-    """The interleaving a bare `os.remove` stale sweep gets wrong.
-
-    Every waiter judges the dead lock stale in the same instant. With a plain
-    remove, a loser's unlink lands AFTER a winner has recreated the file --
-    deleting the new owner's lock, so the next waiter creates its own and two
-    compilers run together. Ownership tokens alone do not catch this: the
-    damage happens during acquisition, long before anyone releases.
-    """
+def test_a_holder_killed_mid_compile_releases_the_lock_at_once(tmp_path, monkeypatch):
+    """The case the stale window used to cover. The first worker takes the
+    lock and is killed while holding it (os._exit, no release). The others
+    must get the lock as soon as it dies - not after a stale window - and
+    still one at a time."""
     hold = 0.4
-    intervals = _run_lock_race(tmp_path, monkeypatch, workers=6, hold=hold, pre_stale=True)
+    started = time.monotonic()
+    intervals, exit_codes = _run_lock_race(
+        tmp_path, monkeypatch, workers=3, hold=hold, die_holding=True
+    )
+    assert sorted(exit_codes) == [0, 0, 9]
+    assert len(intervals) == 2, intervals
     _assert_no_overlap(intervals, hold)
+    assert time.monotonic() - started < 30, "waiters sat out a stale window"
 
 
-def test_a_stale_sweep_does_not_delete_the_lock_that_replaced_the_dead_one(
-    tmp_path, monkeypatch
+# ── Bounded waiting (review item 1) ──────────────────────────────────
+
+
+def test_waiting_compiles_are_bounded_and_the_rest_get_429(client, compile_env, monkeypatch):
+    """A compile waiting on the lock holds a waitress thread. With only the
+    compile token, a caller must not be able to park the whole pool: past
+    MAX_WAITING_COMPILES waiters the answer is an immediate 429."""
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"),
+    )
+    compile_handler._COMPILE_LOCK.acquire()  # a compile in flight
+    waiters = []
+    try:
+        # The running compile's slot is taken by the stand-in above only in
+        # spirit; fill every slot with real requests that block on the lock.
+        slots = 1 + compile_handler.MAX_WAITING_COMPILES
+        for _ in range(slots):
+            thread = threading.Thread(
+                target=lambda: waiters.append(_post(client, {"source": "void OnTick(){}"}))
+            )
+            thread.start()
+        deadline = time.monotonic() + 5
+        while compile_handler._COMPILE_SLOTS._value and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert compile_handler._COMPILE_SLOTS._value == 0
+
+        started = time.monotonic()
+        refused = _post(client, {"source": "void OnTick(){}"})
+        assert refused.status_code == 429
+        assert refused.headers["Retry-After"] == str(compile_handler._BUSY_RETRY_AFTER_SECONDS)
+        assert refused.get_json()["ok"] is False
+        assert time.monotonic() - started < 1, "the refusal waited instead of answering"
+    finally:
+        compile_handler._COMPILE_LOCK.release()
+
+    deadline = time.monotonic() + 10
+    while len(waiters) < slots and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert [r.status_code for r in waiters] == [200] * slots
+    # Every slot is handed back.
+    assert compile_handler._COMPILE_SLOTS._value == slots
+
+
+def test_a_refused_or_failed_compile_hands_its_slot_back(client, compile_env, monkeypatch):
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    slots = 1 + compile_handler.MAX_WAITING_COMPILES
+    for _ in range(slots + 2):
+        assert _post(client, {"source": "void OnTick(){}"}).status_code == 500
+    assert compile_handler._COMPILE_SLOTS._value == slots
+
+
+# ── include_hash follows the tree (review item 4) ────────────────────
+
+
+def test_include_hash_follows_an_edit_without_a_local_cache(
+    client, compile_env, monkeypatch, tmp_path
 ):
-    """The reap-side half of the race, forced deterministically.
-
-    Every waiter judges a dead lock stale in the same instant. The dangerous
-    interleaving is a loser that is descheduled between judging and acting: by
-    the time it acts, a winner has already reaped and created its own lock, and
-    a bare `os.remove` deletes THAT -- so the next waiter walks straight in and
-    two MetaEditors run together. Ownership tokens cannot catch it, because the
-    damage is done during acquisition, before anyone releases.
-
-    Scheduling this by luck is unreliable (a plain multi-process race reproduces
-    it only sometimes), so the window is held open explicitly.
-    """
-    editor = str(tmp_path / "MetaEditor64.exe")
-    lock_path = compile_handler._cross_process_lock_path(editor)
-
-    with open(lock_path, "w", encoding="ascii") as handle:
-        handle.write("deadholder")
-    stale = time.time() - (compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS + 60)
-    os.utime(lock_path, (stale, stale))
-
-    judged = threading.Event()
-    winner_done = threading.Event()
-    real_getmtime = os.path.getmtime
-
-    def _getmtime_that_holds_the_window_open(path):
-        if path == lock_path and not judged.is_set():
-            judged.set()
-            winner_done.wait(timeout=10)
-            return stale  # what the loser saw when it decided to reap
-        return real_getmtime(path)
-
-    monkeypatch.setattr(compile_handler.os.path, "getmtime", _getmtime_that_holds_the_window_open)
-
-    loser = threading.Thread(
-        target=compile_handler._reap_if_stale, args=(lock_path, "loser-token"), daemon=True
+    """With compile_local_cache unset (the default) nothing used to clear the
+    cached digest, so after anyone edited a header every compile kept
+    reporting the old hash."""
+    include = tmp_path / "MQL5" / "Include"
+    include.mkdir(parents=True)
+    header = include / "Lib.mqh"
+    header.write_text("// v1")
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"),
     )
-    loser.start()
-    assert judged.wait(timeout=10), "the reaper never judged the lock"
+    first = _post(client, {"source": "void OnTick(){}"}).get_json()["include_hash"]
+    assert _post(client, {"source": "void OnTick(){}"}).get_json()["include_hash"] == first
 
-    # The winner reaps the dead lock and takes ownership while the loser is
-    # still mid-decision.
-    os.remove(lock_path)
-    with open(lock_path, "w", encoding="ascii") as handle:
-        handle.write("winner-token")
-    winner_done.set()
-    loser.join(timeout=10)
+    header.write_text("// v2, edited in the terminal's MQL5 folder")
+    second = _post(client, {"source": "void OnTick(){}"}).get_json()["include_hash"]
+    assert second != first
 
-    assert os.path.exists(lock_path), "the stale sweep deleted the new owner's lock"
-    assert compile_handler._read_lock_token(lock_path) == "winner-token", (
-        "the new owner's lock was replaced by the stale sweep"
+
+def test_include_hash_follows_a_refresh_made_by_another_process(
+    client, compile_env, monkeypatch, tmp_path
+):
+    """With a shared mirror, another process's refresh never ran this
+    process's invalidation, so its cached digest went stale."""
+    mirror = tmp_path / "mirror"
+    (mirror / "MQL5" / "Include").mkdir(parents=True)
+    header = mirror / "MQL5" / "Include" / "Lib.mqh"
+    header.write_text("// v1")
+    monkeypatch.setattr(compile_handler, "_LOCAL_TOOLCHAIN_RESOLVED", True)
+    monkeypatch.setattr(
+        compile_handler, "_LOCAL_TOOLCHAIN",
+        (compile_env["editor"], str(mirror / "MQL5")),
     )
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(mirror))
+    monkeypatch.setattr(compile_handler, "INCLUDE_REFRESH_SECONDS", 3600)
+    monkeypatch.setattr(compile_handler, "_INCLUDES_CHECKED_AT", time.monotonic())
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"),
+    )
+    first = _post(client, {"source": "void OnTick(){}"}).get_json()["include_hash"]
+
+    # Another process refreshes the shared mirror; this one does not know.
+    header.write_text("// v2 copied in by a sibling process")
+    second = _post(client, {"source": "void OnTick(){}"}).get_json()["include_hash"]
+    assert second != first
 
 
-def test_an_unreadable_abandoned_lock_is_still_reaped(tmp_path, monkeypatch):
-    """A lock file that exists but cannot be READ must not wedge the endpoint.
+# ── ea_version (review item 6) ───────────────────────────────────────
 
-    Ownership checks read the token, and an unreadable file yields no token --
-    so a sweep that bails out whenever it cannot identify the holder never
-    reaps this one, and every future compile from every process sharing the
-    install returns 504 forever. stat and unlink need no read permission, so
-    an unreadable lock older than the stale window is abandoned by definition
-    and must still be recoverable.
-    """
-    editor = str(tmp_path / "MetaEditor64.exe")
-    lock_path = compile_handler._cross_process_lock_path(editor)
-    with open(lock_path, "w", encoding="ascii") as handle:
-        handle.write("deadholder")
-    old = time.time() - (compile_handler._CROSS_PROCESS_LOCK_STALE_SECONDS + 600)
-    os.utime(lock_path, (old, old))
 
-    real_open = builtins.open
+@pytest.mark.parametrize(
+    "bad",
+    ["1.0\n2026-09-29 12:00:00 INFO forged line", "x" * 65, "", 12, ["1.0"], "1.0 beta"],
+)
+def test_ea_version_must_be_a_short_simple_token(client, compile_env, monkeypatch, bad):
+    ran = []
+    monkeypatch.setattr(compile_handler.subprocess, "run", lambda *a, **k: ran.append(a))
+    resp = _post(client, {"source": "void OnTick(){}", "ea_version": bad})
+    assert resp.status_code == 400
+    assert "ea_version" in resp.get_json()["log"]
+    assert ran == []
 
-    def _unreadable(path, *args, **kwargs):
-        # Keyed on the prefix, not the exact name: permissions follow the
-        # inode, so the file stays unreadable after the sweep renames it aside.
-        if str(path).startswith(lock_path) and (not args or "r" in str(args[0])):
-            raise PermissionError("simulated: lock file not readable")
-        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", _unreadable)
+def test_a_simple_ea_version_is_logged(client, compile_env, monkeypatch):
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"),
+    )
+    lines = []
+    monkeypatch.setattr(compile_handler.log, "info", lambda msg, *a: lines.append(msg % a))
+    assert _post(client, {"source": "void OnTick(){}", "ea_version": "2.14.0-rc1"}).status_code == 200
+    assert any("ea_version=2.14.0-rc1 " in line for line in lines)
 
-    assert compile_handler._read_lock_token(lock_path) is None
-    acquired = compile_handler._acquire_cross_process_lock(editor, time.monotonic() + 5)
 
-    assert acquired is not None, "an unreadable abandoned lock wedged the endpoint forever"
-    compile_handler._release_cross_process_lock(acquired)
+# ── What the source itself can reach (review item 10) ────────────────
+#
+# MetaEditor resolves #include, #resource and #property icon itself. Measured
+# on a real MetaEditor (tests/integration/test_compile_reach.py): #include
+# accepts absolute paths and `..` walks, #property icon accepts `..`, and
+# #resource refuses both. The handler refuses all of them before MetaEditor
+# runs, rather than relying on which ones MetaEditor happens to stop.
+
+SHARED = r"C:\Users\Docker\Desktop\Shared"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f'#include "{SHARED}\\config\\config.yaml"',
+        f"#include <{SHARED}\\config\\config.yaml>",
+        '#include "C:/Users/Docker/Desktop/Shared/config/config.yaml"',
+        r'#include "..\..\..\config\config.yaml"',
+        '#include "../../../config/config.yaml"',
+        r"#include <..\..\..\config\config.yaml>",
+        r'#include "\\host.lan\Data\config\config.yaml"',
+        r'#include "\Windows\win.ini"',
+        r'#include ".. \..\config.yaml"',
+        r'#include "...\x.mqh"',
+        r'#include "Trade\..\..\x.mqh"',
+        r'#include "file.mqh:stream"',
+        r'#include "CON"',
+        r'#include "nul.mqh"',
+        f'   #include "{SHARED}\\x.mqh"',
+        f'/* leading comment */#include "{SHARED}\\x.mqh"',
+        f'#/* inside */include "{SHARED}\\x.mqh"',
+        f'# include "{SHARED}\\x.mqh"',
+        f'#INCLUDE "{SHARED}\\x.mqh"',
+        r'#resource "..\..\secret.txt" as string s',
+        f'#resource "{SHARED}\\secret.txt" as string s',
+        r'#resource "\\host.lan\Data\secret.txt"',
+        r'#resource "\..\..\secret.txt"',
+        r'#property icon "..\..\Users\Docker\Desktop\Shared\x.ico"',
+        f'#property icon "{SHARED}\\x.ico"',
+        r'#property  icon "\..\x.ico"',
+        '#define P "C:\\\\x.mqh"\n#include P',
+    ],
+)
+def test_source_cannot_name_a_file_outside_the_sandbox(client, compile_env, monkeypatch, source):
+    ran = []
+    monkeypatch.setattr(compile_handler.subprocess, "run", lambda *a, **k: ran.append(a))
+    resp = _post(client, {"source": source + "\nvoid OnTick(){}\n"})
+    assert resp.status_code == 400, resp.get_json()
+    assert resp.get_json()["ok"] is False
+    assert ran == [], "MetaEditor ran on a refused source"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "#include <Trade\\Trade.mqh>",
+        "#include <Trade/Trade.mqh>",
+        '#include "Helpers.mqh"',
+        '#include ".\\Helpers.mqh"',
+        '#resource "\\Images\\logo.bmp"',
+        '#resource "\\Files\\data.csv" as string data',
+        '#resource "logo.bmp"',
+        '#property icon "\\Images\\app.ico"',
+        '#property copyright "C:\\\\ is not a path here"',
+        '#import "kernel32.dll"\nint GetTickCount();\n#import',
+        f'// #include "{SHARED}\\x.mqh" in a comment is not a directive',
+        f'/*\n#include "{SHARED}\\x.mqh"\n*/',
+        'string s = "#include \\"C:\\\\x.mqh\\"";',
+        'Print("// not a comment"); #include <Trade\\Trade.mqh>',
+    ],
+)
+def test_ordinary_directives_still_compile(client, compile_env, monkeypatch, source):
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary"),
+    )
+    resp = _post(client, {"source": source + "\nvoid OnTick(){}\n"})
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_the_refusal_names_the_directive_and_path(client, compile_env):
+    resp = _post(client, {"source": '#include "..\\secret.mqh"\n'})
+    body = resp.get_json()
+    assert resp.status_code == 400
+    assert '#include "..\\secret.mqh"' in body["log"]
+    assert "parent-directory" in body["log"]
+
+
+# ── compile_timeout and the /compile byte caps ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("10", 10), ("45", 45), ("45s", 45), ("1m", 60), ("1", 1)],
+)
+def test_compile_timeout_reads_bare_numbers_as_seconds(monkeypatch, raw, expected):
+    """A bare number used to be read as hours: 10 became 36000s, clamped to
+    60."""
+    monkeypatch.setenv("COMPILE_TIMEOUT", raw)
+
+    assert config._compile_timeout() == expected
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "0s", "1.5.2"])
+def test_an_invalid_compile_timeout_falls_back_to_the_default_with_a_warning(
+    monkeypatch, caplog, raw
+):
+    """'abc' used to raise while config.py was imported, so the whole API -
+    trading included - failed to start over one optional compile setting."""
+    monkeypatch.setenv("COMPILE_TIMEOUT", raw)
+
+    with caplog.at_level("WARNING", logger="mt5api.config"):
+        assert config._compile_timeout() == config.COMPILE_TIMEOUT_DEFAULT_SECONDS
+    assert "compile_timeout" in caplog.text
+
+
+def test_a_compile_timeout_above_the_ceiling_is_lowered_with_a_warning(monkeypatch, caplog):
+    monkeypatch.setenv("COMPILE_TIMEOUT", "5m")
+
+    with caplog.at_level("WARNING", logger="mt5api.config"):
+        assert config._compile_timeout() == config.COMPILE_TIMEOUT_CEILING_SECONDS
+    assert "ceiling" in caplog.text
+
+
+@pytest.mark.parametrize("name", ["COMPILE_MAX_SOURCE_BYTES", "COMPILE_MAX_EX5_BYTES"])
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_an_invalid_compile_byte_cap_falls_back_to_the_default_with_a_warning(
+    monkeypatch, caplog, name, bad
+):
+    """0 or below used to become 1024 bytes, which refuses almost every real
+    EA, and said nothing."""
+    monkeypatch.setenv(name, bad)
+
+    with caplog.at_level("WARNING", logger="mt5api.config"):
+        assert config._positive_int_setting(name, name.lower(), 2 * 1024 * 1024) == 2 * 1024 * 1024
+    assert name in caplog.text

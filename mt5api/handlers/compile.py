@@ -11,9 +11,11 @@ it to a compiler:
     reduced to a bare stem and re-suffixed, so "../../terminal64" or
     "C:\\Windows\\x" cannot escape the temp directory.
   * The caller controls neither /log: nor /inc:. Both are computed here.
-  * Nothing is read from disk on the caller's behalf. The only files touched are
-    the ones written into a per-request temp directory, which is removed on
-    every exit path.
+  * The handler reads nothing from disk on the caller's behalf. The only files
+    it touches are in a per-request temp directory, removed on every exit path.
+  * MetaEditor itself does read files the source names: #include, #resource
+    and #property icon. Those paths are checked before it runs, see
+    _check_source_paths().
   * The handler cannot trade, cannot restart a terminal, and never touches the
     MT5 SDK. It shells out to MetaEditor64.exe and reads back two files.
 
@@ -30,6 +32,7 @@ MetaEditor specifics worth knowing before editing this:
 """
 
 import base64
+import errno
 import fnmatch
 import hashlib
 import os
@@ -39,8 +42,8 @@ import subprocess
 import tempfile
 import threading
 import time
-import uuid
 
+import psutil
 from flask import jsonify, request
 
 from mt5api.config import (
@@ -70,6 +73,21 @@ _COMPILE_LOCK = threading.Lock()
 #: dead host.
 _LOCK_WAIT_MARGIN_SECONDS = 30
 
+#: How many compile requests may wait behind the one that is running.
+#:
+#: waitress serves every route from one fixed pool of threads, and a compile
+#: waiting on the lock holds one of them for up to the budget above. Unbounded,
+#: a caller with nothing but the compile-only token could park the whole pool
+#: behind the lock and stall orders, positions and /ping — the routes that
+#: token is supposed to be unable to affect. Past this many waiters a request
+#: is answered 429 at once instead of queueing.
+MAX_WAITING_COMPILES = 2
+_COMPILE_SLOTS = threading.BoundedSemaphore(1 + MAX_WAITING_COMPILES)
+
+#: Seconds a 429 asks the caller to wait before retrying. About one warm
+#: compile.
+_BUSY_RETRY_AFTER_SECONDS = 5
+
 #: _COMPILE_LOCK above only serializes calls inside ONE process. Every mt5api
 #: process on a VM exposes /compile and, by default, every one of them
 #: resolves COMPILE_METAEDITOR (or the local mirror) to the SAME installation
@@ -77,216 +95,111 @@ _LOCK_WAIT_MARGIN_SECONDS = 30
 #: per installation directory" MetaEditor is across N processes, not within
 #: one. Verified live: two separate OS processes each holding their own
 #: (empty) _COMPILE_LOCK ran MetaEditor fully concurrently against a shared
-#: install with no serialization at all. This is the same O_CREAT|O_EXCL
-#: claim idiom _claim_warmup() already uses for exactly this kind of
-#: cross-process sharing (see below), extended to cover every real compile
-#: and the warm-up compile alike — not just the "who gets to warm up" claim.
+#: install with no serialization at all.
+#:
+#: The lock is an operating-system byte-range lock on this file (msvcrt on
+#: Windows, flock elsewhere), not a file whose existence means "held". The OS
+#: drops it the moment its holder's handle closes, including when the process
+#: is killed, so there is no stale lock to detect, no heartbeat to keep it
+#: fresh and no reaper that could remove a live holder's lock. The file itself
+#: is never deleted.
 _CROSS_PROCESS_LOCK_BASENAME = ".compile-inflight.lock"
 
-#: No named-mutex-with-timeout primitive is available identically on both the
-#: Windows host this runs on and Linux (where it's tested) without an extra
-#: dependency, so this polls instead. Cheap relative to a compile.
+#: Polled rather than blocking, so a waiter still honours its deadline. Cheap
+#: relative to a compile.
 _CROSS_PROCESS_LOCK_POLL_SECONDS = 0.2
 
-#: How often a live holder rewrites its lock file's mtime. The holder spends
-#: its whole critical section inside a blocking subprocess call, so this runs
-#: on its own thread.
-_CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS = 5
+if os.name == "nt":
+    import msvcrt
 
-#: A lock whose mtime has not moved for this long is abandoned — its holder
-#: died without releasing it (crash, kill -9, container stop).
-#:
-#: Deliberately NOT derived from COMPILE_TIMEOUT_SECONDS. When it was
-#: (COMPILE_TIMEOUT_SECONDS + 120, the same value as the warm-up budget), a
-#: slow but still-live holder could be declared stale while it was inside its
-#: critical section: a second process would then delete that lock and create
-#: its own, and the first holder's release would delete the SECOND holder's
-#: lock, letting a third compiler in while the second was still running.
-#:
-#: A live holder now refreshes every _CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS, so
-#: this is a count of missed beats (12 of them) rather than a guess about how
-#: long a compile may legitimately take. Ownership tokens below close the same
-#: race from the other side.
-_CROSS_PROCESS_LOCK_STALE_SECONDS = 60
+    def _os_try_lock(fd):
+        # msvcrt locks from the current position; pin it to byte 0 so every
+        # process contends for the same byte.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
 
+    def _os_unlock(fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
-def _cross_process_lock_path(metaeditor_path):
-    """Lock file for the actual toolchain directory THIS call will invoke —
-    the raw configured path, or the local mirror, whichever _local_toolchain()
-    resolved to. Both are shared VM-wide by default, which is exactly what
-    needs the lock."""
-    return os.path.join(os.path.dirname(metaeditor_path), _CROSS_PROCESS_LOCK_BASENAME)
+else:
+    import fcntl
+
+    def _os_try_lock(fd):
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _os_unlock(fd):
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-def _read_lock_token(path):
-    """The token currently in the lock file, or None if it is gone/unreadable."""
-    try:
-        with open(path, "r", encoding="ascii") as handle:
-            return handle.read(64).strip()
-    except OSError:
-        return None
+#: errno values that mean "someone else holds it". msvcrt reports contention
+#: as EACCES (or EDEADLOCK), flock as EWOULDBLOCK/EAGAIN.
+_CONTENTION_ERRNOS = {
+    getattr(errno, name)
+    for name in ("EACCES", "EAGAIN", "EWOULDBLOCK", "EDEADLK", "EDEADLOCK")
+    if hasattr(errno, name)
+}
+
+
+def _cross_process_lock_path():
+    """The lock file for the toolchain every process on this VM shares.
+
+    The local mirror's directory when one is configured, because that is the
+    tree the lock has to cover: the mirror is refreshed (copied into and
+    pruned) under this lock as well as compiled from. Otherwise the configured
+    installation directory. Chosen from configuration, not from whichever copy
+    _local_toolchain() picked, because the lock has to be held before the
+    mirror is touched.
+    """
+    if COMPILE_LOCAL_CACHE:
+        try:
+            os.makedirs(COMPILE_LOCAL_CACHE, exist_ok=True)
+            return os.path.join(COMPILE_LOCAL_CACHE, _CROSS_PROCESS_LOCK_BASENAME)
+        except OSError as exc:
+            log.warning("compile: local cache %s unusable for the lock (%s)", COMPILE_LOCAL_CACHE, exc)
+    return os.path.join(os.path.dirname(COMPILE_METAEDITOR), _CROSS_PROCESS_LOCK_BASENAME)
 
 
 class _CrossProcessLock:
-    """A held cross-process compile lock.
+    """A held cross-process compile lock: an open handle with byte 0 locked."""
 
-    Carries a unique owner token so release can tell "my lock" from "a lock
-    that replaced mine after I was wrongly reaped". Without that check a
-    late-finishing holder deletes whoever owns the lock now, which admits a
-    second concurrent MetaEditor — the whole thing this lock exists to prevent.
-    """
-
-    def __init__(self, path, token):
+    def __init__(self, path, fd):
         self.path = path
-        self.token = token
-        self._stop = threading.Event()
-        self._heartbeat = threading.Thread(
-            target=self._beat, name="compile-lock-heartbeat", daemon=True
-        )
-        self._heartbeat.start()
-
-    def _beat(self):
-        while not self._stop.wait(_CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS):
-            # Re-check ownership every beat: if we were reaped and replaced,
-            # refreshing the file would keep ANOTHER holder's lock alive and
-            # hide its own staleness. Stop touching it instead.
-            if _read_lock_token(self.path) != self.token:
-                return
-            try:
-                os.utime(self.path, None)
-            except OSError as exc:
-                # Keep beating. A transient failure here (a Windows sharing
-                # violation, an AV scan, a momentary EACCES) must not end
-                # liveness for the rest of the hold — that would let the next
-                # stale sweep reap a lock whose compile is still running.
-                log.warning("compile: lock heartbeat at %s failed (%s)", self.path, exc)
+        self.fd = fd
 
     def release(self):
-        self._stop.set()
-        self._heartbeat.join(timeout=_CROSS_PROCESS_LOCK_HEARTBEAT_SECONDS)
-        holder = _read_lock_token(self.path)
-        if holder is None and os.path.exists(self.path):
-            # Present but unreadable. We cannot prove it is still ours, and
-            # deleting someone else's lock is the failure this class exists to
-            # prevent — so leave it for the stale sweep and say so.
-            log.warning(
-                "compile: could not read the lock at %s to release it; "
-                "leaving it for the stale sweep", self.path,
-            )
-            return
-        if holder is None:
-            return  # already gone
-        if holder != self.token:
-            # We were reaped as stale and someone else legitimately owns the
-            # lock now. Removing it would let a third process in alongside
-            # them. Leave it; their own release (or the stale reaper) handles it.
-            log.warning(
-                "compile: cross-process lock at %s is held by another owner; not removing",
-                self.path,
-            )
-            return
         try:
-            os.remove(self.path)
-        except OSError:
-            pass
+            _os_unlock(self.fd)
+        except OSError as exc:
+            # Closing the handle below releases it regardless.
+            log.warning("compile: unlocking %s failed (%s)", self.path, exc)
+        finally:
+            os.close(self.fd)
 
 
-def _reap_if_stale(path, token):
-    """Remove an abandoned lock. A live holder's heartbeat keeps its mtime far
-    inside the window, so this only fires for a holder that stopped running.
-
-    Claim-by-rename, not a bare os.remove. Every waiter polls this, so the
-    moment a lock does expire they all judge it stale together — and a loser's
-    remove can land AFTER a winner has already created its replacement,
-    deleting the NEW owner's lock and admitting a second MetaEditor. Ownership
-    tokens do not help there: the damage is done before anyone releases.
-    Renaming is atomic on POSIX and Windows alike, so exactly one racer moves
-    a given file and the rest fail outright.
-    """
-    observed = _read_lock_token(path)
-    if observed is None and not os.path.exists(path):
-        return  # absent — nothing to reap
-    if observed is None:
-        # Present but unreadable. Do NOT bail out here: stat and unlink need no
-        # read permission, so refusing to touch it would wedge every future
-        # compile forever over one bad file — the exact outcome the stale
-        # window exists to prevent. Fall through to the age check; an
-        # unreadable lock older than the window is abandoned by definition.
-        log.warning("compile: lock at %s exists but cannot be read", path)
-    try:
-        # Wall clock against the file's mtime, because mtime is the only
-        # liveness signal that crosses processes. A forward clock step larger
-        # than the stale window would therefore make every live lock look
-        # abandoned at once; ntpd slews rather than steps after initial sync,
-        # so this is accepted rather than defended against.
-        if time.time() - os.path.getmtime(path) <= _CROSS_PROCESS_LOCK_STALE_SECONDS:
-            return
-    except OSError:
-        return  # vanished under us
-
-    claimed = f"{path}.{token}.dead"
-    try:
-        os.rename(path, claimed)
-    except OSError:
-        return  # another reaper claimed it first, or the holder released it
-
-    if _read_lock_token(claimed) != observed:
-        # What we moved is NOT the dead lock we judged: a winner reaped and
-        # recreated it between our staleness check and our rename. Deleting it
-        # would strand a live holder and let a second compiler in, so put it
-        # straight back. `path` is empty here precisely because we just moved
-        # it, so this all but always succeeds.
-        try:
-            if not os.path.exists(path):
-                os.rename(claimed, path)
-                return
-        except OSError:
-            pass
-        log.warning("compile: could not restore a live lock at %s after a reap race", path)
-        return
-
-    try:
-        os.remove(claimed)
-    except OSError:
-        pass
-
-
-def _acquire_cross_process_lock(metaeditor_path, deadline):
-    """Block (polling), until this process is the only one invoking
-    `metaeditor_path`, or `deadline` (a time.monotonic() value) passes.
+def _acquire_cross_process_lock(deadline):
+    """Block (polling) until this process is the only one using the shared
+    toolchain, or `deadline` (a time.monotonic() value) passes.
 
     Returns a _CrossProcessLock to pass to _release_cross_process_lock, or
     None on timeout.
     """
-    path = _cross_process_lock_path(metaeditor_path)
-    token = uuid.uuid4().hex
+    path = _cross_process_lock_path()
     while True:
-        _reap_if_stale(path, token)
+        fd = None
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            try:
-                os.write(fd, token.encode("ascii"))
-            finally:
-                os.close(fd)
-            try:
-                return _CrossProcessLock(path, token)
-            except Exception:
-                # The file is on disk but nothing owns it — e.g. the heartbeat
-                # thread could not start. Leaving it would wedge the toolchain
-                # for a whole stale window over a lock no one holds.
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-                raise
-        except FileExistsError:
-            pass  # another process holds it -- the expected, silent case
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            _os_try_lock(fd)
+            return _CrossProcessLock(path, fd)
         except OSError as exc:
-            # Anything else (permission denied, ENOSPC, a bad path) is NOT
-            # ordinary contention: without this, a broken lock directory
-            # would poll silently until `deadline` and come back as a plain
-            # "compile busy", indistinguishable from real load.
-            log.warning("compile: cross-process lock at %s unusable (%s)", path, exc)
+            if fd is not None:
+                os.close(fd)
+            if exc.errno not in _CONTENTION_ERRNOS or fd is None:
+                # Anything but contention (permission denied, a bad path, a
+                # share that refuses locks) would otherwise poll silently
+                # until `deadline` and come back as a plain "compile busy",
+                # indistinguishable from real load.
+                log.warning("compile: cross-process lock at %s unusable (%s)", path, exc)
         if time.monotonic() >= deadline:
             return None
         time.sleep(_CROSS_PROCESS_LOCK_POLL_SECONDS)
@@ -317,12 +230,14 @@ _LOCAL_TOOLCHAIN_RESOLVED = False
 #: When the mirrored include tree was last re-checked against the source.
 _INCLUDES_CHECKED_AT = 0.0
 
-#: Cached include-tree digest, and the root it was computed for.
+#: Cached include-tree digest, and the (root, tree signature) it was computed
+#: for. See _tree_signature().
 _INCLUDE_HASH = None
 _INCLUDE_HASH_KEY = None
 
-#: Cached per-header digests, keyed by the same root.
+#: Cached per-header digests, keyed the same way.
 _INCLUDE_FILES = None
+_INCLUDE_FILES_KEY = None
 
 #: Globs (relative to the include root) whose per-file digests are reported.
 _INCLUDE_DIGEST_PATTERNS = tuple(
@@ -357,13 +272,16 @@ WARMUP_DELAY_SECONDS = 180
 
 #: Every API process on a VM exposes /compile and they share COMPILE_LOCAL_CACHE,
 #: so an ungated warm-up means one MetaEditor per terminal - 20 of them on this
-#: host, all at once. A claim file in the shared cache keeps it to one per VM.
+#: host, all at once. A claim file in the shared cache keeps it to one per VM
+#: per boot: it records the boot it was made in, and a claim from an earlier
+#: boot is replaced. The cache directory survives reboots, so an undated claim
+#: (or one that merely expired after an hour) would skip the warm-up on any
+#: boot that came sooner than that.
 _WARMUP_CLAIM = ".warmup-claim"
 
-#: A claim older than this is treated as abandoned, so a process that died
-#: holding it cannot disable warm-up for every future boot. The cache directory
-#: survives reboots; the claim inside it must not be permanent.
-WARMUP_CLAIM_TTL_SECONDS = 3600
+#: Boot times read in two processes of the same boot can differ by a second or
+#: two on Windows, where they are derived from the uptime counter.
+_BOOT_TIME_TOLERANCE_SECONDS = 60
 
 
 def _is_current(src, dst):
@@ -431,6 +349,34 @@ def _mirror_tree(src, dst):
     return copied, removed
 
 
+def _include_root(include_root):
+    """The directory the digests cover: <inc>/Include, or <inc> itself."""
+    root = os.path.join(include_root, "Include")
+    if not os.path.isdir(root):
+        root = include_root
+    return root if os.path.isdir(root) else None
+
+
+def _tree_signature(root):
+    """(relative path, size, mtime) for every file under `root`, sorted.
+
+    What decides whether a cached digest still describes the tree. The tree
+    changes under this process in ways it never sees: an operator edits a
+    header in the terminal's live MQL5 folder, or another process refreshes a
+    shared mirror. A few hundred stats per compile catch both, where re-reading
+    the ~16MB of contents every time would not be worth it.
+    """
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            stat = os.stat(path)
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            entries.append((relative, stat.st_size, stat.st_mtime_ns))
+    return tuple(entries)
+
+
 def _include_hash(include_root):
     """sha256 over the include tree the compiler was actually given.
 
@@ -445,38 +391,30 @@ def _include_hash(include_root):
     Covers relative paths as well as contents so that adding, renaming or
     removing a header changes the digest, not just editing one.
 
-    Cached against _INCLUDE_HASH_KEY because the tree only changes when this
-    module copies into it, and re-reading ~16MB per compile buys nothing.
+    Cached against the tree's signature, so an edit by anyone - not only by
+    this module's mirror refresh - produces a new digest on the next compile.
     """
     global _INCLUDE_HASH, _INCLUDE_HASH_KEY
 
-    root = os.path.join(include_root, "Include")
-    if not os.path.isdir(root):
-        root = include_root
-    if not os.path.isdir(root):
+    root = _include_root(include_root)
+    if root is None:
         return None
-    if _INCLUDE_HASH_KEY == root and _INCLUDE_HASH:
-        return _INCLUDE_HASH
-
-    digest = hashlib.sha256()
     try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            # Sorted so the digest is stable across filesystems that hand back
-            # directory entries in different orders.
-            dirnames.sort()
-            for name in sorted(filenames):
-                path = os.path.join(dirpath, name)
-                relative = os.path.relpath(path, root).replace(os.sep, "/")
-                digest.update(relative.encode("utf-8", "replace") + b"\0")
-                with open(path, "rb") as handle:
-                    for chunk in iter(lambda h=handle: h.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                digest.update(b"\0")
+        key = (root, _tree_signature(root))
+        if _INCLUDE_HASH_KEY == key and _INCLUDE_HASH:
+            return _INCLUDE_HASH
+        digest = hashlib.sha256()
+        for relative, _size, _mtime in key[1]:
+            digest.update(relative.encode("utf-8", "replace") + b"\0")
+            with open(os.path.join(root, *relative.split("/")), "rb") as handle:
+                for chunk in iter(lambda h=handle: h.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest.update(b"\0")
     except OSError as exc:
         log.warning("compile: could not hash include tree (%s)", exc)
         return None
 
-    _INCLUDE_HASH_KEY = root
+    _INCLUDE_HASH_KEY = key
     _INCLUDE_HASH = "sha256:" + digest.hexdigest()
     return _INCLUDE_HASH
 
@@ -497,50 +435,38 @@ def _include_file_digests(include_root):
     null - "not in the tree the compiler read" is the thing worth knowing
     before a rebuild, and a null would blur it with "present but unreadable".
 
-    Same root and cache lifetime as _include_hash.
+    Same root and cache key as _include_hash.
     """
-    global _INCLUDE_FILES
+    global _INCLUDE_FILES, _INCLUDE_FILES_KEY
 
     if not _INCLUDE_DIGEST_PATTERNS:
         return {}
-    root = os.path.join(include_root, "Include")
-    if not os.path.isdir(root):
-        root = include_root
-    if not os.path.isdir(root):
+    root = _include_root(include_root)
+    if root is None:
         return {}
-    if _INCLUDE_HASH_KEY == root and _INCLUDE_FILES is not None:
-        return _INCLUDE_FILES
 
     digests = {}
     try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames.sort()
-            for name in sorted(filenames):
-                path = os.path.join(dirpath, name)
-                relative = os.path.relpath(path, root).replace(os.sep, "/")
-                if not any(
-                    fnmatch.fnmatch(relative, pattern) for pattern in _INCLUDE_DIGEST_PATTERNS
-                ):
-                    continue
-                digest = hashlib.sha256()
-                with open(path, "rb") as handle:
-                    for chunk in iter(lambda h=handle: h.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                digests[relative] = "sha256:" + digest.hexdigest()
+        key = (root, _tree_signature(root))
+        if _INCLUDE_FILES_KEY == key and _INCLUDE_FILES is not None:
+            return _INCLUDE_FILES
+        for relative, _size, _mtime in key[1]:
+            if not any(
+                fnmatch.fnmatch(relative, pattern) for pattern in _INCLUDE_DIGEST_PATTERNS
+            ):
+                continue
+            digest = hashlib.sha256()
+            with open(os.path.join(root, *relative.split("/")), "rb") as handle:
+                for chunk in iter(lambda h=handle: h.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digests[relative] = "sha256:" + digest.hexdigest()
     except OSError as exc:
         log.warning("compile: could not hash individual includes (%s)", exc)
         return {}
 
+    _INCLUDE_FILES_KEY = key
     _INCLUDE_FILES = digests
     return digests
-
-
-def _invalidate_include_hash():
-    """Drop the cached digests. Called whenever this module writes into the tree."""
-    global _INCLUDE_HASH, _INCLUDE_HASH_KEY, _INCLUDE_FILES
-    _INCLUDE_HASH = None
-    _INCLUDE_HASH_KEY = None
-    _INCLUDE_FILES = None
 
 
 def _refresh_mirrored_includes():
@@ -556,7 +482,8 @@ def _refresh_mirrored_includes():
     still returns ok:true. A silently stale binary is worse than a failed
     compile: nothing downstream can tell it apart from a correct one.
 
-    Caller must hold _COMPILE_LOCK.
+    Caller must hold _COMPILE_LOCK and the cross-process lock: this writes
+    into the mirror other processes compile from.
     """
     global _INCLUDES_CHECKED_AT
 
@@ -573,7 +500,6 @@ def _refresh_mirrored_includes():
     try:
         copied, removed = _mirror_tree(src, dst)
         if copied or removed:
-            _invalidate_include_hash()
             log.info(
                 "compile: include tree refreshed (%d changed, %d pruned)", copied, removed
             )
@@ -592,8 +518,9 @@ def _local_toolchain():
     works slowly beats a compile that stops working because a cache directory
     was not writable.
 
-    Callers must hold _COMPILE_LOCK - this writes ~100MB and must not run twice
-    concurrently.
+    Callers must hold _COMPILE_LOCK and the cross-process lock - this writes
+    ~100MB into a mirror other processes compile from, and must not run twice
+    concurrently or under a running MetaEditor.
     """
     global _LOCAL_TOOLCHAIN, _LOCAL_TOOLCHAIN_RESOLVED, _INCLUDES_CHECKED_AT
 
@@ -617,7 +544,6 @@ def _local_toolchain():
             if os.path.isdir(src):
                 copied, removed = _mirror_tree(src, dst)
                 if copied or removed:
-                    _invalidate_include_hash()
                     log.info(
                         "compile: mirrored %s (%d refreshed, %d pruned)", item, copied, removed
                     )
@@ -732,40 +658,171 @@ def _safe_stem(filename):
     return stem or "ea"
 
 
-def _json(payload, status):
+def _json(payload, status, headers=None):
     """Every exit from this handler goes through here, so the client never sees
     a non-JSON body — which it is documented to treat as a broken host."""
     payload.setdefault("log", "")
     if payload.get("log") is None:
         payload["log"] = ""
+    if headers:
+        return jsonify(payload), status, headers
     return jsonify(payload), status
 
 
+#: ea_version is only ever logged. It is kept to a short token so a caller
+#: cannot write a forged log line (a newline) or megabytes into the log.
+_EA_VERSION_RE = re.compile(r"[A-Za-z0-9._+-]{1,64}")
+
+
+#: A comment, or a string or character literal (kept whole so a `//` inside a
+#: path does not start a comment). An unterminated one runs to the end of the
+#: line, or for a block comment to the end of the source.
+_COMMENT_OR_LITERAL_RE = re.compile(
+    r'//[^\n]*|/\*.*?(?:\*/|\Z)|"(?:\\.|[^"\\\n])*"?' + r"|'(?:\\.|[^'\\\n])*'?",
+    re.DOTALL,
+)
+
+
+def _strip_comments(source):
+    """`source` with every comment replaced by spaces, newlines kept.
+
+    MetaEditor drops comments before it reads directives, so `/*x*/#include`
+    is still an include.
+    """
+    def blank(match):
+        text = match.group(0)
+        if text[0] != "/":
+            return text
+        return re.sub(r"[^\n]", " ", text)
+
+    return _COMMENT_OR_LITERAL_RE.sub(blank, source)
+
+
+#: The directives that make MetaEditor read a file named in the source:
+#: #include (compiled in), #resource (embedded in the .ex5) and #property icon
+#: (embedded in the .ex5). Matched more loosely than MetaEditor parses them -
+#: any case, spaces after the '#' - because over-matching only means a path
+#: gets checked that MetaEditor would have ignored anyway.
+_FILE_DIRECTIVE_RE = re.compile(
+    r"^[ \t]*#[ \t]*(include|resource|property[ \t]+icon)\b[ \t]*(.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PATH_ARGUMENT_RE = re.compile(r'"([^"\r\n]*)"|<([^>\r\n]*)>')
+
+#: Windows device names. Opening one blocks or reads a device, not a file.
+_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
+    f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in range(1, 10)
+}
+
+
+def _outside_path_reason(directive, path):
+    """Why `path` could name a file outside the allowed trees, or None.
+
+    Measured on MetaEditor 5.00 build 5836 (tests/real_compile/): #include
+    reads an absolute path and a `..` walk out of the temp directory or the
+    include tree, with either slash; #property icon reads a `..` walk;
+    #resource refuses both itself. The rule here does not lean on which ones
+    MetaEditor happens to stop: a path must stay relative to where MetaEditor
+    resolves it (the source's temp directory, or the configured MQL5 tree for
+    `<...>` and a resource's or icon's leading backslash).
+    """
+    normalized = path.replace("/", "\\")
+    if ":" in normalized:
+        return "a drive letter or stream name"
+    if normalized.startswith("\\\\"):
+        return "a UNC or device path"
+    if normalized.startswith("\\") and directive == "include":
+        # For #resource and #property icon a leading backslash means the MQL5
+        # root. Build 5836 reads it as the source directory for #include, but
+        # it is the drive root to Windows itself, and no include needs it.
+        return "an absolute path"
+    for segment in normalized.split("\\"):
+        if segment not in ("", ".") and not segment.strip(" ."):
+            # "..", and any other all-dots-and-spaces name, which Windows
+            # trims when it resolves a path.
+            return "a parent-directory segment"
+        if segment.split(".")[0].strip().upper() in _DEVICE_NAMES:
+            return "a device name"
+    return None
+
+
+def _check_source_paths(source):
+    """Refuse source whose directives could read files outside the sandbox.
+
+    Returns an error message, or None when the source may be compiled.
+
+    MetaEditor resolves these directives itself, with the API process's file
+    access, so the handler's own care over paths does not cover them. An
+    #include of config.yaml, say, would not compile, but the diagnostics
+    quote its tokens back in `log`.
+    """
+    for match in _FILE_DIRECTIVE_RE.finditer(_strip_comments(source)):
+        directive = match.group(1).split()[0].lower()
+        if directive == "property":
+            directive = "property icon"
+        argument = _PATH_ARGUMENT_RE.match(match.group(2))
+        if not argument:
+            return f"#{directive} must name its file as a literal \"path\" or <path>"
+        path = argument.group(1) if argument.group(1) is not None else argument.group(2)
+        reason = _outside_path_reason(directive, path)
+        if reason:
+            return (
+                f"#{directive} {argument.group(0)} is refused: {reason}. Paths must stay "
+                "inside the source directory or the server's MQL5 include tree"
+            )
+    return None
+
+
+def _boot_time():
+    try:
+        return int(psutil.boot_time())
+    except Exception:  # noqa: BLE001 - no boot time just means no dedupe
+        return None
+
+
 def _claim_warmup():
-    """Claim the once-per-VM warm-up. True only for the process that wins it.
+    """Claim this boot's warm-up. True only for the process that wins it.
 
     O_CREAT|O_EXCL against a file in the shared cache, because the processes
     racing for this are separate PIDs - a threading.Lock would gate one process
     while the other nineteen went ahead and launched MetaEditor anyway.
+
+    A claim made in an earlier boot is removed first. Two processes can both
+    judge the same old claim stale and both end up warming; that costs one
+    extra warm-up, which the cross-process lock serializes.
     """
     if not COMPILE_LOCAL_CACHE:
         return False
+    booted = _boot_time()
     path = os.path.join(COMPILE_LOCAL_CACHE, _WARMUP_CLAIM)
     try:
         os.makedirs(COMPILE_LOCAL_CACHE, exist_ok=True)
         try:
-            if time.time() - os.path.getmtime(path) > WARMUP_CLAIM_TTL_SECONDS:
-                os.remove(path)
+            with open(path, "r", encoding="ascii", errors="replace") as handle:
+                text = handle.read(32).strip()
         except OSError:
-            pass  # absent, or someone else just removed it - both fine
+            text = None  # no claim yet
+        try:
+            claimed = None if text is None else int(text)
+        except ValueError:
+            # Not a boot time, e.g. the timestamp an earlier version wrote.
+            # It cannot be this boot's, so it must not block this boot.
+            claimed = -1
+        if claimed is not None and (
+            booted is None or abs(claimed - booted) > _BOOT_TIME_TOLERANCE_SECONDS
+        ):
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # someone else just replaced it
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         try:
-            os.write(fd, time.strftime("%Y-%m-%dT%H:%M:%S").encode())
+            os.write(fd, str(booted or 0).encode("ascii"))
         finally:
             os.close(fd)
         return True
     except OSError:
-        return False  # another process holds the claim
+        return False  # this boot's warm-up is already claimed
 
 
 def _warmup():
@@ -782,7 +839,20 @@ def _warmup():
         return
 
     work_dir = None
+    cross_lock = None
     try:
+        started = time.monotonic()
+        warmup_budget = COMPILE_TIMEOUT_SECONDS + 120
+        # Winning the warm-up claim only means no OTHER PROCESS is also trying
+        # to warm up — it says nothing about a real compile landing on a
+        # different process at the same moment and sharing this same
+        # installation directory. Taken before the mirror is refreshed, which
+        # writes into the tree another process's MetaEditor may be reading.
+        cross_lock = _acquire_cross_process_lock(time.monotonic() + warmup_budget)
+        if cross_lock is None:
+            log.warning("compile warm-up: could not get the cross-process compile lock in time")
+            return
+
         local = _local_toolchain()
         metaeditor, include_dir = local if local else (COMPILE_METAEDITOR, COMPILE_INCLUDE_DIR)
         if not os.path.exists(metaeditor):
@@ -795,38 +865,25 @@ def _warmup():
         with open(source_path, "w", encoding="utf-8-sig", newline="\r\n") as handle:
             handle.write("int OnInit(){return(INIT_SUCCEEDED);}\nvoid OnTick(){}\n")
 
-        started = time.monotonic()
-        warmup_budget = COMPILE_TIMEOUT_SECONDS + 120
-        # Winning the warm-up claim only means no OTHER PROCESS is also trying
-        # to warm up — it says nothing about a real compile landing on a
-        # different process at the same moment and sharing this same
-        # installation directory. Same cross-process serialization real
-        # compiles get, so a warm-up cannot collide with one either.
-        cross_lock = _acquire_cross_process_lock(metaeditor, time.monotonic() + warmup_budget)
-        if cross_lock is None:
-            log.warning("compile warm-up: could not get the cross-process compile lock in time")
-            return
-        try:
-            subprocess.run(
-                [
-                    metaeditor,
-                    f"/compile:{source_path}",
-                    f"/log:{os.path.join(work_dir, 'warmup.log')}",
-                    f"/inc:{include_dir}",
-                ],
-                capture_output=True,
-                # Generous: the whole point is absorbing the cold load, which is
-                # slower than any warm compile this deadline normally covers.
-                timeout=warmup_budget,
-            )
-        finally:
-            _release_cross_process_lock(cross_lock)
+        subprocess.run(
+            [
+                metaeditor,
+                f"/compile:{source_path}",
+                f"/log:{os.path.join(work_dir, 'warmup.log')}",
+                f"/inc:{include_dir}",
+            ],
+            capture_output=True,
+            # Generous: the whole point is absorbing the cold load, which is
+            # slower than any warm compile this deadline normally covers.
+            timeout=warmup_budget,
+        )
         log.info("compile warm-up done in %.1fs", time.monotonic() - started)
     except Exception as exc:  # noqa: BLE001 - a failed warm-up must not matter
         log.warning(
             "compile warm-up failed (%s); the first real compile pays the cold load", exc
         )
     finally:
+        _release_cross_process_lock(cross_lock)
         _COMPILE_LOCK.release()
         if work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -836,6 +893,10 @@ def start_warmup():
     """Kick the warm-up off in the background. Never blocks or fails startup."""
     if not WARMUP_ENABLED:
         return
+    log.info(
+        "compile warm-up: one throwaway compile per VM in %ds (compile_local_cache is set)",
+        WARMUP_DELAY_SECONDS,
+    )
     threading.Thread(target=_warmup, daemon=True, name="compile-warmup").start()
 
 
@@ -914,8 +975,24 @@ def _compile_source_inner(started):
             413,
         )
 
-    stem = _safe_stem(body.get("filename") or "ea.mq5")
     ea_version = body.get("ea_version")
+    if ea_version is not None and (
+        not isinstance(ea_version, str) or not _EA_VERSION_RE.fullmatch(ea_version)
+    ):
+        return _json(
+            {
+                "ok": False,
+                "log": "'ea_version' must be 1-64 characters of A-Z a-z 0-9 . _ + -",
+            },
+            400,
+        )
+
+    refused = _check_source_paths(source)
+    if refused:
+        log.warning("compile: refused source: %s", refused)
+        return _json({"ok": False, "log": refused}, 400)
+
+    stem = _safe_stem(body.get("filename") or "ea.mq5")
 
     if not os.path.exists(COMPILE_METAEDITOR):
         log.error("compile: MetaEditor missing at %s", COMPILE_METAEDITOR)
@@ -925,40 +1002,73 @@ def _compile_source_inner(started):
             500,
         )
 
-    # Bound the wait so a stuck compile fails fast for everyone behind it
-    # instead of holding connections open. One total budget for BOTH the
-    # in-process lock below and the cross-process one inside _run_compile —
-    # an absolute deadline off `started`, not two stacked relative timeouts.
-    total_lock_budget = COMPILE_TIMEOUT_SECONDS + _LOCK_WAIT_MARGIN_SECONDS
-    deadline = started + total_lock_budget
-    if not _COMPILE_LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
-        log.warning("compile: lock wait exceeded %ss", total_lock_budget)
+    # A slot for the running compile plus MAX_WAITING_COMPILES waiters, taken
+    # without blocking: past that, answer now rather than park a server thread
+    # (see MAX_WAITING_COMPILES).
+    if not _COMPILE_SLOTS.acquire(blocking=False):
+        log.warning("compile: refused, %d already waiting", MAX_WAITING_COMPILES)
         return _json(
             {
                 "ok": False,
-                "log": f"compile busy: waited {total_lock_budget}s for the compiler lock",
+                "log": (
+                    f"compile busy: {MAX_WAITING_COMPILES} requests are already "
+                    "waiting; retry shortly"
+                ),
             },
-            504,
+            429,
+            {"Retry-After": str(_BUSY_RETRY_AFTER_SECONDS)},
         )
-
     try:
-        return _run_compile(stem, source, ea_version, started, deadline)
+        # Bound the wait so a stuck compile fails fast for everyone behind it
+        # instead of holding connections open. One total budget for BOTH the
+        # in-process lock below and the cross-process one inside _run_compile —
+        # an absolute deadline off `started`, not two stacked relative timeouts.
+        total_lock_budget = COMPILE_TIMEOUT_SECONDS + _LOCK_WAIT_MARGIN_SECONDS
+        deadline = started + total_lock_budget
+        if not _COMPILE_LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
+            log.warning("compile: lock wait exceeded %ss", total_lock_budget)
+            return _json(
+                {
+                    "ok": False,
+                    "log": f"compile busy: waited {total_lock_budget}s for the compiler lock",
+                },
+                504,
+            )
+        try:
+            return _run_compile(stem, source, ea_version, started, deadline)
+        finally:
+            _COMPILE_LOCK.release()
     finally:
-        _COMPILE_LOCK.release()
+        _COMPILE_SLOTS.release()
 
 
 def _run_compile(stem, source, ea_version, started, deadline):
-    # Under the lock, so the one-time ~100MB mirror cannot race itself. Only
-    # the FIRST call in a process's lifetime actually copies anything -- but
-    # when it does, on a slow mount that can be tens of seconds (see
-    # docs/compiling.md), and `deadline` was set before this ran. Extend it
-    # by whatever this cost, the same way _warmup() computes its own lock
-    # deadline AFTER _local_toolchain() rather than before -- otherwise an
-    # uncontended request could get a spurious "busy" 504 that was actually
-    # entirely mirror-build time, not lock contention.
-    toolchain_started = time.monotonic()
+    # Serialize against every OTHER PROCESS sharing this toolchain (see
+    # _CROSS_PROCESS_LOCK_BASENAME) — _COMPILE_LOCK only serializes calls
+    # inside this one process. Taken BEFORE _local_toolchain(): refreshing the
+    # mirror copies into and prunes the include tree, and another process's
+    # MetaEditor must not be reading headers while they are rewritten.
+    cross_lock = _acquire_cross_process_lock(deadline)
+    if cross_lock is None:
+        total_budget = COMPILE_TIMEOUT_SECONDS + _LOCK_WAIT_MARGIN_SECONDS
+        log.warning(
+            "compile: cross-process lock wait exceeded %ss stem=%s", total_budget, stem
+        )
+        return _json(
+            {
+                "ok": False,
+                "log": f"compile busy: waited {total_budget}s for the compiler lock",
+            },
+            504,
+        )
+    try:
+        return _compile_holding_lock(stem, source, ea_version, started)
+    finally:
+        _release_cross_process_lock(cross_lock)
+
+
+def _compile_holding_lock(stem, source, ea_version, started):
     local = _local_toolchain()
-    deadline += time.monotonic() - toolchain_started
     metaeditor, include_dir = local if local else (COMPILE_METAEDITOR, COMPILE_INCLUDE_DIR)
 
     os.makedirs(COMPILE_WORK_DIR, exist_ok=True)
@@ -982,25 +1092,8 @@ def _run_compile(stem, source, ea_version, started, deadline):
 
         log.info(
             "compile start stem=%s ea_version=%s bytes=%d dir=%s",
-            stem, ea_version, len(source), work_dir,
+            stem, ea_version or "-", len(source), work_dir,
         )
-
-        # Serialize against every OTHER PROCESS sharing this same MetaEditor
-        # install (see _acquire_cross_process_lock's docstring) — _COMPILE_LOCK
-        # only serializes calls inside this one process.
-        cross_lock = _acquire_cross_process_lock(metaeditor, deadline)
-        if cross_lock is None:
-            total_budget = COMPILE_TIMEOUT_SECONDS + _LOCK_WAIT_MARGIN_SECONDS
-            log.warning(
-                "compile: cross-process lock wait exceeded %ss stem=%s", total_budget, stem
-            )
-            return _json(
-                {
-                    "ok": False,
-                    "log": f"compile busy: waited {total_budget}s for the compiler lock",
-                },
-                504,
-            )
 
         timed_out = False
         returncode = None
@@ -1020,8 +1113,6 @@ def _run_compile(stem, source, ea_version, started, deadline):
             log.error("compile: could not launch MetaEditor: %s", exc)
             # exc carries the executable's path; that stays in the server log.
             return _json({"ok": False, "log": "could not launch MetaEditor"}, 500)
-        finally:
-            _release_cross_process_lock(cross_lock)
 
         if timed_out:
             log.warning("compile timeout after %ss stem=%s", COMPILE_TIMEOUT_SECONDS, stem)
@@ -1086,7 +1177,9 @@ def _run_compile(stem, source, ea_version, started, deadline):
             # Identifies the library this binary was built against, so a caller
             # can answer "is this still current?" later without having to trust
             # that a sync had landed at the time. Omitted rather than guessed if
-            # the tree cannot be read.
+            # the tree cannot be read. Computed while the cross-process lock is
+            # still held, so no other process's mirror refresh lands between
+            # the compile and the hash.
             digest = _include_hash(include_dir)
             if digest:
                 body["include_hash"] = digest
