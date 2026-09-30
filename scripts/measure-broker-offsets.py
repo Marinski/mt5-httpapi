@@ -10,13 +10,9 @@ config.yaml with whatever it prints.
 Reads the latest tick and compares its broker timestamp to local UTC, so
 it only works while the market is open and the terminal can log in.
 
-WARNING: hitting an SDK route on a `mode: backtest` terminal makes mt5api
-launch terminal64.exe, and POST /terminal/shutdown only detaches the SDK
-client — it does not close the terminal. A terminal left running holds
-MT5's single-instance lock on the data dir, and the next backtest there
-spawns a second terminal64.exe that exits silently with code 0, producing
-an empty "Bars=0 Ticks=0 Symbols=0" report. Run this only when you can
-follow it with `docker compose down && ./run.sh`.
+A `mode: backtest` terminal has no SDK attached and answers SDK routes with
+503, so this can only measure `mode: live` terminals. Those report the
+failure and the run moves on.
 
 Usage:
     python3 scripts/measure-broker-offsets.py [broker/account ...]

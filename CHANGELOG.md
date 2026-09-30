@@ -18,19 +18,30 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 - Compile settings: `compile_terminal_dir` (default `terminals/metaquotes/base`), `compile_include_dir`, `compile_work_dir`, `compile_timeout` (default `30s`, ceiling 60s; a bare number is seconds), `compile_max_source_bytes` (2 MB, `413` before anything is written), `compile_max_ex5_bytes` (16 MB, checked before the binary is read), `compile_local_cache` and `compile_include_digests`. An invalid timeout or byte cap falls back to its default with a warning in the API log.
 - A successful compile reports `include_hash`, a sha256 over the include tree MetaEditor was given, recomputed whenever a file in that tree changes. `compile_include_digests` names headers whose own digests are reported as `include_files`, so a caller can tell an edit of its own header from an upgrade of the stock library.
 - `compile_local_cache` mirrors MetaEditor, its `Config` and the `MQL5` tree onto local disk, for installs whose terminals sit on a network or host-shared mount. On a 9p share a compile MetaEditor timed at 4.1s took 29s wall-clock, all of it loading the 105 MB binary. The include tree is re-checked against the source at most once a minute. A mirror that cannot be built falls back to the shared copy.
-- `POST /symbols/import` fills a terminal's symbol cache from a JSON list without calling the MT5 SDK, so a `mode: backtest` terminal can be primed. Each import is merged into the existing cache. `"complete": true` says the list is the broker's full book and replaces the cache instead. The body is bounded by `symbol_import_max_body_bytes` (2 MiB, `413` before parsing, `411` without a `Content-Length`), `symbol_import_max_symbols` (20000) and `symbol_import_max_symbol_length` (64). See [Market data](docs/market-data.md).
-- Every request body is capped before it is parsed: `max_request_body_bytes` (4 MiB) for JSON, `max_upload_body_bytes` (25 MiB, matching nginx's `client_max_body_size`) for multipart `POST /backtest`. Over the cap is a `413`.
-
-  For all five byte and count settings, zero, a negative or a non-integer falls back to the default with a warning in the API log. There is no value that turns a cap off.
-- `scripts/measure-broker-offsets.py` reads each terminal's latest tick and prints the `utc_offset` to set, for re-measuring after a DST change. Its SDK calls make a `mode: backtest` terminal launch `terminal64.exe`, so use it on `mode: live` terminals or restart the stack afterwards. See [Installation and configuration](docs/installation-and-configuration.md).
-- The rotator truncates a terminal journal over `MAX_LOG_BYTES` (default 2 GiB) once it has been idle for `IDLE_MINUTES` (default 30). One high-frequency backtest can fill the disk with today's journal long before the `RETAIN_DAYS` age pass reaches it. The file is truncated in place with its mtime kept, because the terminal holds it open. See [Operations](docs/operations.md).
-- `tests/integration/test_mcpunifier.py` calls the unifier's `endpoints` tool over MCP and compares the result with the API's Flask routes in both directions.
 
 ### Changed
 
 - **Every API process schedules a MetaEditor warm-up** when `compile_local_cache` is set: 180s after start, one throwaway compile, so the first real caller does not pay the 30–55s cold load. One process per VM per boot runs it, claimed by a file in the cache that records the boot. It skips itself if a compile is running and logs, never raises, on failure.
 - **nginx gives `/<broker>/<account>[/<instance>]/compile` a 180s read and send timeout.** The handler's worst case at the 60s ceiling is 150s. Every other route keeps nginx's 60s default.
+
+## [v4.14.0]: 2026-09-29
+
+The symbol-suffix, symbol-import, body-cap, journal-size and log-tail work below was contributed by @Marinski in #18.
+
+### Added
+
+- `POST /symbols/import` fills a terminal's symbol cache from a JSON list without calling the MT5 SDK, so a `mode: backtest` terminal can be primed. Each import is merged into the existing cache. `"complete": true` says the list is the broker's full book and replaces the cache instead. A partial import keeps the cache's `updated` stamp, so only a full book restarts its trust window. The body is bounded by `symbol_import_max_body_bytes` (2 MiB, `413` before parsing, `411` without a `Content-Length`), `symbol_import_max_symbols` (20000) and `symbol_import_max_symbol_length` (64). See [Market data](docs/market-data.md).
+- Every request body is capped before it is parsed: `max_request_body_bytes` (4 MiB) for JSON, `max_upload_body_bytes` (25 MiB, matching nginx's `client_max_body_size`) for multipart `POST /backtest`. Over the cap is a `413`.
+
+  For all five byte and count settings, zero, a negative or a non-integer falls back to the default with a warning in the API log. There is no value that turns a cap off.
+- `scripts/measure-broker-offsets.py` reads each terminal's latest tick and prints the `utc_offset` to set, for re-measuring after a DST change. It only works against `mode: live` terminals. See [Installation and configuration](docs/installation-and-configuration.md).
+- The rotator truncates a terminal journal over `MAX_LOG_BYTES` (default 2 GiB) once it has been idle for `IDLE_MINUTES` (default 30). One high-frequency backtest can fill the disk with today's journal long before the `RETAIN_DAYS` age pass reaches it. The file is truncated in place with its mtime kept, because the terminal holds it open. See [Operations](docs/operations.md).
+- `tests/integration/test_mcpunifier.py` calls the unifier's `endpoints` tool over MCP and compares the result with the API's Flask routes in both directions.
+
+### Changed
+
 - **`GET /symbols` returns `409` on a `mode: backtest` terminal.** It used to call `mt5.initialize()` there, which starts `terminal64.exe` and holds the tester's data-dir lock, so every later backtest on that terminal came back empty. Callers that listed symbols on a backtest terminal get a `409` now and should use `POST /symbols/import`. The refusal does not wait for the MT5 lock.
+- **Every other MT5 SDK route answers `503` on a `mode: backtest` terminal.** Account, orders, positions, history, market data and terminal info all went through the same reconnect path, which started `terminal64.exe` on a backtest terminal and left later backtests there with an empty report. They now refuse before any SDK call.
 - **`start.bat` launches only the terminals in its VM's group.** `config_helper.py terminals` now applies the same `config/vm-group.txt` filter that `check_health.py` and the container healthcheck already use. Before, every VM in a multi-VM install prepared and served every terminal, including another VM's live terminal on the same shared data dir. A single-VM install, or one with no group file, still gets every terminal.
 
 ### Fixed

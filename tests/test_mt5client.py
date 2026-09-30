@@ -751,3 +751,25 @@ def test_restart_terminal_survives_a_shutdown_timeout(monkeypatch):
     monkeypatch.setattr(mc, "init_mt5", lambda *a, **kw: True)
 
     assert mc.restart_terminal() is True
+
+
+def _sdk_call_forbidden(*_args, **_kwargs):
+    raise AssertionError("a mode:backtest terminal must not reach the MT5 SDK")
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/account", "/positions", "/orders", "/terminal", "/symbols/EURUSD/tick"],
+)
+def test_sdk_routes_refuse_on_a_backtest_terminal_without_starting_mt5(
+    monkeypatch, api_client, path,
+):
+    # A probe on a backtest terminal would fall through to init_mt5(), which
+    # starts terminal64.exe and holds the tester's single-instance lock.
+    monkeypatch.setattr(mc, "MODE", "backtest")
+    monkeypatch.setattr(mc, "m", _sdk_call_forbidden)
+    monkeypatch.setattr(mc, "init_mt5", _sdk_call_forbidden)
+
+    resp = api_client.get(path)
+
+    assert resp.status_code == 503
