@@ -15,6 +15,7 @@ from mt5api.config import (
     FILLING_MAP,
     INI_FILE,
     INSTANCE,
+    MODE,
     ORDER_TYPE_MAP,
     TERMINAL_DIR,
     TERMINAL_PATH,
@@ -290,7 +291,16 @@ def init_mt5(login=None, password=None, server=None):
 
 
 def ensure_initialized():
-    """Probe + reconnect helper. Caller must hold the MT5 lock."""
+    """Probe + reconnect helper. Caller must hold the MT5 lock.
+
+    Always False on a mode: backtest terminal. Its SDK is never attached, so a
+    probe would fall through to init_mt5(), which starts terminal64.exe and
+    holds the tester's single-instance lock on the data dir; the next backtest
+    there then exits with an empty report.
+    """
+    if MODE == "backtest":
+        log.warning("MT5 SDK request refused on a mode:backtest terminal reason=backtest_mode")
+        return False
     try:
         info = m(mt5.terminal_info, _timeout=15)
     except MT5Timeout:

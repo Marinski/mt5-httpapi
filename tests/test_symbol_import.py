@@ -605,6 +605,31 @@ def test_a_partial_import_does_not_revive_a_stale_cache(monkeypatch, tmp_path):
     assert _tester_symbol("XAUUSD") == "XAUUSD.i"
 
 
+def test_a_partial_import_keeps_the_full_book_stamp(monkeypatch, tmp_path):
+    """A partial import must not restart the trust window of an old full book,
+    or repeated small imports would keep it trusted indefinitely."""
+    trust_window_seconds = 3600
+    full_book_age_seconds = 3000
+    shorter_window_seconds = 2000
+    _suffix(monkeypatch, tmp_path)
+    monkeypatch.setattr(symbol_cache, "MAX_AGE_SECONDS", trust_window_seconds)
+    full_book = {
+        "updated": int(time.time()) - full_book_age_seconds,
+        "complete": True,
+        "symbols": ["EURUSD.i", "XAUUSD"],
+    }
+    with open(symbol_cache.cache_path(str(tmp_path)), "w", encoding="utf-8") as handle:
+        json.dump(full_book, handle)
+
+    resp = _client().post("/symbols/import", json={"symbols": ["GBPUSD.i"]})
+    assert resp.get_json() == {"imported": 1, "cached": 3, "complete": True}
+
+    # Past the full book's own window it is stale again, partial import or not,
+    # so the suffix is appended as it would be with no cache.
+    monkeypatch.setattr(symbol_cache, "MAX_AGE_SECONDS", shorter_window_seconds)
+    assert _tester_symbol("XAUUSD") == "XAUUSD.i"
+
+
 @pytest.mark.parametrize("flag", ["yes", 1, None])
 def test_import_symbols_rejects_a_non_boolean_complete(monkeypatch, tmp_path, flag):
     monkeypatch.setattr(h, "TERMINAL_DIR", str(tmp_path))

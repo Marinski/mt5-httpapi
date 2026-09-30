@@ -56,11 +56,12 @@ def cache_path(terminal_dir):
     return os.path.join(terminal_dir, CACHE_BASENAME)
 
 
-def save(terminal_dir, names, complete):
+def save(terminal_dir, names, complete, updated=None):
     """Persist a symbol list. Best-effort: never raises.
 
     ``complete`` records whether ``names`` is the broker's full book; only a
-    complete list is ever used to decide a symbol does not exist.
+    complete list is ever used to decide a symbol does not exist. ``updated``
+    keeps an existing stamp instead of writing the current time.
 
     Written atomically — the INI builder reads this on every backtest, and a
     torn file would silently degrade every remap decision until overwritten.
@@ -69,7 +70,8 @@ def save(terminal_dir, names, complete):
     if not names:
         return False
     path = cache_path(terminal_dir)
-    payload = {"updated": int(time.time()), "complete": bool(complete), "symbols": names}
+    stamp = int(time.time()) if updated is None else updated
+    payload = {"updated": stamp, "complete": bool(complete), "symbols": names}
     try:
         os.makedirs(terminal_dir, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=terminal_dir, prefix=".symbols-", suffix=".tmp")
@@ -97,15 +99,19 @@ def merge(terminal_dir, names, complete):
     A partial list keeps whatever completeness the current cache had: adding
     names to a full book leaves it a full book, and adding them to nothing
     (or to a stale cache, which counts as nothing) gives a partial one that
-    load() will not use. Returns (saved, symbol_count, complete).
+    load() will not use. A partial list also keeps the current cache's
+    ``updated`` stamp: only a full book refreshes it, so partial imports
+    cannot keep an old full book trusted past its window.
+    Returns (saved, symbol_count, complete).
     """
     merged = set(names)
+    updated = None
     if not complete:
         current = _read(terminal_dir)
         if current is not None:
-            merged |= current[0]
-            complete = current[1]
-    ok = save(terminal_dir, merged, complete)
+            current_symbols, complete, updated = current
+            merged |= current_symbols
+    ok = save(terminal_dir, merged, complete, updated=updated)
     return ok, len(merged), bool(complete)
 
 
@@ -117,13 +123,16 @@ def load(terminal_dir, max_age_seconds=None):
     show that the broker lacks a symbol.
     """
     current = _read(terminal_dir, max_age_seconds)
-    if current is None or not current[1]:
+    if current is None:
         return None
-    return current[0]
+    symbols, complete, _updated = current
+    if not complete:
+        return None
+    return symbols
 
 
 def _read(terminal_dir, max_age_seconds=None):
-    """Return (symbols, complete) from a current cache, or None.
+    """Return (symbols, complete, updated) from a current cache, or None.
 
     A cache past ``max_age_seconds`` (default: MAX_AGE_SECONDS) is unusable,
     and so is one whose ``updated`` stamp is missing or malformed. This is
@@ -169,5 +178,5 @@ def _read(terminal_dir, max_age_seconds=None):
     if not isinstance(symbols, list) or not symbols:
         log.warning("symbol cache at %s has no symbols list", path)
         return None
-    return {str(s) for s in symbols}, payload.get("complete") is True
+    return {str(s) for s in symbols}, payload.get("complete") is True, updated
 
