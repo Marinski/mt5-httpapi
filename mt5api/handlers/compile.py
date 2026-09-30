@@ -704,9 +704,37 @@ def _strip_comments(source):
 #: any case, spaces after the '#' - because over-matching only means a path
 #: gets checked that MetaEditor would have ignored anyway.
 _FILE_DIRECTIVE_RE = re.compile(
-    r"^[ \t]*#[ \t]*(include|resource|property[ \t]+icon)\b[ \t]*(.*)$",
+    r"^[ \t\f\v]*#[ \t\f\v]*(include|resource|property[ \t\f\v]+icon)\b[ \t\f\v]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+#: A '#' with nothing after it on its line once comments are blanked. C calls
+#: it a null directive; no MQL5 code needs one, and a comment spanning a line
+#: break between '#' and the directive name would otherwise hide the directive
+#: from _FILE_DIRECTIVE_RE while the preprocessor still joins it.
+_SPLIT_DIRECTIVE_RE = re.compile(r"^[ \t\f\v]*#[ \t\f\v]*$", re.MULTILINE)
+
+#: Characters some lexers treat as line breaks besides \n. The scan breaks lines
+#: on them too: over-splitting only makes the check stricter.
+_EXTRA_LINE_BREAKS_RE = re.compile("[\u0085  ]")
+
+
+def _normalize_line_endings(source):
+    """`source` with every \\r\\n and lone \\r turned into \\n.
+
+    The handler scans and writes this same text, so MetaEditor reads exactly
+    the lines the scan saw. Python's re only breaks lines on \\n, while a lone
+    \\r survives the newline="\\r\\n" write and can start a line for MetaEditor.
+    """
+    return source.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _scan_view(source):
+    """`source` as the preprocessor reads directives: extra line breaks split,
+    backslash-newline continuations joined, comments blanked."""
+    text = _EXTRA_LINE_BREAKS_RE.sub("\n", _normalize_line_endings(source))
+    text = text.replace("\\\n", "")
+    return _strip_comments(text)
 _PATH_ARGUMENT_RE = re.compile(r'"([^"\r\n]*)"|<([^>\r\n]*)>')
 
 #: Windows device names. Opening one blocks or reads a device, not a file.
@@ -756,7 +784,10 @@ def _check_source_paths(source):
     #include of config.yaml, say, would not compile, but the diagnostics
     quote its tokens back in `log`.
     """
-    for match in _FILE_DIRECTIVE_RE.finditer(_strip_comments(source)):
+    scanned = _scan_view(source)
+    if _SPLIT_DIRECTIVE_RE.search(scanned):
+        return "a '#' must be followed by its directive name on the same line"
+    for match in _FILE_DIRECTIVE_RE.finditer(scanned):
         directive = match.group(1).split()[0].lower()
         if directive == "property":
             directive = "property icon"
@@ -987,6 +1018,8 @@ def _compile_source_inner(started):
             400,
         )
 
+    # Scanned and written as the same text: see _normalize_line_endings.
+    source = _normalize_line_endings(source)
     refused = _check_source_paths(source)
     if refused:
         log.warning("compile: refused source: %s", refused)

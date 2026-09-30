@@ -8,11 +8,15 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.15.0]: 2026-09-30
+
+`POST /compile` and everything under it was contributed by @Marinski in #16.
+
 ### Added
 
 - `POST /compile` takes MQL5 source as JSON and returns the compiled `.ex5`, base64-encoded, with MetaEditor's log. Warnings do not fail a build, since MetaEditor exits non-zero on warnings too: success means a clean log and an actual binary. The log is decoded from MetaEditor's UTF-16LE. A compile error is a `422` carrying the diagnostics, the deadline is a `504`, and every response is JSON. See [Compiling MQL5](docs/compiling.md).
 
-  The caller sends source text only. `filename` is reduced to a bare stem inside a per-request temp directory that is removed on every exit, and `/compile:`, `/log:` and `/inc:` are computed by the server. `#include`, `#resource` and `#property icon` paths that are absolute, UNC, contain a `..` segment or name a device are refused with a `400` before MetaEditor runs: measured on MetaEditor build 5836, `#include` otherwise reads any file the API process can, and quotes its tokens back in the log. `tests/real_compile/` checks this against a live deployment. `ea_version` is only logged, and must be 1–64 characters of `A-Z a-z 0-9 . _ + -`.
+  The caller sends source text only. `filename` is reduced to a bare stem inside a per-request temp directory that is removed on every exit, and `/compile:`, `/log:` and `/inc:` are computed by the server. `#include`, `#resource` and `#property icon` paths that are absolute, UNC, contain a `..` segment or name a device are refused with a `400` before MetaEditor runs: measured on MetaEditor build 5836, `#include` otherwise reads any file the API process can, and quotes its tokens back in the log. The check splits lines the way the preprocessor does (`\r`, `\r\n`, backslash-newline continuations, form feed, vertical tab, and a comment between `#` and the directive name), and MetaEditor compiles the same line-normalized text the check read. `tests/real_compile/` checks this against a live deployment. `ea_version` is only logged, and must be 1 to 64 characters of `A-Z a-z 0-9 . _ + -`.
 - Compiles are serialized across processes, not just threads: MetaEditor is single-instance per installation directory and every API process on a VM serves `/compile`. The lock is an OS byte-range lock on `.compile-inflight.lock` in the local mirror, or beside `MetaEditor64.exe` without one, which the OS releases when its holder exits or is killed. The mirror is refreshed under the same lock. At most two compiles wait behind the running one; the rest get an immediate `429` with `Retry-After`, so compile traffic cannot occupy every server thread.
 - `compile_api_token`, a second bearer token accepted only on `/compile`, so a build pipeline or code generator can compile without holding the token that can trade. `api_token` keeps working everywhere, and leaving the new token empty changes nothing.
 - Compile settings: `compile_terminal_dir` (default `terminals/metaquotes/base`), `compile_include_dir`, `compile_work_dir`, `compile_timeout` (default `30s`, ceiling 60s; a bare number is seconds), `compile_max_source_bytes` (2 MB, `413` before anything is written), `compile_max_ex5_bytes` (16 MB, checked before the binary is read), `compile_local_cache` and `compile_include_digests`. An invalid timeout or byte cap falls back to its default with a warning in the API log.
@@ -21,7 +25,7 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ### Changed
 
-- **Every API process schedules a MetaEditor warm-up** when `compile_local_cache` is set: 180s after start, one throwaway compile, so the first real caller does not pay the 30–55s cold load. One process per VM per boot runs it, claimed by a file in the cache that records the boot. It skips itself if a compile is running and logs, never raises, on failure.
+- **Every API process schedules a MetaEditor warm-up** when `compile_local_cache` is set: 180s after start, one throwaway compile, so the first real caller does not pay the 30 to 55s cold load. One process per VM per boot runs it, claimed by a file in the cache that records the boot. It skips itself if a compile is running and logs, never raises, on failure.
 - **nginx gives `/<broker>/<account>[/<instance>]/compile` a 180s read and send timeout.** The handler's worst case at the 60s ceiling is 150s. Every other route keeps nginx's 60s default.
 
 ## [v4.14.0]: 2026-09-29

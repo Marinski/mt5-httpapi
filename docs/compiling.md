@@ -371,6 +371,8 @@ check runs on the source with comments removed, and matches the directive
 more loosely than MetaEditor does (any case, spaces after `#`), so a directive
 MetaEditor would ignore can be refused but one it honours cannot slip past.
 
+The check reads lines the way the preprocessor does. Every `\r\n` and lone `\r` in the source becomes `\n` before the check, and the file MetaEditor compiles is written from that same text. For the check only, `\u0085`, ` ` and ` ` also break lines, backslash-newline continuations are joined, and form feed and vertical tab count as spaces. A `#` left alone on its line once comments are removed is refused, because a comment spanning a line break between `#` and the directive name still joins them for the preprocessor.
+
 `tests/real_compile/` runs these cases against a deployed endpoint. Against
 build 5836 without this check, MetaEditor ran on all sixteen and read the
 target in nine.

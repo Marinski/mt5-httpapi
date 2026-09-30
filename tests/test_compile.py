@@ -1531,6 +1531,17 @@ SHARED = r"C:\Users\Docker\Desktop\Shared"
         f'#property icon "{SHARED}\\x.ico"',
         r'#property  icon "\..\x.ico"',
         '#define P "C:\\\\x.mqh"\n#include P',
+        # The scan must break lines where MetaEditor does, not only on \n.
+        f'int x = 1;\r#include "{SHARED}\\x.mqh"\r',
+        f'int x = 1;\u2028#include "{SHARED}\\x.mqh"',
+        # A continuation or a comment line break joins the directive for the
+        # preprocessor while splitting it for a line-based scan.
+        f'#inc\\\nlude "{SHARED}\\x.mqh"',
+        f'#\\\ninclude "{SHARED}\\x.mqh"',
+        f'#/*\n*/include "{SHARED}\\x.mqh"',
+        # Form feed and vertical tab are C whitespace.
+        f'\f#include "{SHARED}\\x.mqh"',
+        f'#\vinclude "{SHARED}\\x.mqh"',
     ],
 )
 def test_source_cannot_name_a_file_outside_the_sandbox(client, compile_env, monkeypatch, source):
@@ -1559,6 +1570,8 @@ def test_source_cannot_name_a_file_outside_the_sandbox(client, compile_env, monk
         f'/*\n#include "{SHARED}\\x.mqh"\n*/',
         'string s = "#include \\"C:\\\\x.mqh\\"";',
         'Print("// not a comment"); #include <Trade\\Trade.mqh>',
+        "#define SUM(a, b) \\\n    ((a) + (b))\n#include <Trade\\Trade.mqh>",
+        "#include <Trade\\Trade.mqh>\r\nint x = 1;\r\n",
     ],
 )
 def test_ordinary_directives_still_compile(client, compile_env, monkeypatch, source):
@@ -1569,6 +1582,29 @@ def test_ordinary_directives_still_compile(client, compile_env, monkeypatch, sou
     )
     resp = _post(client, {"source": source + "\nvoid OnTick(){}\n"})
     assert resp.status_code == 200, resp.get_json()
+
+
+def test_metaeditor_reads_the_line_breaks_the_scan_checked(client, compile_env, monkeypatch):
+    """The written file must carry only \\r\\n breaks. A lone \\r left in it could
+    start a line for MetaEditor that the scan never saw as one."""
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+    written = []
+    fake = _fake_metaeditor(_utf16_log(SUCCESS_LOG), ex5_bytes=b"binary")
+
+    def _capture_then_compile(cmd, **kwargs):
+        src_path = next(a.split(":", 1)[1] for a in cmd if a.startswith("/compile:"))
+        with open(src_path, "rb") as fh:
+            written.append(fh.read())
+        return fake(cmd, **kwargs)
+
+    monkeypatch.setattr(compile_handler.subprocess, "run", _capture_then_compile)
+
+    resp = _post(client, {"source": "int a = 1;\rint b = 2;\r\nint c = 3;\nvoid OnTick(){}\n"})
+
+    assert resp.status_code == 200, resp.get_json()
+    body = written[0].replace(b"\r\n", b"")
+    assert b"\r" not in body
+    assert written[0].count(b"\r\n") == 4
 
 
 def test_the_refusal_names_the_directive_and_path(client, compile_env):
