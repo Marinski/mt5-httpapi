@@ -96,6 +96,31 @@ def _normalize_instance(value):
     return str(value).strip() or DEFAULT_INSTANCE
 
 
+#: nginx read/send timeout for POST /compile: the handler's worst case at the
+#: 60s COMPILE_TIMEOUT ceiling is 60 + 30s waiting plus 60s compiling.
+COMPILE_PROXY_TIMEOUT = "180s"
+
+
+def _terminal_location(match, prefix, container, port, read_timeout=None):
+    """One nginx location block proxying `prefix` to a terminal's API."""
+    timeouts = (
+        f"            proxy_read_timeout {read_timeout};\n"
+        f"            proxy_send_timeout {read_timeout};\n"
+        if read_timeout else ""
+    )
+    return (
+        f"        {match} {{\n"
+        f"            resolver {DOCKER_EMBEDDED_DNS} valid=10s ipv6=off;\n"
+        f"            set $vm_upstream http://{container}:{port};\n"
+        f"            rewrite ^{prefix}(.*)$ /$1 break;\n"
+        f"            proxy_pass $vm_upstream;\n"
+        f"            proxy_set_header Host $host;\n"
+        f"            proxy_set_header X-Forwarded-For $remote_addr;\n"
+        + timeouts +
+        f"        }}"
+    )
+
+
 def _route_prefixes(terminal):
     broker = terminal["broker"]
     account = terminal["account"]
@@ -256,15 +281,19 @@ def main():
                 sys.exit(1)
             container = _vm_container_name(t)
             for p in _route_prefixes(t):
+                locs.append(_terminal_location(f"location {p}", p, container, t["port"]))
+                # POST /compile is synchronous and waits its turn behind other
+                # compiles (the handler bounds that at COMPILE_TIMEOUT + 30s of
+                # waiting plus the compile itself), which can outlive nginx's
+                # 60s default. The caller would then get nginx's HTML error
+                # page instead of the JSON the endpoint documents. Only this
+                # exact path gets the longer timeout; every other route keeps
+                # nginx's default.
                 locs.append(
-                    f"        location {p} {{\n"
-                    f"            resolver {DOCKER_EMBEDDED_DNS} valid=10s ipv6=off;\n"
-                    f"            set $vm_upstream http://{container}:{t['port']};\n"
-                    f"            rewrite ^{p}(.*)$ /$1 break;\n"
-                    f"            proxy_pass $vm_upstream;\n"
-                    f"            proxy_set_header Host $host;\n"
-                    f"            proxy_set_header X-Forwarded-For $remote_addr;\n"
-                    f"        }}"
+                    _terminal_location(
+                        f"location = {p}compile", p, container, t["port"],
+                        read_timeout=COMPILE_PROXY_TIMEOUT,
+                    )
                 )
 
         # The unified MCP endpoint: one session that reaches every terminal,

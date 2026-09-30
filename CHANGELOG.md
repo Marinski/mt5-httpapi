@@ -8,6 +8,22 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+### Added
+
+- `POST /compile` takes MQL5 source as JSON and returns the compiled `.ex5`, base64-encoded, with MetaEditor's log. Warnings do not fail a build, since MetaEditor exits non-zero on warnings too: success means a clean log and an actual binary. The log is decoded from MetaEditor's UTF-16LE. A compile error is a `422` carrying the diagnostics, the deadline is a `504`, and every response is JSON. See [Compiling MQL5](docs/compiling.md).
+
+  The caller sends source text only. `filename` is reduced to a bare stem inside a per-request temp directory that is removed on every exit, and `/compile:`, `/log:` and `/inc:` are computed by the server. `#include`, `#resource` and `#property icon` paths that are absolute, UNC, contain a `..` segment or name a device are refused with a `400` before MetaEditor runs: measured on MetaEditor build 5836, `#include` otherwise reads any file the API process can, and quotes its tokens back in the log. `tests/real_compile/` checks this against a live deployment. `ea_version` is only logged, and must be 1–64 characters of `A-Z a-z 0-9 . _ + -`.
+- Compiles are serialized across processes, not just threads: MetaEditor is single-instance per installation directory and every API process on a VM serves `/compile`. The lock is an OS byte-range lock on `.compile-inflight.lock` in the local mirror, or beside `MetaEditor64.exe` without one, which the OS releases when its holder exits or is killed. The mirror is refreshed under the same lock. At most two compiles wait behind the running one; the rest get an immediate `429` with `Retry-After`, so compile traffic cannot occupy every server thread.
+- `compile_api_token`, a second bearer token accepted only on `/compile`, so a build pipeline or code generator can compile without holding the token that can trade. `api_token` keeps working everywhere, and leaving the new token empty changes nothing.
+- Compile settings: `compile_terminal_dir` (default `terminals/metaquotes/base`), `compile_include_dir`, `compile_work_dir`, `compile_timeout` (default `30s`, ceiling 60s; a bare number is seconds), `compile_max_source_bytes` (2 MB, `413` before anything is written), `compile_max_ex5_bytes` (16 MB, checked before the binary is read), `compile_local_cache` and `compile_include_digests`. An invalid timeout or byte cap falls back to its default with a warning in the API log.
+- A successful compile reports `include_hash`, a sha256 over the include tree MetaEditor was given, recomputed whenever a file in that tree changes. `compile_include_digests` names headers whose own digests are reported as `include_files`, so a caller can tell an edit of its own header from an upgrade of the stock library.
+- `compile_local_cache` mirrors MetaEditor, its `Config` and the `MQL5` tree onto local disk, for installs whose terminals sit on a network or host-shared mount. On a 9p share a compile MetaEditor timed at 4.1s took 29s wall-clock, all of it loading the 105 MB binary. The include tree is re-checked against the source at most once a minute. A mirror that cannot be built falls back to the shared copy.
+
+### Changed
+
+- **Every API process schedules a MetaEditor warm-up** when `compile_local_cache` is set: 180s after start, one throwaway compile, so the first real caller does not pay the 30–55s cold load. One process per VM per boot runs it, claimed by a file in the cache that records the boot. It skips itself if a compile is running and logs, never raises, on failure.
+- **nginx gives `/<broker>/<account>[/<instance>]/compile` a 180s read and send timeout.** The handler's worst case at the 60s ceiling is 150s. Every other route keeps nginx's 60s default.
+
 ## [v4.14.0]: 2026-09-29
 
 The symbol-suffix, symbol-import, body-cap, journal-size and log-tail work below was contributed by @Marinski in #18.

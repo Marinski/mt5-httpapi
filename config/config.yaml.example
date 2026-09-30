@@ -5,6 +5,21 @@
 # Bearer token for API auth. Empty string = no auth (open to anyone on the network).
 api_token: ""
 
+# Optional SECOND bearer token, accepted ONLY on POST /compile.
+#
+# api_token unlocks order placement, position management and terminal restart.
+# Anything that only needs to compile MQL5 - a build pipeline, a code
+# generator, a third-party service - should not be holding that. Set this and
+# hand out this one instead; it is rejected on every other route.
+# Empty string = /compile accepts api_token only.
+compile_api_token: ""
+
+# Mirror the compile toolchain (MetaEditor + includes, ~105MB) onto local disk
+# on first use. Only worth setting when the terminals live on a network or
+# host-shared mount, where MetaEditor's load time dominates the compile - see
+# docs/compiling.md. Empty = compile straight from the terminal directory.
+compile_local_cache: ""
+
 # Automatically reboot the VM every N minutes to flush DWM/VirtIO-GPU state
 # before sustained-load crashes wedge the MT5 SDK pipe. 0 = disabled.
 reboot_interval: 30

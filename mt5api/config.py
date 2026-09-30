@@ -212,6 +212,85 @@ ACCOUNT = _args.account or _terminal_config.get("account", "")
 INSTANCE = normalize_instance(_args.instance or _terminal_config.get("instance"))
 PORT = _args.port or _terminal_config.get("port") or 6542
 API_TOKEN = _args.token or os.environ.get("API_TOKEN", "")
+
+# ── Compile endpoint (POST /compile) ─────────────────────────────
+# A SECOND credential that opens /compile and nothing else. The existing
+# API_TOKEN unlocks order placement, position management and terminal restart;
+# a caller that only compiles must not hold that. server.py
+# enforces the split: API_TOKEN works everywhere, COMPILE_API_TOKEN works only
+# on /compile.
+_compile_cfg = load_yaml_config()
+
+
+def _compile_setting(env_name, yaml_name, default=""):
+    """Env wins, then config.yaml, then the default -- the same precedence the
+    rest of this file uses for tokens and timeouts."""
+    value = os.environ.get(env_name)
+    if value not in (None, ""):
+        return value
+    value = _compile_cfg.get(yaml_name)
+    if value not in (None, ""):
+        return str(value)
+    return default
+
+
+COMPILE_API_TOKEN = _compile_setting("COMPILE_API_TOKEN", "compile_api_token")
+
+# Compiles run in a DEDICATED terminal directory, never a broker terminal.
+# MetaEditor is independent of terminal64.exe, so this is not about the
+# compiler colliding with a running terminal - it is about not putting write
+# traffic and a temp tree inside a directory a live terminal or a running
+# tester owns. metaquotes/base is the natural pick: it ships MetaEditor64.exe
+# and no instance runs a terminal out of it.
+COMPILE_TERMINAL_DIR = _compile_setting(
+    "COMPILE_TERMINAL_DIR", "compile_terminal_dir"
+) or os.path.join(BROKERS_DIR, "metaquotes", "base")
+COMPILE_METAEDITOR = os.path.join(COMPILE_TERMINAL_DIR, "MetaEditor64.exe")
+
+# Passed to MetaEditor as /inc:. This is the MQL5 directory (the PARENT of
+# Include), because that is what /inc: expects - `#include <Foo.mqh>` resolves
+# to <inc>/Include/Foo.mqh.
+COMPILE_INCLUDE_DIR = _compile_setting(
+    "COMPILE_INCLUDE_DIR", "compile_include_dir"
+) or os.path.join(COMPILE_TERMINAL_DIR, "MQL5")
+
+# Per-request temp directories live here, not in the Windows user temp, so a
+# crashed process leaves its debris somewhere visible and prunable.
+COMPILE_WORK_DIR = _compile_setting(
+    "COMPILE_WORK_DIR", "compile_work_dir"
+) or os.path.join(BASE_DIR, "logs", "compile-work")
+
+# Optional local mirror of the compile toolchain.
+#
+# When the terminal directory sits on a network or host-shared mount, the cost
+# of a compile is dominated by dragging MetaEditor across it, not by compiling:
+# measured on a docker-hosted Windows VM with the terminals on a 9p share, a
+# compile MetaEditor itself timed at 4.1s took 29s wall-clock, every time --
+# the page cache does not save you.
+#
+# Point this at a path on the VM's own disk and the toolchain (MetaEditor, its
+# Config, and the include tree) is mirrored there once per process, then
+# compiled from local disk. Empty = disabled, which is the right default for
+# any install whose terminals are already local.
+COMPILE_LOCAL_CACHE = _compile_setting("COMPILE_LOCAL_CACHE", "compile_local_cache")
+
+# Comma-separated globs naming headers whose INDIVIDUAL digests are reported
+# alongside the whole-tree include_hash, matched against paths relative to the
+# include root (e.g. "MyLib*.mqh, Trade/Trade.mqh").
+#
+# The tree hash alone tells a caller that SOMETHING under /inc: moved, which is
+# all that is needed to detect drift. It cannot say what: an upgrade of the
+# stock MQL5 library looks identical to an edit of the caller's own shared
+# header, and those have opposite correct responses - the first needs no
+# rebuild at all, the second needs every dependent artifact rebuilt. Naming the
+# few headers a caller actually owns lets them tell those apart.
+#
+# Empty = omit the field entirely. Deliberately not defaulted to the whole
+# tree: ~260 digests per response is a payload, not an answer.
+COMPILE_INCLUDE_DIGESTS = _compile_setting(
+    "COMPILE_INCLUDE_DIGESTS", "compile_include_digests"
+)
+
 UTC_OFFSET_RAW = _args.utc_offset if _args.utc_offset is not None else os.environ.get("UTC_OFFSET", "")
 UTC_OFFSET_SECONDS = parse_duration_to_seconds(UTC_OFFSET_RAW)
 UTC_OFFSET_HOURS = UTC_OFFSET_SECONDS / 3600.0
@@ -317,6 +396,66 @@ def _positive_int_setting(env_name, yaml_key, default):
         )
         return default
     return value
+
+
+# ── POST /compile limits ─────────────────────────────────────────
+# Like the settings above, a bad value is logged and replaced by the default;
+# it never stops the API, since trading imports this module too.
+
+COMPILE_TIMEOUT_DEFAULT_SECONDS = 30
+
+# MetaEditor compiles are seconds; anything approaching the ceiling means
+# something is wrong, and holding the connection longer does not help the
+# caller.
+COMPILE_TIMEOUT_CEILING_SECONDS = 60
+
+
+def _compile_timeout():
+    """Per-compile deadline in seconds: a bare number is seconds, or e.g. "45s".
+
+    Zero, a negative or an unparseable value falls back to the default with a
+    warning; a value above the ceiling is lowered to it, also with a warning.
+    """
+    raw = _compile_setting("COMPILE_TIMEOUT", "compile_timeout")
+    default = COMPILE_TIMEOUT_DEFAULT_SECONDS
+    if raw in (None, ""):
+        return default
+    text = str(raw).strip()
+    try:
+        # parse_duration_to_seconds reads a bare number as hours (it was
+        # written for broker offsets), so COMPILE_TIMEOUT=10 would mean ten
+        # hours. Bare numbers are seconds here.
+        parsed = int(text) if re.fullmatch(r"[+-]?\d+", text) else parse_duration_to_seconds(text)
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None or parsed <= 0:
+        _setting_warning(
+            "compile_timeout=%r is not a positive duration (seconds, or e.g. "
+            "'45s'); using the default %ds", raw, default,
+        )
+        return default
+    if parsed > COMPILE_TIMEOUT_CEILING_SECONDS:
+        _setting_warning(
+            "compile_timeout=%r is above the %ds ceiling; using %ds",
+            raw, COMPILE_TIMEOUT_CEILING_SECONDS, COMPILE_TIMEOUT_CEILING_SECONDS,
+        )
+        return COMPILE_TIMEOUT_CEILING_SECONDS
+    return int(parsed)
+
+
+COMPILE_TIMEOUT_SECONDS = _compile_timeout()
+
+# Per-request caps for /compile, so one authenticated request cannot consume
+# unbounded disk (the source is written to a temp dir), memory (the .ex5 is
+# read back whole), or response bandwidth (it is base64-encoded into the JSON
+# body). Checked before the write and before the read respectively - see
+# handlers/compile.py. Documented in docs/compiling.md.
+COMPILE_MAX_SOURCE_BYTES = _positive_int_setting(
+    "COMPILE_MAX_SOURCE_BYTES", "compile_max_source_bytes", 2 * 1024 * 1024
+)
+COMPILE_MAX_EX5_BYTES = _positive_int_setting(
+    "COMPILE_MAX_EX5_BYTES", "compile_max_ex5_bytes", 16 * 1024 * 1024
+)
 
 
 # Per-request caps for POST /symbols/import. Without them one authenticated
