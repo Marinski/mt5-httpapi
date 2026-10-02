@@ -152,6 +152,37 @@ services:
       - ./scripts/rotate-logs.sh:/rotate.sh:ro
     command: ["sh", "/rotate.sh"]
 
+{% set pruned_vms = vms | selectattr('hot_tier') | list %}
+{% if pruned_vms %}
+  # Terminal log pruner. Every MT5 terminal writes its own logs under the VM's
+  # hot tier, and a busy terminal runs those into the gigabytes; left alone they
+  # fill the tier the terminals themselves need. Prunes per-terminal logs older
+  # than RETAIN_DAYS and truncates any single log past MAX_LOG_BYTES, but only
+  # for terminals idle at least IDLE_MINUTES, so a running backtest's log is
+  # never touched mid-write.
+  #
+  # Roots come from each VM's hot_tier in vms.yaml, mounted as
+  # /terminals-<vm name>, and TERMINAL_ROOTS is the colon-separated list the
+  # script walks. Adding a VM with a hot_tier extends both automatically -- this
+  # service used to be hand-added to the generated compose file, so every
+  # `config_helper.py generate_compose` silently dropped it.
+  terminal-log-pruner:
+    image: alpine:3.20
+    restart: unless-stopped
+    environment:
+      TERMINAL_ROOTS: "{% for vm in pruned_vms %}/terminals-{{ vm.name }}{% if not loop.last %}:{% endif %}{% endfor %}"
+      RETAIN_DAYS: "7"
+      MAX_LOG_BYTES: "2147483648"
+      IDLE_MINUTES: "30"
+      INTERVAL: "3600"
+    volumes:
+{% for vm in pruned_vms %}
+      - {{ vm.hot_tier }}/terminals:/terminals-{{ vm.name }}:rw
+{% endfor %}
+      - ./scripts/prune-terminal-logs.sh:/prune.sh:ro
+    command: ["sh", "/prune.sh"]
+{% endif %}
+
   # VM crash watchdog. dockurr/windows keeps the container up while the
   # Windows guest may have crashed internally, so restart: unless-stopped
   # never fires and every terminal API in that VM stays dead. This sidecar
