@@ -13,6 +13,37 @@ set "PYDIR=C:\Program Files\Python312"
 set "PATH=%PYDIR%;%PYDIR%\Scripts;%PATH%"
 set "LOCKDIR=%SHARED%\start.running"
 
+:: -- Scope the boot lock to this VM ---------------------------------
+:: %SHARED% is the SAME host directory for every VM, so an unscoped
+:: lock is shared across VMs rather than private to one boot: two VMs
+:: booting together race for it and the loser bails with every terminal
+:: unlaunched. vm-group.txt already differs per VM (the file healthcheck.sh
+:: filters ports by) and is absent on a single-VM install, where there is
+:: nothing to race against.
+:: Derived in PURE BATCH: a PowerShell call here is unreliable this early
+:: in boot and silently falls back to the shared lock when it returns
+:: nothing -- the very race this prevents. The scope need not be a hash,
+:: only distinct per VM: first terminal plus line count is both, with no
+:: external process to fail.
+set "VM_GROUP=%CONFIG%\vm-group.txt"
+set "LOCK_SCOPE="
+set "VG_FIRST="
+set "VG_COUNT=0"
+if exist "%VM_GROUP%" (
+    for /f "usebackq eol=# tokens=1-3 delims= " %%A in ("%VM_GROUP%") do (
+        set /a VG_COUNT+=1
+        if not defined VG_FIRST set "VG_FIRST=%%A_%%B_%%C"
+    )
+    if defined VG_FIRST set "LOCK_SCOPE=!VG_FIRST!_!VG_COUNT!"
+)
+set "LOCKDIR=%SHARED%\start.running"
+if defined LOCK_SCOPE set "LOCKDIR=%SHARED%\start.running.!LOCK_SCOPE!"
+if defined LOCK_SCOPE (
+    echo [%date% %time%] [start] boot lock scoped to !LOCK_SCOPE!. >> "%FULL_LOG%"
+) else (
+    echo [%date% %time%] [start] no vm-group.txt terminals; using the unscoped boot lock. >> "%FULL_LOG%"
+)
+
 mkdir "%LOGDIR%" 2>nul
 rmdir "%FULL_LOG%.lock" 2>nul
 

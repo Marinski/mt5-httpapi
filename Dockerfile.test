@@ -33,6 +33,7 @@ COPY requirements-api.txt requirements-mcpunifier.txt requirements-test.txt dock
 COPY scripts/config_helper.py \
     scripts/start.bat \
     scripts/install.bat \
+    scripts/reboot.bat \
     scripts/check_health.py \
     scripts/api_runner.bat \
     scripts/desktop_heap.py \

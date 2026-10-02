@@ -135,18 +135,52 @@ fi
 rm -rf "${DIR}/data/shared/install.running"
 rm -rf "${DIR}/data/shared/start.running"
 
-# If VM disk is gone (fresh install), clear done flags so install.bat re-runs everything
-if [ ! -f "${DIR}/data/storage/data.img" ]; then
-    echo "No VM disk found — clearing done flags for fresh install."
-    rm -f "${DIR}/data/shared/"*.done
-fi
-
 CFG="${DIR}/scripts/config_helper.py"
 python3 -c "import yaml" 2>/dev/null || pip3 install --quiet pyyaml
 
 # Load VM names from vms.yaml (single VM "default" if file absent)
 VM_NAMES=$(python3 "$CFG" vms)
 echo "VM topology: ${VM_NAMES}"
+
+# Fresh-install detection: only when EVERY configured VM's disk image is
+# missing do the guests reinstall, so clear the installer's done flags so
+# install.bat re-runs its steps. Previously this hardcoded
+# "${DIR}/data/storage/data.img" and cleared "${DIR}/data/shared/"*.done —
+# both wrong for a vms.yaml multi-VM topology, where each VM's disk lives at
+# its own `storage` path (e.g. /data/mt5-vm-a/storage/data.img) and the guests'
+# /shared is the SHARED mount (/data/mt5-shared), not the repo's ./data/shared.
+# The old check therefore fired on every `make up`, wiping done flags in a
+# directory no VM reads. Detect per VM; clear where the guests actually read.
+SHARED_MOUNT="${SHARED_MOUNT:-/data/mt5-shared}"
+vm_total=0
+vm_missing=0
+for vm_name in ${VM_NAMES}; do
+    vm_storage=$(python3 "$CFG" vm_info "${vm_name}" storage 2>/dev/null || true)
+    [ -n "${vm_storage}" ] || continue
+    vm_total=$((vm_total + 1))
+    [ -f "${vm_storage}/data.img" ] || vm_missing=$((vm_missing + 1))
+done
+if [ "${vm_total}" -gt 0 ] && [ "${vm_missing}" -eq "${vm_total}" ]; then
+    echo "No VM disk found (0 of ${vm_total}) — clearing done flags for fresh install."
+    rm -f "${DIR}/data/shared/"*.done "${SHARED_MOUNT}/"*.done
+fi
+
+# Hot-tier mount gate (safety): an absent tier drive leaves its mountpoint as an
+# empty directory (fstab `nofail`), and Docker/Compose will then CREATE the bind
+# sources — so the VM starts with its terminals silently missing rather than
+# failing. Refuse to start unless every configured hot tier is a real mount.
+# Set SKIP_TIER_CHECK=1 to bypass (e.g. first-ever install before tiers exist).
+if [ "${SKIP_TIER_CHECK:-0}" != "1" ]; then
+    for vm_name in ${VM_NAMES}; do
+        ht=$(python3 "$CFG" vm_info "${vm_name}" hot_tier 2>/dev/null || true)
+        [ -n "${ht}" ] || continue
+        if ! mountpoint -q "${ht}"; then
+            echo "ERROR: hot tier '${ht}' (VM ${vm_name}) is not mounted — refusing to start." >&2
+            echo "       nofail would otherwise start the VM on an empty bind, losing its terminals." >&2
+            exit 1
+        fi
+    done
+fi
 
 API_PORTS=$(python3 "$CFG" port_list)
 echo "Configured terminal ports (container-internal): ${API_PORTS}"

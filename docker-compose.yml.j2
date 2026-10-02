@@ -58,7 +58,24 @@ services:
       interval: 30s
       timeout: 30s
       retries: 10
-      start_period: 120s
+      # start_period must cover the SLOWEST honest boot of this VM, because
+      # Docker only flips starting -> unhealthy once it has elapsed, and the
+      # vm-watchdog restarts on unhealthy. Set it too low and the watchdog kills
+      # a VM that is still bringing its terminals up, the clock resets, and the
+      # VM can never finish booting -- observed on the 24-terminal bulk VM,
+      # which needs ~29 min while the old fixed 120s + 10x30s gave it ~7.
+      #
+      # Size it from MEASURED time-to-healthy with margin, and no more. Both
+      # VMs come up in 4-9 min (12 and 24 terminals alike -- terminal count
+      # barely moves it), so 900s is ~2x the worst case.
+      #
+      # Do not be tempted to set this very high "to be safe". Docker reports a
+      # VM as `starting` for the whole period, so an over-long value hides a
+      # real fault: a VM whose terminals never launched looks identical to one
+      # that is still booting, and nothing surfaces it until the period ends.
+      # That is not hypothetical -- a 2400s value masked exactly that failure
+      # here for 31 minutes.
+      start_period: {{ vm.health_start_period | default('600s') }}
     restart: unless-stopped
     stop_grace_period: 2m
 

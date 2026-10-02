@@ -11,6 +11,37 @@ set "PATH=%PYDIR%;%PYDIR%\Scripts;%PATH%"
 set "LOCKDIR=%SHARED%\install.running"
 set "DEBLOAT_DONE=%SHARED%\debloat.done"
 mkdir "%LOGDIR%" 2>nul
+:: -- Scope the boot lock to this VM ---------------------------------
+:: %SHARED% is the SAME host directory for every VM, so an unscoped
+:: lock is shared across VMs rather than private to one boot: two VMs
+:: booting together race for it and the loser bails with every terminal
+:: unlaunched. vm-group.txt already differs per VM (the file healthcheck.sh
+:: filters ports by) and is absent on a single-VM install, where there is
+:: nothing to race against.
+:: Derived in PURE BATCH: a PowerShell call here is unreliable this early
+:: in boot and silently falls back to the shared lock when it returns
+:: nothing -- the very race this prevents. The scope need not be a hash,
+:: only distinct per VM: first terminal plus line count is both, with no
+:: external process to fail.
+set "VM_GROUP=%CONFIG%\vm-group.txt"
+set "LOCK_SCOPE="
+set "VG_FIRST="
+set "VG_COUNT=0"
+if exist "%VM_GROUP%" (
+    for /f "usebackq eol=# tokens=1-3 delims= " %%A in ("%VM_GROUP%") do (
+        set /a VG_COUNT+=1
+        if not defined VG_FIRST set "VG_FIRST=%%A_%%B_%%C"
+    )
+    if defined VG_FIRST set "LOCK_SCOPE=!VG_FIRST!_!VG_COUNT!"
+)
+set "LOCKDIR=%SHARED%\install.running"
+if defined LOCK_SCOPE set "LOCKDIR=%SHARED%\install.running.!LOCK_SCOPE!"
+if defined LOCK_SCOPE (
+    call :log "Install lock scoped to !LOCK_SCOPE!."
+) else (
+    call :log "unscoped install lock; no vm-group.txt terminals."
+)
+
 
 :: -- Stale lock cleanup after a protocol reboot ---------------------
 :: reboot.bat writes this flag before every reboot. /s /q is REQUIRED now
@@ -18,7 +49,7 @@ mkdir "%LOGDIR%" 2>nul
 :: rmdir fails on a non-empty directory and would leave the lock behind.
 if exist "%SHARED%\rebooting.flag" (
     del "%SHARED%\rebooting.flag" 2>nul
-    rmdir /s /q "%SHARED%\install.running" 2>nul
+    rmdir /s /q "%LOCKDIR%" 2>nul
 )
 
 :: -- Boot-scoped lock -----------------------------------------------
