@@ -43,6 +43,7 @@ from mt5api.config import (
     BACKTEST_MAX_TIMEOUT_SECONDS,
     BACKTEST_TIMEOUT_SECONDS,
     BACKTEST_JOB_DIR,
+    agent_port_base,
     load_yaml_config,
     parse_duration_to_seconds,
 )
@@ -213,6 +214,27 @@ def _normalize_set(parser, set_filename):
         parser["Tester"]["ExpertParameters"] = set_filename
     else:
         parser["Tester"].pop("ExpertParameters", None)
+
+
+def _apply_agent_port(parser):
+    """Give this terminal its own MetaTester agent-port block.
+
+    Every terminal defaults its local agents to 127.0.0.1:3000 upward, so two
+    terminals running concurrently in the same VM collide ("bind error on
+    127.0.0.1:300x [10048]"), the pass dies instantly, and the job comes back
+    "Report not generated" — the failure this whole terminal class hits at high
+    concurrency. The [Tester] Port key moves this terminal's agents onto a base
+    no sibling shares; the value is unique per instance within a VM.
+    """
+    port = agent_port_base(INSTANCE, os.environ.get("MT5_AGENT_PORT_BASE"))
+    parser["Tester"]["Port"] = str(port)
+    log.info(
+        "backtest agent port base broker=%s account=%s instance=%s port=%s",
+        BROKER,
+        ACCOUNT,
+        INSTANCE,
+        port,
+    )
 
 
 def _normalize_symbol(parser):
@@ -615,6 +637,7 @@ def run_backtest():
         _override_credentials(parser, creds)
         _normalize_symbol(parser)
         _normalize_expert(parser, expert_filename)
+        _apply_agent_port(parser)
         optimization_type = _optimization_type(parser)
         report_name = _ensure_report_path(parser)
     except ValueError as exc:

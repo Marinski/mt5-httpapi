@@ -132,6 +132,71 @@ def normalize_instance(value):
     return str(value).strip() or DEFAULT_INSTANCE
 
 
+#: Width of one terminal's MetaTester agent-port block. Every local agent a
+#: terminal starts binds 127.0.0.1:<base> upward (one port per agent); MT5
+#: defaults the base to 3000 for every install, which is exactly why two
+#: terminals in one Windows VM collide ("bind error on 127.0.0.1:300x [10048]"
+#: -> the pass dies instantly -> "Report not generated"). We give each terminal
+#: a distinct base instead. 40 is comfortably above the agent count a terminal
+#: starts here (one per core, capped by the VM's 20-core cpuset) and leaves room
+#: between blocks so a terminal that starts a few extra agents never reaches the
+#: next terminal's block. The [Tester] Port key carries this into the run; see
+#: https://www.metatrader5.com/en/terminal/help/start_advanced/start
+AGENT_PORT_BLOCK = 40
+AGENT_PORT_BASE_DEFAULT = 3000
+
+
+def instance_ordinal(instance):
+    """Stable 0-based index for an instance label.
+
+    Instance labels are the backend's parallelism clones, allocated as "a", "b",
+    ... (the first terminal of an account has no label = "default"). We need a
+    spread-out index rather than a dense collision-free one, so a label that is
+    not a plain single letter falls back to a hash of the label. The value only
+    has to be (a) stable for a given terminal across restarts and (b) unique per
+    terminal within a VM; it does not have to be small.
+    """
+    normalized = normalize_instance(instance)
+    if normalized == DEFAULT_INSTANCE:
+        return 0
+    # Numeric labels ("1".."60"): the backend's preferred scheme. Use the number
+    # itself as the ordinal so port blocks stay small and predictable
+    # (1 -> 3040, 30 -> 4200, ...). "1" is treated as ordinal 1, matching the
+    # letter scheme where "a" was ordinal 1.
+    if normalized.isdigit():
+        return int(normalized)
+    if len(normalized) == 1 and normalized.isalpha() and normalized.islower():
+        return ord(normalized) - ord("a") + 1
+    # Multi-letter labels (aa, ab, ...) and anything unusual: fold the label
+    # into a band that starts right after "z" (index 26) so ports stay in a
+    # sane range. 31^2 = 961 > the 64 values a 2-letter label can take, so the
+    # fold is injective across that set; the +26 leaves a gap after "z".
+    if len(normalized) == 2 and normalized.isalpha() and normalized.islower():
+        first = ord(normalized[0]) - ord("a")
+        second = ord(normalized[1]) - ord("a")
+        return 27 + first * 26 + second
+    folded = 0
+    for char in normalized:
+        folded = (folded * 31 + ord(char)) % 4096
+    return 1000 + folded
+
+
+def agent_port_base(instance, env_value=None):
+    """The [Tester] Port for this terminal: a per-instance MetaTester port base.
+
+    Precedence is explicit env override, then the instance-derived block. The
+    env override exists so a single terminal can be pinned by hand while the
+    derived rule is validated in production.
+    """
+    if env_value not in (None, ""):
+        try:
+            return int(str(env_value).strip())
+        except ValueError:
+            pass
+    ordinal = instance_ordinal(instance)
+    return AGENT_PORT_BASE_DEFAULT + ordinal * AGENT_PORT_BLOCK
+
+
 def match_terminal_config(terms, broker=None, account=None, instance=None):
     wanted_instance = normalize_instance(instance) if instance is not None else None
     for terminal in terms:

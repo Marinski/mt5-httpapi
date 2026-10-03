@@ -262,6 +262,17 @@ def sweep_orphans(lookback_seconds: int | None = None) -> int:
         except OSError as exc:
             log.warning("backtest sweep: cannot write %s: %s", name, exc)
             continue
+        # Keep the write-through cache in step with disk. load_job() returns a
+        # cached entry WITHOUT re-reading the file, so a job already loaded as
+        # "running" before this background sweep ran would otherwise keep
+        # serving the stale status forever — the manager's reconcile would poll
+        # a job that is dead on disk but "running" over the API, and never reap
+        # it. Assign unconditionally (not setdefault) so a cache entry written
+        # by a concurrent load loses the race rather than winning it.
+        job_id = job.get("jobId")
+        if job_id:
+            with JOB_LOCK:
+                BACKTEST_JOBS[job_id] = job
         swept += 1
         log.info("backtest sweep: marked %s as failed (was %s)", job.get("jobId"), name)
     return swept

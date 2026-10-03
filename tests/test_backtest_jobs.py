@@ -72,6 +72,20 @@ def test_sweep_honors_custom_lookback(tmp_jobs_dir):
     assert jobs.sweep_orphans(lookback_seconds=10800) == 1
 
 
+def test_sweep_refreshes_cached_running_job(tmp_jobs_dir):
+    """A job cached as "running" before the sweep must not keep serving running.
+
+    load_job() trusts the in-memory cache, so the sweep has to update it too: a
+    GET that loaded the job as "running" just before the background sweep ran
+    would otherwise be served the stale status forever, and the manager's
+    reconcile would poll a job that is dead on disk but "running" over the API.
+    """
+    _write(tmp_jobs_dir, "cached", "running")
+    assert jobs.load_job("cached")["status"] == "running"  # populate the cache
+    assert jobs.sweep_orphans() == 1
+    assert jobs.load_job("cached")["status"] == "failed"
+
+
 def test_sweep_no_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(jobs, "BACKTEST_JOB_DIR", str(tmp_path / "missing"))
     assert jobs.sweep_orphans() == 0
