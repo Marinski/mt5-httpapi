@@ -8,6 +8,19 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.16.0]: 2026-10-06
+
+Rotating every VM's log directory and gzipping the archives was contributed by @Marinski in #27.
+
+### Fixed
+
+- **Every VM's log directory is rotated.** The generated compose mounted only `/data/mt5-shared/logs` into `log-rotator`, so a VM with its own `log_dir` in `vms.yaml` never had its logs rotated or pruned. The rotator now takes `LOG_DIRS`, a colon-separated list, and the generated compose mounts and lists one directory per distinct `log_dir`. A VM that sets no `log_dir` writes to `/data/mt5-shared/logs`, so that directory is rotated whenever any VM omits `log_dir`. A listed directory that is not mounted is logged as `skipping <dir>: not mounted` and the others are still rotated. `LOG_DIR`, the single-directory form `docker-compose.yml.example` passes, still works.
+- **Rotated archives no longer fill the disk with zeros.** Truncating a live log on the host does not reset the Windows guest's write offset, so the file comes back sparse: a large hole with the real text at the end. On one install a live `full.log` reported 2.3 GB with 90 MB on disk. The old rotator copied it with `cp`, which wrote the whole hole out, so every daily archive was the full apparent size in real blocks. Archives are now gzipped, which shrinks the hole to almost nothing and compresses the text as well.
+
+### Changed
+
+- **Rotated logs are named `*.log.YYYYMMDD.gz`** instead of `*.log.YYYYMMDD`. On its first pass after the upgrade the rotator gzips the plain archives an older version left behind, and retention prunes both names. Expired archives are deleted before that pass, so they are never compressed only to be removed. Nothing to migrate; anything that reads the archives directly needs to read gzip.
+
 ## [v4.15.0]: 2026-09-30
 
 `POST /compile` and everything under it was contributed by @Marinski in #16.

@@ -74,7 +74,7 @@ services:
     depends_on:
       - mt5
 
-  # Daily log rotator. Rotates data/shared/logs/*.log to *.log.YYYYMMDD
+  # Daily log rotator. Rotates data/shared/logs/*.log to *.log.YYYYMMDD.gz
   # at the day boundary and prunes those archives plus dated MT5 terminal,
   # Tester, and Tester Agent journals older than RETAIN_DAYS.
   # Truncate-in-place so the Python API's open log handles keep working

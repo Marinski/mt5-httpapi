@@ -15,6 +15,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+# Where a VM without its own log_dir writes, through its /data/mt5-shared mount.
+SHARED_LOG_DIR = "/data/mt5-shared/logs"
+
 TWO_VMS = [
     {"name": "fast", "service": "mt5", "container_name": "mt5", "novnc_port": 8006},
     {"name": "bulk", "service": "mt5-b", "container_name": "mt5-b", "novnc_port": 8007},
@@ -26,7 +29,7 @@ TWO_VMS_WITH_LOG_DIRS = [
         "service": "mt5",
         "container_name": "mt5",
         "novnc_port": 8006,
-        "log_dir": "/data/mt5-shared/logs",
+        "log_dir": SHARED_LOG_DIR,
     },
     {
         "name": "bulk",
@@ -351,7 +354,7 @@ def test_log_rotator_mounts_only_logs_and_terminal_journals(tmp_path, monkeypatc
         "INTERVAL": "3600",
     }
     assert rotator["volumes"] == [
-        "/data/mt5-shared/logs:/logs-shared",
+        f"{SHARED_LOG_DIR}:/logs-shared",
         "/data/mt5-shared/terminals:/terminals",
         "./scripts/rotate-logs.sh:/rotate.sh:ro",
     ]
@@ -427,11 +430,11 @@ def test_log_rotator_covers_every_vm_log_directory(tmp_path, monkeypatch):
 def test_log_rotator_rotates_a_shared_directory_only_once(tmp_path, monkeypatch):
     """Two VMs may point at one directory; rotating it twice per pass is waste
     at best and a race between two passes over the same files at worst."""
-    vms = [dict(vm, log_dir="/data/mt5-shared/logs") for vm in TWO_VMS_WITH_LOG_DIRS]
+    vms = [dict(vm, log_dir=SHARED_LOG_DIR) for vm in TWO_VMS_WITH_LOG_DIRS]
     services = _generate(tmp_path, monkeypatch, vms)
     svc, mounts = _rotator(services)
 
-    assert list(mounts) == ["/data/mt5-shared/logs"]
+    assert list(mounts) == [SHARED_LOG_DIR]
     assert svc["environment"]["LOG_DIRS"].count(":") == 0, svc["environment"]["LOG_DIRS"]
 
 
@@ -441,25 +444,47 @@ def test_log_rotator_falls_back_to_the_shared_directory(tmp_path, monkeypatch):
     services = _generate(tmp_path, monkeypatch, TWO_VMS)
     svc, mounts = _rotator(services)
 
-    assert list(mounts) == ["/data/mt5-shared/logs"]
+    assert list(mounts) == [SHARED_LOG_DIR]
     assert svc["environment"]["LOG_DIRS"] == "/logs-shared"
 
 
+def test_log_rotator_covers_a_vm_without_log_dir_beside_one_with_it(
+    tmp_path, monkeypatch
+):
+    """A VM that omits log_dir writes to the shared directory even when another
+    VM sets its own, so the shared directory must still be mounted and listed."""
+    vms = [TWO_VMS[0], TWO_VMS_WITH_LOG_DIRS[1]]
+    services = _generate(tmp_path, monkeypatch, vms)
+    svc, mounts = _rotator(services)
+
+    assert mounts == {
+        SHARED_LOG_DIR: "/logs-shared",
+        "/data/mt5-vm-b/logs": "/logs-bulk",
+    }
+    assert sorted(svc["environment"]["LOG_DIRS"].split(":")) == [
+        "/logs-bulk",
+        "/logs-shared",
+    ]
+
+
 def test_every_vm_log_dir_in_the_live_topology_is_rotated():
-    """Guards the real vms.yaml, not just a fixture: a VM added with a log_dir
-    and no matching rotator mount grows unbounded and nothing reports it."""
+    """Guards the real vms.yaml, not just a fixture: a VM whose log directory has
+    no matching rotator mount grows unbounded and nothing reports it. A VM with
+    no log_dir writes to the shared directory, so that one must be mounted too.
+    Only a compose generated from the template is checked; one written by hand
+    from docker-compose.yml.example mounts its own paths."""
     root = Path(__file__).resolve().parents[1]
     vms_path = root / "vms.yaml"
     compose_path = root / "docker-compose.yml"
     if not (vms_path.exists() and compose_path.exists()):
         pytest.skip("no generated topology to check")
 
-    vms = yaml.safe_load(vms_path.read_text(encoding="utf-8"))["vms"]
-    rotator = yaml.safe_load(compose_path.read_text(encoding="utf-8"))["services"].get(
-        "log-rotator"
-    )
-    assert rotator, "the stack has no log-rotator"
+    services = yaml.safe_load(compose_path.read_text(encoding="utf-8"))["services"]
+    rotator = services.get("log-rotator") or {}
+    if "LOG_DIRS" not in rotator.get("environment", {}):
+        pytest.skip("docker-compose.yml was not generated from the template")
 
+    vms = yaml.safe_load(vms_path.read_text(encoding="utf-8"))["vms"]
     mounted = {vol.split(":")[0] for vol in rotator["volumes"]}
-    missing = [vm["log_dir"] for vm in vms if vm.get("log_dir") and vm["log_dir"] not in mounted]
-    assert missing == [], missing
+    log_dirs = {vm.get("log_dir") or SHARED_LOG_DIR for vm in vms}
+    assert sorted(log_dirs - mounted) == []

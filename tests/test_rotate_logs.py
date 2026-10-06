@@ -512,12 +512,13 @@ def test_a_hole_does_not_become_gigabytes_of_zeros(tmp_path):
     """The live log is sparse -- truncating it does not reset the guest's write
     offset, so it returns as a 1.7 GB hole with a few KB of text at the end. A
     plain copy writes every zero out; the archive has to stay near the size of
-    the real content."""
+    the real content. The hole is kept small enough for gzip to read it well
+    inside the pass window _run allows."""
     d = tmp_path / "sparse"
     d.mkdir()
     live = d / "full.log"
     with open(live, "wb") as fh:
-        fh.seek(256 * 1024 * 1024)  # the hole the guest's stale offset leaves
+        fh.seek(64 * 1024 * 1024)  # the hole the guest's stale offset leaves
         fh.write(CONTENT.encode())  # the real text, written past it
 
     _run({"LOG_DIRS": str(d)})

@@ -103,20 +103,22 @@ services:
 
 {% endif %}
 {% endfor %}
+{%- set shared_log_dir = '/data/mt5-shared/logs' %}
 {%- set log_mounts = [] %}
 {%- set seen_log_dirs = [] %}
 {%- for vm in vms %}
-{%- if vm.log_dir and vm.log_dir not in seen_log_dirs %}
-{%- set _ = seen_log_dirs.append(vm.log_dir) %}
-{%- set _ = log_mounts.append(vm) %}
+{%- set vm_log_dir = vm.log_dir or shared_log_dir %}
+{%- if vm_log_dir not in seen_log_dirs %}
+{%- set _ = seen_log_dirs.append(vm_log_dir) %}
+{%- set _ = log_mounts.append({'name': vm.name if vm.log_dir else 'shared', 'log_dir': vm_log_dir}) %}
 {%- endif %}
 {%- endfor %}
 {%- if not log_mounts %}
-{%- set _ = log_mounts.append({'name': 'shared', 'log_dir': '/data/mt5-shared/logs'}) %}
+{%- set _ = log_mounts.append({'name': 'shared', 'log_dir': shared_log_dir}) %}
 {%- endif %}
-  # Daily log rotator. Rotates every VM's logs/*.log to *.log.YYYYMMDD at the
-  # day boundary and prunes those archives plus dated MT5 terminal, Tester and
-  # Tester Agent journals older than RETAIN_DAYS. Truncate-in-place so the
+  # Daily log rotator. Rotates every VM's logs/*.log to *.log.YYYYMMDD.gz at
+  # the day boundary and prunes those archives plus dated MT5 terminal, Tester
+  # and Tester Agent journals older than RETAIN_DAYS. Truncate-in-place so the
   # Python API's open log handles keep working without reopening. Hourly check,
   # idempotent (keyed on yesterday's archive existing).
   #
@@ -129,8 +131,9 @@ services:
   #
   # Mounts and LOG_DIRS both come from vms.yaml, deduplicated by log_dir, so
   # adding a VM extends them and two VMs sharing a directory rotate it once.
-  # A topology that sets no log_dir at all falls back to the shared directory,
-  # which is what a single-VM install uses.
+  # A VM without a log_dir writes to the shared directory through its
+  # /data/mt5-shared mount, so that directory is rotated whenever any VM omits
+  # log_dir, including a single-VM install that sets none.
   log-rotator:
     image: alpine:3.20
     restart: unless-stopped

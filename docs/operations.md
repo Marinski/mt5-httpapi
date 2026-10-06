@@ -475,20 +475,22 @@ Inside the VM's shared folder (`data/shared/logs/`):
 
 ### Rotation
 
-A small alpine sidecar (`log-rotator`) rotates every `*.log` in
-`data/shared/logs/` daily and prunes archives older than 7 days. It also deletes
-dated journals older than the same retention period from each installed
-terminal's `logs/`, `Tester/logs/`, and `Tester/Agent-*/logs/` directories. It
-does not touch MQL5 expert logs, MetaEditor logs, reports, or backtest jobs.
-Naming: `full.log` → `full.log.YYYYMMDD` (yesterday's date) at the next
-post-midnight wakeup. Idempotent, hourly check loop, no cron daemon needed.
+A small alpine sidecar (`log-rotator`) rotates every `*.log` in each VM's log directory daily and prunes archives older than 7 days. It also deletes dated journals older than the same retention period from each installed terminal's `logs/`, `Tester/logs/`, and `Tester/Agent-*/logs/` directories. It does not touch MQL5 expert logs, MetaEditor logs, reports, or backtest jobs. Naming: `full.log` → `full.log.YYYYMMDD.gz` (yesterday's date) at the next post-midnight wakeup. Idempotent, hourly check loop, no cron daemon needed.
+
+Which log directories it walks:
+
+- The stock single-VM `docker-compose.yml.example` mounts `data/shared/logs/` and passes it as `LOG_DIR`.
+- A compose generated from `vms.yaml` mounts one directory per distinct VM `log_dir` and lists them all in `LOG_DIRS`, separated by colons. A VM that sets no `log_dir` writes to `/data/mt5-shared/logs`, so that directory is mounted and rotated too.
+- A listed directory that is not mounted is logged as `skipping <dir>: not mounted`, and the rotator still rotates the others.
 
 Override defaults via `docker-compose.yml`:
 
 - `RETAIN_DAYS` (default `7`) - how many days of rotated shared logs and dated MT5 journals to keep
 - `INTERVAL` (default `3600`) - how often to check for the day boundary, in seconds
 
-Truncation is in-place (the archive is a copy, then the original is `:>`-truncated) so the Python API's open log handle keeps writing without reopening.
+Truncation is in-place (the rotator gzips the live file into the archive, then `:>`-truncates the original) so the Python API's open log handle keeps writing without reopening.
+
+The archives are gzipped because the live logs are sparse. Truncating the host file does not reset the Windows guest's write offset, so the guest keeps writing at its old position and the file comes back as a large hole with the real text at the end. Its apparent size keeps growing while its disk usage stays small. A plain copy would write the whole hole out as zeros, and gzip shrinks it to almost nothing. On its next pass the rotator gzips any archive an older version left uncompressed, and retention covers both `*.log.YYYYMMDD` and `*.log.YYYYMMDD.gz`.
 
 #### Size cap on terminal journals
 

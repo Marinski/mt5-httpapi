@@ -169,6 +169,18 @@ rotate_dir() {
         return 0
     fi
 
+    # Prune *.log.YYYYMMDD[.gz] older than cutoff. Lex sort == chrono sort
+    # because the date is fixed-width YYYYMMDD. Runs before the compression
+    # pass so an expired pre-gzip archive is deleted, not compressed first.
+    for old in "$dir"/*.log.[0-9]*; do
+        [ -f "$old" ] || continue
+        _is_archive "$old" || continue
+        if [ "$(_archive_date "$old")" -lt "$cutoff" ]; then
+            rm -f "$old"
+            log "pruned $(basename "$old")"
+        fi
+    done
+
     # Compress archives left behind by the pre-gzip version. Bounded and
     # self-limiting: a compressed archive no longer matches this glob. gzip
     # only unlinks the source once it has written the .gz, so an interrupted
@@ -204,17 +216,6 @@ rotate_dir() {
         else
             rm -f "${archive}.tmp"
             log "rotation FAILED for $(basename "$f")"
-        fi
-    done
-
-    # Prune *.log.YYYYMMDD[.gz] older than cutoff. Lex sort == chrono sort
-    # because the date is fixed-width YYYYMMDD.
-    for old in "$dir"/*.log.[0-9]*; do
-        [ -f "$old" ] || continue
-        _is_archive "$old" || continue
-        if [ "$(_archive_date "$old")" -lt "$cutoff" ]; then
-            rm -f "$old"
-            log "pruned $(basename "$old")"
         fi
     done
 }
