@@ -75,3 +75,57 @@ if dead:
                 )
     except Exception:
         pass
+
+# One-shot guest memory snapshot. `touch <this VM's logs dir>/mem-snapshot.request`
+# on the host; the next tick removes it and launches mem-snapshot.ps1 detached,
+# which writes logs\mem-snapshot-<ts>.txt. Never blocks or fails the health loop.
+try:
+    _req = os.path.join(SHARED, 'logs', 'mem-snapshot.request')
+    if os.path.exists(_req):
+        os.remove(_req)
+        import subprocess
+        _log = open(os.path.join(SHARED, 'logs', 'mem-snapshot.launch.log'), 'a')
+        subprocess.Popen(
+            ['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+             '-File', os.path.join(SHARED, 'scripts', 'mem-snapshot.ps1')],
+            stdin=subprocess.DEVNULL, stdout=_log, stderr=subprocess.STDOUT,
+            creationflags=0x08000000 | 0x00000200,  # CREATE_NO_WINDOW | NEW_PROCESS_GROUP
+        )
+        print('  mem-snapshot launched')
+except Exception as e:
+    print(f'  mem-snapshot hook failed: {e}')
+
+# One-shot tester-process snapshot (read-only). `touch <logs>/proc-snapshot.request`.
+try:
+    _req = os.path.join(SHARED, 'logs', 'proc-snapshot.request')
+    if os.path.exists(_req):
+        os.remove(_req)
+        import subprocess, sys
+        _log = open(os.path.join(SHARED, 'logs', 'proc-snapshot.launch.log'), 'a')
+        subprocess.Popen(
+            [r'C:\Program Files\Python312\python.exe', os.path.join(SHARED, 'scripts', 'proc-snapshot.py')],
+            stdin=subprocess.DEVNULL, stdout=_log, stderr=subprocess.STDOUT,
+            creationflags=0x08000000 | 0x00000200,
+        )
+        print('  proc-snapshot launched')
+except Exception as e:
+    print(f'  proc-snapshot hook failed: {e}')
+
+# Idle-only rolling restart of this VM's backtest APIs (loads new mt5api code).
+# `echo run > <logs>/api-rolling-restart.request` (or `echo dry` to only report).
+try:
+    _req = os.path.join(SHARED, 'logs', 'api-rolling-restart.request')
+    if os.path.exists(_req):
+        with open(_req) as _f:
+            _mode = _f.read().strip() or 'dry'
+        os.remove(_req)
+        import subprocess
+        _log = open(os.path.join(SHARED, 'logs', 'api-rolling-restart.launch.log'), 'a')
+        subprocess.Popen(
+            [r'C:\Program Files\Python312\python.exe', os.path.join(SHARED, 'scripts', 'api-rolling-restart.py'), _mode],
+            stdin=subprocess.DEVNULL, stdout=_log, stderr=subprocess.STDOUT,
+            creationflags=0x08000000 | 0x00000200,
+        )
+        print(f'  api-rolling-restart launched ({_mode})')
+except Exception as e:
+    print(f'  api-rolling-restart hook failed: {e}')
