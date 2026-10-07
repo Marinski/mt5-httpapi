@@ -8,6 +8,20 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.17.0]: 2026-10-07
+
+The stuck-call guard, the `/ping` counters and the account-field fix were contributed by @Marinski in #26.
+
+### Fixed
+
+- **One stuck SDK call no longer drags every later request down with it.** An `mt5.*` call that runs past its 30s timeout leaves its thread inside the SDK, because Python can't kill it. Each later request then made a second call on the same stuck connection and waited out its own 30s, so a terminal's queue could fill and `/ping` could take an hour. While a stuck call's thread is alive, later SDK calls on that terminal now fail at once with `503 mt5 call is wedged` and `Retry-After: 30`. When the live health monitor restarts the terminal, it kills it without calling `mt5.shutdown`, reconnects past the stuck call, and once the reconnect succeeds it stops tracking that call, so requests work again.
+- An account in `config.yaml` with keys other than `login`, `password` and `server`, such as `symbol_map`, no longer breaks terminal init and every SDK route with it. The API now passes only those three keys to `mt5.initialize`.
+
+### Changed
+
+- `/ping` also reports `sdk_threads_alive` and `sdk_oldest_alive_s`.
+- A timed-out or refused SDK call logs one error line with `TIMEOUT` or `WEDGED (<stuck call> stuck <N>s)`, the process mode, the request path and the number of SDK threads still alive.
+
 ## [v4.16.0]: 2026-10-06
 
 Rotating every VM's log directory and gzipping the archives was contributed by @Marinski in #27.
@@ -75,12 +89,6 @@ The symbol-suffix, symbol-import, body-cap, journal-size and log-tail work below
   After upgrading, the timeout and startup cleanups actually stop this terminal's `terminal64.exe` and `metatester64.exe` processes, which they silently skipped before.
 
 - The resolved terminal path is cached only once the link actually resolves. A lookup made while the share is still unreachable no longer hides the resolved path until the API restarts, and a failed lookup is logged instead of ignored.
-
-### Fixed
-
-- **A wedged SDK call let every later request re-wedge instead of failing fast** (`mt5api/mt5client.py`). `_run_with_timeout` abandons its worker thread on a 30s timeout — Python cannot interrupt a thread blocked inside the MT5 SDK's C extension — and `session()` releases `_mt5_lock` regardless, so the zombie stays inside the single-connection, non-threadsafe SDK while the next request calls in alongside it. Traced to a real 2026-08-23 incident: every API instance on a VM logged waitress's `Task queue depth is 66` and `/ping` took 60+ minutes, because each of ~66 requests independently paid the full 30s timeout serialized behind the same wedged connection. A new single-flight guard now refuses to start another SDK call while a prior worker is still alive — new `MT5Wedged(MT5Timeout)`, mapped by `with_mt5` to `503` + `Retry-After: 30` (naming the stuck function and its age) instead of running out its own timeout. `restart_terminal`'s own post-kill reconnect is the one call exempted from the guard it may have just tripped (`allow_wedged=True`), otherwise the monitor would kill the terminal again every cycle with "reconnection failed" forever. `ensure_initialized`/`init_mt5` propagate `MT5Wedged` rather than swallowing it into a generic "not initialized" result, so the ~24 handler call sites that gate on `ensure_initialized()` actually surface the guard's 503 instead of a plain one with no `Retry-After`. `/ping` (still lock-free) now reports `sdk_threads_alive` / `sdk_oldest_alive_s`, and every WEDGED/TIMEOUT log line carries the process mode, request path and live worker count — the incident above was unrecoverable partly because none of that was captured at the time. Tests: `tests/test_mt5client.py`, new `tests/test_wedge_watchdog.py`.
-
-- **A wedged process had no way back except a VM recreate — now it exits and relaunches itself.** A new `mt5-wedge-watchdog` daemon thread (`mt5api/wedge_watchdog.py`, started in every mode from `main.py`) exits the process (`os._exit(75)`) once the oldest live SDK worker has been stuck longer than `MT5_WEDGE_EXIT_SECONDS` (default 180s). 37 of the fleet's 38 terminals run in backtest mode, which never starts the existing health monitor, so this is the only thing that can act on a wedge there; in that mode the exit defers while a tester run holds `RUN_LOCK`, but only up to `MT5_WEDGE_DEFER_CEILING_SECONDS` (default 1800s) measured from when it first wanted to exit — queued jobs re-acquiring the lock back-to-back (this fleet runs them up to ~6h) must not extend that ceiling, or the defer is effectively permanent. `api_runner.bat`'s single-shot Python launch is wrapped in a relaunch loop with backoff, giving up after 5 exits in 10 minutes — applied as a deploy-time hook (`backend/scripts/patch-api-runner-bat.py`, run by `deploy-mt5-scripts.sh`) rather than committed to the submodule, since `api_runner.bat` stays upstream. New settings: `MT5_WEDGE_EXIT_SECONDS`, `MT5_WEDGE_CHECK_INTERVAL_SECONDS`, `MT5_WEDGE_DEFER_CEILING_SECONDS`. See `docs/spec/mt5-httpapi-sdk-call-thread-leak.md` for the full design and open questions.
 
 ## [v4.13.1]: 2026-09-10
 

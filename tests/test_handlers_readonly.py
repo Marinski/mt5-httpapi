@@ -53,9 +53,7 @@ def test_ping_needs_no_terminal_at_all(api_client):
 
 
 def test_ping_reports_the_wedge_counters_while_a_call_is_wedged(api_client):
-    """docs/spec/mt5-httpapi-sdk-call-thread-leak.md step 0's acceptance
-    criterion: /ping answers AND names the wedge, without taking the MT5 lock
-    (no @with_mt5 on this route — a real lock would itself be wedged here)."""
+    """/ping takes no MT5 lock, so it answers and reports the stuck call."""
     mc._add_sdk_worker("terminal_info")
     try:
         resp = api_client.get("/ping")

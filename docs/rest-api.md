@@ -47,8 +47,10 @@ curl -H "Authorization: Bearer $MT5_API_TOKEN" http://localhost:8888/roboforex/m
 **GET `/ping`** (`mode` is `live` or `backtest`):
 
 ```json
-{ "status": "ok", "mode": "live" }
+{ "status": "ok", "mode": "live", "sdk_threads_alive": 0, "sdk_oldest_alive_s": null }
 ```
+
+`/ping` takes no MT5 lock, so it answers even while an SDK call is stuck. `sdk_threads_alive` counts SDK calls whose thread has not returned, including ones abandoned after a timeout, and `sdk_oldest_alive_s` is the age of the oldest in seconds, or `null` when there are none. See [Concurrency and backpressure](operations.md#concurrency-and-backpressure).
 
 **GET `/error`**:
 

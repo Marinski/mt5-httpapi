@@ -201,9 +201,8 @@ def test_run_with_timeout_distinguishes_none_result_from_timeout():
 
 
 def test_run_with_timeout_does_not_wedge_the_next_call_once_it_returns():
-    """A call that finishes exactly at its timeout must not leave the next
-    call wedged — this is finding 1's ordering: the worker's finally must
-    remove it from the set BEFORE waking the waiting caller."""
+    """A finished call deregisters before waking its caller, so the next call
+    does not see it and raise MT5Wedged."""
     mc._run_with_timeout(lambda: "done", timeout=5)
     assert mc.sdk_worker_snapshot() == (0, None)
     # A second, unrelated call must run normally, not raise MT5Wedged.
@@ -260,22 +259,6 @@ def test_sdk_worker_snapshot_reports_count_and_oldest_age():
 
     count, age = mc.sdk_worker_snapshot()
     assert count == 1
-    assert age >= 0
-    released.set()
-
-
-def test_sdk_wedge_status_names_the_stuck_function():
-    assert mc.sdk_wedge_status() is None
-    released = threading.Event()
-
-    def stuck():
-        released.wait(timeout=5)
-
-    with pytest.raises(mc.MT5Timeout):
-        mc._run_with_timeout(stuck, timeout=0.05, name="stuck_fn")
-
-    fn_name, age = mc.sdk_wedge_status()
-    assert fn_name == "stuck_fn"
     assert age >= 0
     released.set()
 
@@ -356,14 +339,7 @@ def test_m_passes_allow_wedged_through_to_run_with_timeout():
     released.set()
 
 
-def test_m_wedge_log_names_mode_and_request_path(caplog):
-    """Step 0's acceptance criterion: every timeout/wedge log line carries
-    mode and the request path, not just the stuck function — the 2026-08-23
-    incident was unrecoverable partly because per-instance mode and which
-    route triggered it were both lost. Outside a request context (the
-    monkeypatched-`m` tests elsewhere in this file) that path is always "-",
-    so this test is the only one that exercises the real request-context
-    branch of _req_path()."""
+def test_m_logs_a_wedge_once_with_mode_path_and_worker_count(caplog):
     released = threading.Event()
 
     def stuck():
@@ -377,29 +353,44 @@ def test_m_wedge_log_names_mode_and_request_path(caplog):
         return "should not run"
 
     other.__name__ = "other"
+    caplog.clear()
     with _flask_app.test_request_context("/symbols/EURUSD/rates"):
         with caplog.at_level("ERROR", logger="mt5api"):
             with pytest.raises(mc.MT5Wedged):
                 mc.m(other, _timeout=5)
 
-    assert any("path=/symbols/EURUSD/rates" in r.getMessage() for r in caplog.records)
-    assert any(f"mode={mc.MODE}" in r.getMessage() for r in caplog.records)
+    wedge_lines = [r.getMessage() for r in caplog.records if "WEDGED" in r.getMessage()]
+    assert len(wedge_lines) == 1, wedge_lines
+    assert "path=/symbols/EURUSD/rates" in wedge_lines[0]
+    assert f"mode={mc.MODE}" in wedge_lines[0]
+    assert "workers_alive=1" in wedge_lines[0]
     released.set()
 
 
-def test_run_with_timeout_own_timeout_log_names_mode_and_request_path(caplog):
-    """Same acceptance criterion, for a call that times out on its OWN first
-    attempt (not a rejection by the guard) — the other timeout log site."""
+def test_m_logs_its_own_timeout_once_with_mode_and_path(caplog):
     def slow():
         time.sleep(0.2)
 
     with _flask_app.test_request_context("/terminal/init"):
         with caplog.at_level("WARNING", logger="mt5api"):
             with pytest.raises(mc.MT5Timeout):
-                mc._run_with_timeout(slow, timeout=0.05, name="slow_fn")
+                mc.m(slow, _timeout=0.05)
 
-    assert any("path=/terminal/init" in r.getMessage() for r in caplog.records)
-    assert any(f"mode={mc.MODE}" in r.getMessage() for r in caplog.records)
+    timeout_lines = [r.getMessage() for r in caplog.records if "TIMEOUT" in r.getMessage()]
+    assert len(timeout_lines) == 1, timeout_lines
+    assert "path=/terminal/init" in timeout_lines[0]
+    assert f"mode={mc.MODE}" in timeout_lines[0]
+
+
+def test_m_logs_the_duration_of_a_call_that_raises(caplog):
+    def sdk_call():
+        raise KeyError("bad state")
+
+    with caplog.at_level("INFO", logger="mt5api"):
+        with pytest.raises(KeyError):
+            mc.m(sdk_call, _timeout=5)
+
+    assert any("mt5.sdk_call dur_ms=" in r.getMessage() for r in caplog.records)
 
 
 # --- session() — queue depth + lock ----------------------------------------
@@ -1042,10 +1033,8 @@ def test_sdk_routes_refuse_on_a_backtest_terminal_without_starting_mt5(
 
 
 def test_restart_terminal_skips_shutdown_when_a_worker_is_still_wedged(monkeypatch):
-    """Finding 2 / step 4: calling mt5.shutdown while a worker from an
-    earlier timeout is still alive would just start a SECOND concurrent call
-    into the same stuck SDK connection. Must go straight to killing the
-    process instead."""
+    """mt5.shutdown would be a second concurrent call into the stuck
+    connection, so restart goes straight to killing the terminal."""
     mc._add_sdk_worker("some_stuck_call")
 
     def fake_m(fn, *a, **kw):
@@ -1065,11 +1054,11 @@ def test_restart_terminal_skips_shutdown_when_a_worker_is_still_wedged(monkeypat
     assert calls == ["kill"]
 
 
-def test_restart_terminal_reconnect_is_not_rejected_by_its_own_guard(monkeypatch):
-    """End-to-end through the REAL m()/_run_with_timeout (not a fake m): a
-    worker left alive by an earlier wedge must not block restart_terminal's
-    own reconnect — that's finding 2, the kill-loop bug. Uses the real guard
-    so a regression that drops allow_wedged=True is actually caught."""
+def test_restart_terminal_reconnects_and_clears_the_guard_past_a_stuck_call(monkeypatch):
+    """Through the real m(): a call stuck on the old terminal must not block
+    the reconnect, and once the reconnect succeeds later calls run again
+    instead of raising MT5Wedged, which would make the monitor restart the
+    terminal on every cycle."""
     released = threading.Event()
 
     def stuck_call(*_a, **_kw):
@@ -1087,4 +1076,24 @@ def test_restart_terminal_reconnect_is_not_rejected_by_its_own_guard(monkeypatch
     monkeypatch.setattr(mc.mt5, "initialize", MagicMock(return_value=True))
 
     assert mc.restart_terminal() is True
+    assert mc.sdk_worker_snapshot() == (0, None)
+
+    def next_call():
+        return "served"
+
+    assert mc.m(next_call, _timeout=5) == "served"
     released.set()
+
+
+def test_restart_terminal_keeps_the_guard_when_the_reconnect_fails(monkeypatch):
+    """A failed reconnect leaves the stuck call tracked, so later calls keep
+    answering 503 until a restart succeeds."""
+    mc._add_sdk_worker("account_info")
+    monkeypatch.setattr(mc, "_kill_terminal", lambda: True)
+    monkeypatch.setattr(mc.subprocess, "Popen", MagicMock())
+    monkeypatch.setattr(mc, "_wait_for_journal", lambda *a, **kw: True)
+    monkeypatch.setattr(mc, "get_first_account", lambda: None)
+    monkeypatch.setattr(mc, "init_mt5", lambda *a, **kw: False)
+
+    assert mc.restart_terminal() is False
+    assert mc.sdk_worker_snapshot()[0] == 1

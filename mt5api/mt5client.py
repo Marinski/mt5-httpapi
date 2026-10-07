@@ -90,10 +90,8 @@ MAX_QUEUE_DEPTH = int(os.environ.get("MT5_MAX_QUEUE_DEPTH", "20"))
 # between calls — shouldn't happen, but be defensive).
 SESSION_ACQUIRE_TIMEOUT = MT5_CALL_TIMEOUT + 30
 
-# Retry-After for the single-flight guard's 503 (MT5Wedged). Derived from
-# MT5_CALL_TIMEOUT, not a separate literal: a wedge can clear as soon as the
-# stuck call's own timeout window passes, so the two must move together —
-# a config.py setting here would let them silently drift apart.
+# Retry-After on the single-flight guard's 503. Tied to MT5_CALL_TIMEOUT
+# because a stuck call can clear once its own timeout window has passed.
 MT5_WEDGE_RETRY_AFTER_SECONDS = MT5_CALL_TIMEOUT
 
 
@@ -102,14 +100,10 @@ class MT5Timeout(Exception):
 
 
 class MT5Wedged(MT5Timeout):
-    """A previously timed-out call is still stuck inside the SDK.
+    """An earlier timed-out call is still running inside the SDK.
 
-    Subclasses MT5Timeout so every existing `except MT5Timeout` (m, with_mt5,
-    init_mt5, ensure_initialized, restart_terminal, monitor.py) keeps treating
-    a wedge as "terminal not answering" for free. Raised instead of starting
-    a new SDK-call thread — see _run_with_timeout — because the SDK is a
-    single, non-threadsafe connection: piling a second call on top of a
-    zombie worker still inside the first one corrupts its internal state.
+    Subclasses MT5Timeout so every existing `except MT5Timeout` still treats
+    it as an unresponsive terminal. Callers that care catch it first.
     """
 
 
@@ -146,7 +140,7 @@ def current_queue_depth():
 
 
 class _SdkWorker:
-    """One in-flight (or abandoned-but-still-running) _run_with_timeout call."""
+    """A _run_with_timeout call whose thread has not returned yet."""
 
     __slots__ = ("fn_name", "started_at")
 
@@ -158,10 +152,8 @@ class _SdkWorker:
         return time.monotonic() - self.started_at
 
 
-# Every live SDK-call worker thread, keyed by a throwaway identity object (not
-# the Thread itself — a worker's finally-block removes it by key before it
-# can be observed, see _run_with_timeout). Guarded by its own lock, separate
-# from _mt5_lock, so /ping can read it without taking the SDK lock.
+# Live SDK worker threads, including ones abandoned after a timeout. Has its
+# own lock so /ping can read it without taking _mt5_lock.
 _sdk_workers: dict = {}
 _sdk_workers_lock = threading.Lock()
 
@@ -178,31 +170,26 @@ def _remove_sdk_worker(key):
         _sdk_workers.pop(key, None)
 
 
-def _oldest_sdk_worker():
-    """The longest-running live worker, or None."""
+def _forget_sdk_workers():
+    """Drop every tracked worker and return how many there were. A dropped
+    thread that returns later removes nothing, since its key is gone."""
     with _sdk_workers_lock:
-        if not _sdk_workers:
-            return None
-        return min(_sdk_workers.values(), key=lambda w: w.started_at)
+        count = len(_sdk_workers)
+        _sdk_workers.clear()
+        return count
+
+
+def _sdk_worker_state():
+    """(alive_count, oldest_worker_or_None), read under one lock."""
+    with _sdk_workers_lock:
+        oldest = min(_sdk_workers.values(), key=lambda w: w.started_at, default=None)
+        return len(_sdk_workers), oldest
 
 
 def sdk_worker_snapshot():
-    """(alive_count, oldest_age_seconds_or_None), read under one lock so the
-    two numbers never disagree about whether any worker exists. For /ping."""
-    with _sdk_workers_lock:
-        count = len(_sdk_workers)
-        oldest_age = min((w.age() for w in _sdk_workers.values()), default=None)
-    return count, oldest_age
-
-
-def sdk_wedge_status():
-    """(fn_name, age_seconds) of the oldest live SDK worker, or None if none
-    is alive. For the wedge watchdog, which needs to name what's stuck."""
-    with _sdk_workers_lock:
-        if not _sdk_workers:
-            return None
-        oldest = min(_sdk_workers.values(), key=lambda w: w.started_at)
-        return oldest.fn_name, oldest.age()
+    """(alive_count, oldest_age_seconds_or_None), for /ping and log lines."""
+    count, oldest = _sdk_worker_state()
+    return count, oldest.age() if oldest else None
 
 
 def _req_id():
@@ -212,11 +199,7 @@ def _req_id():
 
 
 def _req_path():
-    """The request path, or "-" outside a request (background init, monitor,
-    watchdog). Step 0's instrumentation names this alongside mode and worker
-    count specifically so a repeat of the 2026-08-23 incident — where the
-    per-instance mode and which route triggered it were both unrecoverable
-    after the fact — is diagnosable from the log line itself."""
+    """The request path, or "-" outside a request (startup init, monitor)."""
     if has_request_context():
         return request.path
     return "-"
@@ -228,9 +211,8 @@ def load_accounts():
     return accounts.get(BROKER, {}) or {}
 
 
-# The account fields init_mt5() takes. config.yaml accounts may carry more
-# (e.g. symbol_map, read by the backtest manager), which init_mt5(**account)
-# would reject with a TypeError.
+# The account fields init_mt5() accepts. A config account may carry more, such
+# as symbol_map, which init_mt5(**account) would reject with a TypeError.
 _LOGIN_FIELDS = ("login", "password", "server")
 
 
@@ -253,22 +235,16 @@ def _run_with_timeout(fn, timeout=INIT_TIMEOUT, name="?", allow_wedged=False):
     return is critical — many mt5.* calls return None as a legitimate
     "no data" answer.
 
-    Single-flight guard: if a previous call is still stuck inside the SDK
-    (its worker thread never returned from a prior timeout), refuse to start
-    another one and raise MT5Wedged instead — unless `allow_wedged` is set,
-    the one exemption being restart_terminal()'s own reconnect after it has
-    just killed the terminal the stuck worker was talking to.
+    Single-flight guard: while an earlier call's thread is still inside the
+    SDK, raise MT5Wedged instead of starting a second call on the same
+    non-threadsafe connection. `allow_wedged` skips the guard; only
+    restart_terminal's reconnect uses it, after killing the terminal the
+    stuck thread was talking to.
     """
     if not allow_wedged:
-        oldest = _oldest_sdk_worker()
+        _, oldest = _sdk_worker_state()
         if oldest is not None:
-            age = oldest.age()
-            count, _ = sdk_worker_snapshot()
-            log.error(
-                "mode=%s path=%s WEDGED (%s stuck %.0fs, %d worker(s) alive) — refusing to start %s",
-                MODE, _req_path(), oldest.fn_name, age, count, name,
-            )
-            raise MT5Wedged(f"{oldest.fn_name} stuck {age:.0f}s")
+            raise MT5Wedged(f"{oldest.fn_name} stuck {oldest.age():.0f}s")
 
     box: list = [None]
     err_box: list = [None]
@@ -281,21 +257,15 @@ def _run_with_timeout(fn, timeout=INIT_TIMEOUT, name="?", allow_wedged=False):
         except BaseException as e:
             err_box[0] = e
         finally:
-            # Remove before waking the caller: if the order were reversed, a
-            # call that finishes exactly at its timeout could still be
-            # counted "alive" when the very next call checks the guard above,
-            # wedging a perfectly healthy terminal.
+            # Deregister before waking the caller, so a call that finishes
+            # right at its timeout is not still counted when the next call
+            # checks the guard.
             _remove_sdk_worker(worker_key)
             done.set()
 
     t = threading.Thread(target=_worker, daemon=True, name=f"mt5-sdk-{name}")
     t.start()
     if not done.wait(timeout=timeout):
-        count, oldest_age = sdk_worker_snapshot()
-        log.warning(
-            "mode=%s path=%s MT5 call timed out after %ds (%s now the oldest of %d worker(s) alive, age=%.0fs)",
-            MODE, _req_path(), timeout, name, count, oldest_age or 0.0,
-        )
         raise MT5Timeout(f"call timed out after {timeout}s")
     if err_box[0] is not None:
         raise err_box[0]
@@ -306,43 +276,35 @@ def m(fn, *args, _timeout=MT5_CALL_TIMEOUT, _allow_wedged=False, **kwargs):
     """Call an mt5.* function with a hard timeout and per-call timing log.
 
     Caller must already hold the MT5 lock (via session() or @with_mt5()).
-    On wedge: raises MT5Timeout — handler returns 504, lock is released,
-    monitor will eventually detect and restart the terminal. If a PRIOR call
-    is still stuck (single-flight guard), raises MT5Wedged instead without
-    starting a new thread — handler returns 503 with Retry-After.
+    A call that runs past its timeout raises MT5Timeout (the handler answers
+    504) and leaves its thread behind. While that thread is alive, later calls
+    raise MT5Wedged without starting a thread (the handler answers 503 with
+    Retry-After) until it returns or restart_terminal kills the terminal.
     """
     name = getattr(fn, "__name__", "?")
     rid = _req_id()
     t0 = time.monotonic()
     outcome = "ok"
-    wedge_msg = None
     try:
         return _run_with_timeout(
             lambda: fn(*args, **kwargs), timeout=_timeout, name=name, allow_wedged=_allow_wedged,
         )
     except MT5Wedged as e:
-        outcome = "wedged"
-        wedge_msg = str(e)
+        outcome = f"WEDGED ({e})"
         raise
     except MT5Timeout:
-        outcome = "timeout"
+        outcome = "TIMEOUT"
         raise
     finally:
         dur = (time.monotonic() - t0) * 1000
-        if outcome == "wedged":
-            count, _ = sdk_worker_snapshot()
-            log.error(
-                "%s mode=%s path=%s mt5.%s WEDGED (%s, %d worker(s) alive)",
-                rid, MODE, _req_path(), name, wedge_msg, count,
-            )
-        elif outcome == "timeout":
+        if outcome == "ok":
+            log.info("%s mt5.%s dur_ms=%.1f", rid, name, dur)
+        else:
             count, oldest_age = sdk_worker_snapshot()
             log.error(
-                "%s mode=%s path=%s mt5.%s TIMEOUT after %.1fms (%d worker(s) alive, oldest age=%.0fs)",
-                rid, MODE, _req_path(), name, dur, count, oldest_age or 0.0,
+                "%s mode=%s path=%s mt5.%s %s dur_ms=%.1f workers_alive=%d oldest_age_s=%.0f",
+                rid, MODE, _req_path(), name, outcome, dur, count, oldest_age or 0.0,
             )
-        else:
-            log.info("%s mt5.%s dur_ms=%.1f", rid, name, dur)
 
 
 @contextmanager
@@ -390,8 +352,7 @@ def with_mt5(handler):
                 return handler(*args, **kwargs)
         except QueueFull as e:
             return jsonify({"error": str(e)}), 503
-        except MT5Wedged as e:
-            # Must be checked before MT5Timeout — MT5Wedged subclasses it.
+        except MT5Wedged as e:  # before MT5Timeout, which it subclasses
             resp = jsonify({"error": f"mt5 call is wedged: {e}"})
             resp.headers["Retry-After"] = str(MT5_WEDGE_RETRY_AFTER_SECONDS)
             return resp, 503
@@ -417,15 +378,11 @@ def init_mt5(login=None, password=None, server=None, allow_wedged=False):
     handler). Returns True/False based on SDK result. Returns False on a
     plain timeout rather than raising, since callers (startup, monitor,
     ensure_initialized) all want to retry rather than surface to clients.
+    MT5Wedged propagates so handlers answer 503 with Retry-After.
 
-    `allow_wedged` bypasses the single-flight guard (see m()/_run_with_timeout)
-    for this call only. restart_terminal() sets it on the reconnect it makes
-    right after killing the terminal a stuck worker was talking to: that
-    worker may never notice the kill and stay in the live-worker set forever,
-    which would otherwise wedge every future reconnect attempt too. MT5Wedged
-    still propagates (is not swallowed into False) for every other caller, so
-    handlers surface it as a 503 with Retry-After instead of a plain
-    "initialization failed".
+    `allow_wedged` skips the single-flight guard. restart_terminal sets it on
+    its reconnect, because the stuck thread from before the kill may never
+    return and would otherwise block every reconnect.
     """
     kwargs = {"path": TERMINAL_PATH}
     if login:
@@ -457,13 +414,8 @@ def ensure_initialized():
     holds the tester's single-instance lock on the data dir; the next backtest
     there then exits with an empty report.
 
-    A wedge (MT5Wedged) is deliberately NOT swallowed into a plain False the
-    way an ordinary MT5Timeout is: every one of this function's ~24 call
-    sites across the handlers uses `if not ensure_initialized(): return ...,
-    503`, and if a wedge looked the same as "not initialized" here, callers
-    would send a generic 503 with no Retry-After instead of the guard's
-    purpose-built one. Let it propagate to @with_mt5, which maps it
-    specifically.
+    MT5Wedged propagates instead of becoming False, so @with_mt5 answers 503
+    with Retry-After rather than the callers' generic "not initialized" 503.
     """
     if MODE == "backtest":
         log.warning("MT5 SDK request refused on a mode:backtest terminal reason=backtest_mode")
@@ -586,13 +538,10 @@ def restart_terminal():
     backpressure rather than piling up against a dead terminal.
     """
     log.info("Restarting terminal...")
-    if _oldest_sdk_worker() is not None:
-        # A worker from an earlier timeout is still alive — calling
-        # mt5.shutdown would just start a SECOND concurrent call into the
-        # same wedged SDK connection. Skip straight to killing the process;
-        # closing its pipe may release the zombie (sdk_worker_snapshot will
-        # show it either way).
-        log.warning("SDK worker still wedged — skipping mt5.shutdown, killing terminal directly.")
+    if _sdk_worker_state()[1] is not None:
+        # mt5.shutdown would be a second concurrent call into the stuck
+        # connection. Killing the terminal may also release the stuck thread.
+        log.warning("SDK call still stuck, skipping mt5.shutdown and killing the terminal.")
     else:
         try:
             m(mt5.shutdown, _timeout=15)
@@ -622,12 +571,8 @@ def restart_terminal():
         return False
 
     log.info("Terminal started, reconnecting...")
-    # allow_wedged=True: a worker from before this restart may still be
-    # alive in the set (see the skip-shutdown branch above) — the terminal
-    # it was talking to is dead now, but nothing guarantees the SDK call
-    # blocked inside it ever notices and returns. Without this exemption the
-    # single-flight guard would reject THIS reconnect too, so the monitor
-    # would kill the (freshly relaunched) terminal again next cycle forever.
+    # A thread stuck before the kill may never return, so the reconnect skips
+    # the single-flight guard.
     account = get_first_account()
     if account:
         result = init_mt5(**account, allow_wedged=True)
@@ -638,6 +583,12 @@ def restart_terminal():
         log.error("Terminal restarted but reconnection failed.")
         return False
 
+    # Threads stuck on the killed terminal no longer block anything. Forget
+    # them, or every later call raises MT5Wedged and the monitor restarts the
+    # terminal again on each cycle.
+    abandoned = _forget_sdk_workers()
+    if abandoned:
+        log.warning("Dropped %d SDK call(s) stuck on the killed terminal from the wedge guard.", abandoned)
     log.info("Terminal restarted successfully.")
     return True
 
