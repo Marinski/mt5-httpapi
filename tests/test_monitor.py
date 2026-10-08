@@ -34,9 +34,11 @@ def _drive_loop(monkeypatch, iterations, extra_setup=None):
     fake `m` should raise for that call. A new "pass" begins every time
     `terminal_info` is called, matching _monitor_loop's own call order.
 
-    Returns the MagicMock that replaced monitor.log, for call assertions.
+    Returns the MagicMock that replaced monitor.log, for call assertions. The
+    keyword arguments of every session() call are on its `session_calls`.
     """
     state = {"idx": -1}
+    session_calls = []
 
     def fake_m(fn, *args, **kwargs):
         name = getattr(fn, "__name__", "?")
@@ -55,7 +57,8 @@ def _drive_loop(monkeypatch, iterations, extra_setup=None):
             raise _StopLoop()
 
     @contextmanager
-    def noop_session():
+    def noop_session(**kwargs):
+        session_calls.append(kwargs)
         yield
 
     monkeypatch.setattr(monitor, "m", fake_m)
@@ -65,6 +68,7 @@ def _drive_loop(monkeypatch, iterations, extra_setup=None):
         extra_setup(monkeypatch)
 
     fake_log = MagicMock()
+    fake_log.session_calls = session_calls
     monkeypatch.setattr(monitor, "log", fake_log)
 
     with pytest.raises(_StopLoop):
@@ -304,6 +308,100 @@ def test_monitor_loop_survives_a_session_failure_and_keeps_looping(monkeypatch):
     assert fake_log.warning.call_count == 1
     warn_call = fake_log.warning.call_args
     assert warn_call.args[0] == "Monitor session failed: %s"
+
+
+def test_monitor_loop_takes_its_session_past_the_queue_cap(monkeypatch):
+    info = SimpleNamespace(trade_allowed=True)
+    acc = SimpleNamespace(login=1, server="S")
+
+    fake_log = _drive_loop(monkeypatch, [{"terminal_info": info, "account_info": acc}])
+
+    assert fake_log.session_calls == [{"bypass_queue_cap": True}]
+
+
+def _session_script(lock_timeouts):
+    """A session() stand-in that raises MT5LockTimeout for the first
+    `lock_timeouts` calls and then yields normally."""
+    calls = {"n": 0}
+
+    @contextmanager
+    def scripted_session(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] <= lock_timeouts:
+            raise mc.MT5LockTimeout("could not acquire MT5 lock")
+        yield
+
+    return scripted_session
+
+
+def test_monitor_loop_counts_a_lock_timeout_as_a_dead_check(monkeypatch):
+    n = monitor.DEAD_CHECKS_BEFORE_RESTART - 1
+    kill_mock = MagicMock(return_value=True)
+    restart_mock = MagicMock()
+
+    def extra(mp):
+        mp.setattr(monitor, "session", _session_script(n))
+        mp.setattr(mc, "_kill_terminal", kill_mock)
+        mp.setattr(mc, "restart_terminal", restart_mock)
+
+    fake_log = _drive_loop(monkeypatch, [{} for _ in range(n)], extra_setup=extra)
+
+    lock_msg = "!!! MT5 LOCK HELD FOR OVER %ds !!! (%d/%d before restart)"
+    assert _error_messages(fake_log).count(lock_msg) == n
+    kill_mock.assert_not_called()
+    restart_mock.assert_not_called()
+    fake_log.warning.assert_not_called()
+
+
+def test_monitor_loop_kills_the_terminal_once_the_lock_stays_held_and_restarts_it_next_check(monkeypatch):
+    n = monitor.DEAD_CHECKS_BEFORE_RESTART
+    kill_mock = MagicMock(return_value=True)
+    restart_mock = MagicMock(return_value=True)
+
+    def extra(mp):
+        mp.setattr(monitor, "session", _session_script(n))
+        mp.setattr(mc, "_kill_terminal", kill_mock)
+        mp.setattr(mc, "restart_terminal", restart_mock)
+
+    iterations = [{} for _ in range(n)] + [{"terminal_info": None}]
+    fake_log = _drive_loop(monkeypatch, iterations, extra_setup=extra)
+
+    kill_mock.assert_called_once()
+    restart_mock.assert_called_once()
+    assert "Terminal killed; the next check restarts it." in _info_messages(fake_log)
+
+
+def test_monitor_loop_recovers_through_the_real_session_when_a_caller_holds_the_lock(monkeypatch):
+    """With the real session() and a real held lock: client backpressure is
+    over the cap, the lock never frees, and the monitor still counts the
+    checks, kills the terminal, and restarts it once the kill frees the lock."""
+    n = monitor.DEAD_CHECKS_BEFORE_RESTART
+    restart_mock = MagicMock(return_value=True)
+
+    def kill_frees_the_lock():
+        mc._mt5_lock.release()
+        return True
+
+    kill_mock = MagicMock(side_effect=kill_frees_the_lock)
+
+    def extra(mp):
+        mp.setattr(monitor, "session", mc.session)
+        mp.setattr(mc, "SESSION_ACQUIRE_TIMEOUT", 0.05)
+        mp.setattr(mc, "MAX_QUEUE_DEPTH", 0)
+        mp.setattr(mc, "_kill_terminal", kill_mock)
+        mp.setattr(mc, "restart_terminal", restart_mock)
+
+    assert mc._mt5_lock.acquire(timeout=1)
+    try:
+        iterations = [{} for _ in range(n)] + [{"terminal_info": None}]
+        _drive_loop(monkeypatch, iterations, extra_setup=extra)
+    finally:
+        if mc._mt5_lock.locked():
+            mc._mt5_lock.release()
+
+    kill_mock.assert_called_once()
+    restart_mock.assert_called_once()
+    assert mc.current_queue_depth() == 0
 
 
 # --- start_monitor ------------------------------------------------------------

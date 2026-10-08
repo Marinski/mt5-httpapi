@@ -111,6 +111,15 @@ class QueueFull(Exception):
     """Too many requests queued on the MT5 lock — fast-fail to client."""
 
 
+class MT5LockTimeout(QueueFull):
+    """The MT5 lock stayed held for longer than SESSION_ACQUIRE_TIMEOUT.
+
+    Subclasses QueueFull so request handlers keep answering 503. The health
+    monitor catches it first, because a lock nobody releases means the
+    terminal is not answering.
+    """
+
+
 # Single mutex serializing every mt5.* call across handlers, monitor, and
 # background init. The MT5 SDK is one connection per process and is not
 # threadsafe — concurrent calls corrupt internal state (notably last_error,
@@ -308,16 +317,21 @@ def m(fn, *args, _timeout=MT5_CALL_TIMEOUT, _allow_wedged=False, **kwargs):
 
 
 @contextmanager
-def session():
+def session(bypass_queue_cap=False):
     """Acquire the MT5 lock for the duration of the block.
 
     Bumps queue depth on entry; fast-fails with QueueFull if too many
-    requests are already piled up. Releases lock + decrements depth on
-    exit, regardless of how the block exits.
+    requests are already piled up, and with MT5LockTimeout if the lock is
+    not free within SESSION_ACQUIRE_TIMEOUT. Releases lock + decrements
+    depth on exit, regardless of how the block exits.
+
+    `bypass_queue_cap` skips the queue-depth check but still waits for the
+    lock. The health monitor uses it so client backpressure cannot stop it
+    from checking the terminal.
     """
     depth = _bump_depth()
     try:
-        if depth > MAX_QUEUE_DEPTH:
+        if depth > MAX_QUEUE_DEPTH and not bypass_queue_cap:
             log.warning(
                 "%s queue depth %d exceeds max %d — rejecting",
                 _req_id(), depth, MAX_QUEUE_DEPTH,
@@ -329,7 +343,7 @@ def session():
                 "%s session lock acquire timeout after %ds",
                 _req_id(), SESSION_ACQUIRE_TIMEOUT,
             )
-            raise QueueFull("could not acquire MT5 lock")
+            raise MT5LockTimeout("could not acquire MT5 lock")
         try:
             yield
         finally:

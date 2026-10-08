@@ -8,6 +8,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.17.1]: 2026-10-08
+
+### Fixed
+
+- **The health monitor could no longer see a terminal once its queue was full** (issue #25, reported by @Marinski). Its check went through the same `MT5_MAX_QUEUE_DEPTH` gate as client requests, and a full queue or an MT5 lock held past 60s made it log a warning and skip the round without counting it. So the backpressure the monitor exists to recover from also stopped it from acting. The monitor now skips the queue-depth cap and still waits for the lock. A lock it can't get within 60s counts as a dead check. After five in a row it kills the terminal without an SDK call, which releases whatever was stuck holding the lock, and the next check restarts the terminal. Client requests still get `503` for a full queue or a held lock, as before.
+
 ## [v4.17.0]: 2026-10-07
 
 The stuck-call guard, the `/ping` counters and the account-field fix were contributed by @Marinski in #26.

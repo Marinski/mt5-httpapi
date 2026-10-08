@@ -5,7 +5,7 @@ import time
 import MetaTrader5 as mt5
 from mt5api.config import INI_FILE
 from mt5api.logger import log
-from mt5api.mt5client import MT5Timeout, m, session
+from mt5api.mt5client import SESSION_ACQUIRE_TIMEOUT, MT5LockTimeout, MT5Timeout, m, session
 
 CHECK_INTERVAL = 60
 DEAD_CHECKS_BEFORE_RESTART = 5
@@ -33,7 +33,7 @@ def _check_ini_autotrading():
 
 
 def _monitor_loop():
-    from mt5api.mt5client import restart_terminal
+    from mt5api.mt5client import _kill_terminal, restart_terminal
 
     prev_logged_in = None
     prev_trade_allowed = None
@@ -46,9 +46,11 @@ def _monitor_loop():
         acc = None
         # Hold the lock for the whole check pass so terminal_info /
         # account_info are taken from a coherent SDK state, and so a
-        # restart triggered below can run inside the same session.
+        # restart triggered below can run inside the same session. The
+        # queue-depth cap is skipped: client backpressure must not stop the
+        # check that recovers from it.
         try:
-            with session():
+            with session(bypass_queue_cap=True):
                 try:
                     info = m(mt5.terminal_info, _timeout=15)
                 except MT5Timeout:
@@ -92,8 +94,30 @@ def _monitor_loop():
                     acc = None
                 except Exception:
                     acc = None
-        except Exception as e:
-            # session() backpressure (QueueFull) etc — surface and retry.
+        except MT5LockTimeout:
+            # Something has held the MT5 lock past SESSION_ACQUIRE_TIMEOUT, so
+            # the terminal is not answering it. Count it like a dead check.
+            # restart_terminal needs the lock, so at the threshold only kill
+            # the terminal: that makes the stuck SDK call return and frees the
+            # lock, and the next failed check restarts the terminal under it.
+            dead_count += 1
+            log.error(
+                "!!! MT5 LOCK HELD FOR OVER %ds !!! (%d/%d before restart)",
+                SESSION_ACQUIRE_TIMEOUT,
+                dead_count,
+                DEAD_CHECKS_BEFORE_RESTART,
+            )
+            prev_logged_in = None
+            prev_trade_allowed = None
+            if dead_count >= DEAD_CHECKS_BEFORE_RESTART:
+                log.error("MT5 lock unobtainable for %d checks, killing the terminal to release it...", dead_count)
+                if _kill_terminal():
+                    log.info("Terminal killed; the next check restarts it.")
+                else:
+                    log.error("No terminal process found to kill.")
+                dead_count = DEAD_CHECKS_BEFORE_RESTART - 1
+            continue
+        except Exception as e:  # any other failure: log and retry, never kill the monitor thread
             log.warning("Monitor session failed: %s", e)
             continue
 

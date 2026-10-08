@@ -426,10 +426,49 @@ def test_session_rejects_when_lock_acquire_times_out(monkeypatch):
             raise AssertionError("release should not be called — acquire failed")
 
     monkeypatch.setattr(mc, "_mt5_lock", _FakeLock())
-    with pytest.raises(mc.QueueFull, match="could not acquire MT5 lock"):
+    with pytest.raises(mc.MT5LockTimeout, match="could not acquire MT5 lock") as exc:
         with mc.session():
             pass
+    assert isinstance(exc.value, mc.QueueFull)
     assert mc.current_queue_depth() == 0
+
+
+def test_session_bypass_skips_the_queue_cap_but_others_are_still_rejected(monkeypatch):
+    monkeypatch.setattr(mc, "MAX_QUEUE_DEPTH", 0)
+    with mc.session(bypass_queue_cap=True):
+        assert mc._mt5_lock.locked()
+    assert mc.current_queue_depth() == 0
+
+    with pytest.raises(mc.QueueFull):
+        with mc.session():
+            pass
+
+
+def test_session_bypass_still_waits_for_the_lock(monkeypatch):
+    monkeypatch.setattr(mc, "SESSION_ACQUIRE_TIMEOUT", 0.05)
+    assert mc._mt5_lock.acquire(timeout=1)
+    try:
+        with pytest.raises(mc.MT5LockTimeout):
+            with mc.session(bypass_queue_cap=True):
+                pass
+    finally:
+        mc._mt5_lock.release()
+    assert mc.current_queue_depth() == 0
+
+
+def test_with_mt5_answers_503_when_the_lock_stays_held(monkeypatch):
+    @mc.with_mt5
+    def handler():
+        return "unreachable"
+
+    monkeypatch.setattr(mc, "SESSION_ACQUIRE_TIMEOUT", 0.05)
+    assert mc._mt5_lock.acquire(timeout=1)
+    try:
+        with _flask_app.test_request_context("/"):
+            _resp, status = handler()
+    finally:
+        mc._mt5_lock.release()
+    assert status == 503
 
 
 # --- with_mt5() — Flask handler decorator -----------------------------------
