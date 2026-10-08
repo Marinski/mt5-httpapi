@@ -43,6 +43,7 @@ from mt5api.config import (
     BACKTEST_MAX_TIMEOUT_SECONDS,
     BACKTEST_TIMEOUT_SECONDS,
     BACKTEST_JOB_DIR,
+    DISABLE_TERMINAL_MCP,
     load_yaml_config,
     parse_duration_to_seconds,
 )
@@ -255,6 +256,86 @@ def _write_utf16_ini(parser, path):
     with open(path, "wb") as handle:
         handle.write(b"\xff\xfe")
         handle.write(text.encode("utf-16-le"))
+
+
+#: MT5 build 6090+ starts its own MCP server (the transport behind the built-in
+#: AI assistant) at launch. It is configured in ``<terminal>/Config/assistant.ini``
+#: and defaults to binding 127.0.0.1:22346. Every terminal in a VM shares
+#: loopback, so only one can hold the port: the rest log
+#: ``MCP bind error on 127.0.0.1:22346 [10048]`` on every single launch, and the
+#: same subsystem authenticates against MQL5.community (which a backtest terminal
+#: has no account for), so its startup path is a source of spurious terminal
+#: aborts. MetaQuotes documents disabling the internal server as having no effect
+#: on trading or Expert Advisors, and it plays no part in a backtest. Gated by the
+#: opt-in ``mcp.disable_terminal_server`` config (see config.py); sections mirror
+#: Tools > Options > MCP in the terminal.
+MCP_SECTIONS_TO_DISABLE = ("MCP.MetaTrader", "MCP.MetaEditor")
+
+
+def _disable_terminal_mcp():
+    """Turn off this terminal's built-in MCP servers before it is launched.
+
+    Only called when ``DISABLE_TERMINAL_MCP`` is set (``mcp.disable_terminal_server``
+    in config.yaml). Reads the existing ``Config/assistant.ini`` (UTF-16-LE + BOM,
+    as MT5 writes it) so the Endpoint/ApiKey lines survive, flips each section's
+    ``Enable`` to ``0``, and writes it back. A missing or unreadable file is
+    treated as empty and recreated with the sections disabled — exactly the state
+    a fresh terminal is in before MT5 writes its default (enabled) file.
+
+    MT5 rewrites ``assistant.ini`` when it exits, so this must be re-applied on
+    every launch, not once at provisioning.
+    """
+    path = os.path.join(TERMINAL_DIR, "Config", "assistant.ini")
+    parser = configparser.RawConfigParser()
+    parser.optionxform = str
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        raw = b""
+    if raw[:2] == b"\xff\xfe":
+        text = raw.decode("utf-16-le", errors="replace")
+    elif raw[:2] == b"\xfe\xff":
+        text = raw.decode("utf-16-be", errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    # Drop the BOM: configparser rejects a file whose first line begins with
+    # U+FEFF ("File contains no section headers"), which would silently discard
+    # the Endpoint/ApiKey we are trying to preserve.
+    text = text.lstrip("\ufeff")
+    if text.strip():
+        try:
+            parser.read_string(text)
+        except configparser.Error:
+            # A corrupt file must not fail the run: fall back to a clean one
+            # carrying only the disabled sections.
+            parser = configparser.RawConfigParser()
+            parser.optionxform = str
+    for section in MCP_SECTIONS_TO_DISABLE:
+        if not parser.has_section(section):
+            parser.add_section(section)
+        parser.set(section, "Enable", "0")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _write_utf16_ini(parser, path)
+    except OSError as exc:
+        # Best-effort: a terminal that keeps MCP enabled can still run (it does
+        # so today), so failing to write this must not fail the backtest.
+        log.warning(
+            "backtest could not disable terminal MCP server broker=%s account=%s instance=%s err=%s",
+            BROKER,
+            ACCOUNT,
+            INSTANCE,
+            exc,
+        )
+        return
+    log.info(
+        "backtest disabled terminal MCP server broker=%s account=%s instance=%s path=%s",
+        BROKER,
+        ACCOUNT,
+        INSTANCE,
+        path,
+    )
 
 
 def _read_text_best_effort(path):
@@ -722,6 +803,9 @@ def _execute_job(job_id):
             parser = _parse_ini(_read_text_best_effort(job["debugIniPath"]))
             ini_path = os.path.join(job["stageDir"], "tester.ini")
             _write_utf16_ini(parser, ini_path)
+            if DISABLE_TERMINAL_MCP:
+                # Re-apply before every launch: MT5 rewrites assistant.ini on exit.
+                _disable_terminal_mcp()
 
             cmd = [TERMINAL_PATH, "/portable", f"/config:{ini_path}"]
             log.info(

@@ -8,6 +8,10 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opt-in: disable the terminal's built-in MCP server before a backtest.** MT5 build 6090+ starts its own MCP server (the transport behind the built-in AI assistant) on `127.0.0.1:22346` at launch, configured in `<terminal>/Config/assistant.ini`. Every terminal in a VM shares loopback, so only one can bind the port and the rest log `MCP bind error on 127.0.0.1:22346 [10048]` on every launch; the same subsystem authenticates against MQL5.community, which a backtest terminal has no account for, and failed launches logged `MQL5.community authorization failed` immediately before `terminal64.exe` aborted with exit code 10053. With `mcp: { disable_terminal_server: true }` in `config.yaml`, `_disable_terminal_mcp()` sets `Enable=0` for `[MCP.MetaTrader]` and `[MCP.MetaEditor]` in `assistant.ini` before each launch (MT5 rewrites the file on exit, so it is re-applied every run). Default is off — an install that does not set the block leaves its terminals exactly as MetaQuotes ships them — and a terminal's own `mcp: false` opts it out. MetaQuotes documents disabling the internal server as having no effect on trading or Expert Advisors. Best-effort: an unwritable file is logged and the run continues.
+
 ## [v4.17.0]: 2026-10-07
 
 The stuck-call guard, the `/ping` counters and the account-field fix were contributed by @Marinski in #26.

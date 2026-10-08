@@ -519,6 +519,36 @@ for _c in _candidates:
 
 TERMINAL_DIR = os.path.dirname(TERMINAL_PATH)
 INI_FILE = os.path.join(TERMINAL_DIR, "mt5start.ini")
+
+
+def terminal_mcp_disabled(mode, mcp_cfg, terminal_cfg):
+    """Whether a backtest launch should disable the terminal's built-in MCP server.
+
+    MetaTrader 5 build 6090+ starts its own MCP server (the transport behind the
+    built-in AI assistant), configured in ``<terminal>/Config/assistant.ini`` and
+    defaulting to 127.0.0.1:22346. Every terminal in a VM shares loopback, so only
+    one can hold the port and the rest log ``MCP bind error ... [10048]`` on every
+    launch; the same subsystem authenticates against MQL5.community, which a
+    backtest terminal has no account for.
+
+    Opt-IN: an absent or False ``mcp.disable_terminal_server`` leaves the terminal
+    exactly as MetaQuotes ships it, and a terminal's own ``mcp: false`` opts it out
+    of an install-wide setting. Pure so the precedence is testable without
+    reloading the module.
+    """
+    if mode != "backtest":
+        return False
+    global_on = bool(isinstance(mcp_cfg, dict) and mcp_cfg.get("disable_terminal_server", False))
+    override = terminal_cfg.get("mcp") if isinstance(terminal_cfg, dict) else None
+    return global_on and override is not False
+
+
+# Opt-IN: defaulting this on would change every backtest terminal of an install
+# that upgraded without asking for it.
+DISABLE_TERMINAL_MCP = terminal_mcp_disabled(
+    MODE, load_yaml_config().get("mcp"), _terminal_config
+)
+
 IDENTITY = make_identity(BROKER, ACCOUNT, INSTANCE)
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 FULL_LOG = os.path.join(LOG_DIR, "full.log")

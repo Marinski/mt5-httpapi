@@ -40,6 +40,18 @@ tailscale:
   auth_key: ""       # leave empty to disable the tailscale sidecar entirely
   login_server: ""   # Headscale login server URL; empty = Tailscale cloud
 
+# MetaTrader's built-in MCP server (terminal build 6090+). Opt-IN.
+# MT5 starts its own MCP server — the transport behind the built-in AI
+# assistant — on a fixed 127.0.0.1:22346. In a VM running several terminals only
+# one can hold the port, so the rest log "MCP bind error ... [10048]" on every
+# launch, and the same subsystem authenticates against MQL5.community, which a
+# backtest terminal has no account for. Set true to have backtest launches write
+# Enable=0 into each terminal's Config/assistant.ini before every run. Default
+# false leaves the terminal exactly as MetaQuotes ships it. A terminal's own
+# `mcp: false` opts it out of an install-wide setting.
+mcp:
+  disable_terminal_server: false
+
 # Extra pip packages installed in the VM on every boot.
 # MetaTrader5, flask, waitress, and flask-compress are always installed.
 requirements: []
