@@ -126,7 +126,7 @@ def detect_opt_cache_row_layout(data: bytes) -> dict[str, int | list[int]] | Non
     sorted_offsets = sorted(offsets)
     deltas = [
         current - previous
-        for previous, current in zip(sorted_offsets, sorted_offsets[1:])
+        for previous, current in zip(sorted_offsets, sorted_offsets[1:], strict=False)
         if current > previous
     ]
     if not deltas:
@@ -163,7 +163,11 @@ def detect_opt_cache_row_layout(data: bytes) -> dict[str, int | list[int]] | Non
     }
 
 
-def score_opt_cache_profile(records: list[bytes], metric_offsets: dict[str, int], trades_offset: int) -> float:
+def score_opt_cache_profile(
+    records: list[bytes],
+    metric_offsets: dict[str, int],
+    trades_offset: int,
+) -> float:
     penalties = 0.0
     valid_rows = 0
     payoff_error_total = 0.0
@@ -199,7 +203,10 @@ def score_opt_cache_profile(records: list[bytes], metric_offsets: dict[str, int]
     return penalties + (payoff_error_total / valid_rows)
 
 
-def detect_opt_cache_metric_layout(layout: dict[str, int | list[int]], data: bytes) -> dict[str, object] | None:
+def detect_opt_cache_metric_layout(
+    layout: dict[str, int | list[int]],
+    data: bytes,
+) -> dict[str, object] | None:
     row_start = int(layout["row_start"])
     row_count = int(layout["row_count"])
     stride = int(layout["stride"])
@@ -281,7 +288,10 @@ def _extract_symbol_candidate(line: str, period: str) -> tuple[str, str] | None:
     return None
 
 
-def parse_all_symbols_from_agent_logs(cache_path: Path, agent_logs_base_dir: Path) -> list[dict[str, str | int]]:
+def parse_all_symbols_from_agent_logs(
+    cache_path: Path,
+    agent_logs_base_dir: Path,
+) -> list[dict[str, str | int]]:
     parsed_name = parse_cache_filename(cache_path)
     if not parsed_name:
         return []
@@ -347,7 +357,11 @@ def parse_all_symbols_from_agent_logs(cache_path: Path, agent_logs_base_dir: Pat
     ]
 
 
-def build_cache_metadata(cache_path: Path, tester_settings: dict[str, str], rows: list[dict[str, object]]) -> dict[str, object]:
+def build_cache_metadata(
+    cache_path: Path,
+    tester_settings: dict[str, str],
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
     parsed_name = parse_cache_filename(cache_path) or {}
     pattern = build_cache_pattern(tester_settings)
     stats = cache_path.stat()
@@ -368,7 +382,11 @@ def build_cache_metadata(cache_path: Path, tester_settings: dict[str, str], rows
     }
 
 
-def parse_opt_cache_rows(cache_path: Path, tester_settings: dict[str, str], agent_logs_base_dir: Path) -> list[dict[str, object]]:
+def parse_opt_cache_rows(
+    cache_path: Path,
+    tester_settings: dict[str, str],
+    agent_logs_base_dir: Path,
+) -> list[dict[str, object]]:
     data = cache_path.read_bytes()
     layout = detect_opt_cache_row_layout(data)
     if layout is None:
@@ -397,7 +415,7 @@ def parse_opt_cache_rows(cache_path: Path, tester_settings: dict[str, str], agen
         if len(record) < stride:
             continue
 
-        symbol = decode_utf16_c_string(record[symbol_offset:symbol_offset + (stride - symbol_offset)])
+        symbol = decode_utf16_c_string(record[symbol_offset:stride])
         if not symbol or not OPT_CACHE_SYMBOL_RE.fullmatch(symbol):
             continue
 
@@ -450,7 +468,11 @@ def find_cache_for_job(debug_ini_path: str, terminal_dir: str) -> Path | None:
     return max(candidates, key=lambda path: (path.stat().st_mtime, path.name))
 
 
-def parse_cache_details(debug_ini_path: str, terminal_dir: str, top_n: int = 50) -> dict[str, object]:
+def parse_cache_details(
+    debug_ini_path: str,
+    terminal_dir: str,
+    top_n: int = 50,
+) -> dict[str, object]:
     try:
         ini_text = Path(debug_ini_path).read_text(encoding="utf-8")
         tester_settings = extract_tester_settings(ini_text)
@@ -468,5 +490,9 @@ def parse_cache_details(debug_ini_path: str, terminal_dir: str, top_n: int = 50)
         return {"rows": [], "cache": None}
 
 
-def parse_cache_results(debug_ini_path: str, terminal_dir: str, top_n: int = 50) -> list[dict[str, object]]:
+def parse_cache_results(
+    debug_ini_path: str,
+    terminal_dir: str,
+    top_n: int = 50,
+) -> list[dict[str, object]]:
     return list(parse_cache_details(debug_ini_path, terminal_dir, top_n).get("rows") or [])

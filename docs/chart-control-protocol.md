@@ -117,6 +117,7 @@ Every pass (timer-driven, ~1s), the owning loader:
 1. Reads `desired.json`; if `revision` changed, reconciles.
 2. **Reconcile** = diff desired deployments against actual charts:
    - Enabled deployment with no chart in the ownership map → first try to **adopt** an unowned chart already running the exact expert + symbol + timeframe and record it in `owned.json`; only if none exists, `SymbolSelect` → `ChartOpen` → `ChartApplyTemplate` → verify `CHART_EXPERT_NAME` within 10s → record the chart in `owned.json`. A failed attach closes the chart it opened and backs off 60s.
+   - Enabled deployment whose chart has no expert (removed, or its `OnInit` failed) → **re-arm**: `ChartApplyTemplate` on that same chart and verify, instead of opening another. A failed re-arm keeps the chart and backs off 60s.
    - A chart it owns whose deployment is gone or disabled → `ChartClose`, and the chart leaves the map.
    - Map entries for charts that no longer exist are dropped.
    - Charts it doesn't own are **reported but never touched** by
@@ -132,6 +133,7 @@ Every pass (timer-driven, ~1s), the owning loader:
   the live mutex and stays passive, reclaiming only if the owner vanishes.
 - All file writes are atomic (temp + `FileMove`).
 - Attribution is by the `owned.json` map, never by anything on the chart itself. Loader 1.0.2 and earlier wrote `chartctl:<id>` into the chart comment, which any expert calling `Comment()` overwrites. MT5 gives the charts it restores from the saved profile new ids, so after a terminal restart the map's old entries are dropped and reconcile adopts the exact-match restored charts instead. Experts on restored charts load a few seconds after the terminal starts, so for its first 30 seconds the loader only adopts and opens no new charts; opening one earlier would duplicate a chart that is still loading.
+- MT5 writes a chart's expert into the saved profile only when it exits cleanly. After a hard stop (a killed terminal, `POST /terminal/restart`, the health monitor's recovery, a VM restart) it restores a deployment's chart as the profile had it when the loader opened it, without the expert. So when the 30 seconds end, a deployment that was in `owned.json` at startup and still has no chart re-arms an unowned expert-less chart on its symbol and timeframe, once. After that pass the loader never touches an unowned expert-less chart.
 - A chart leaves the map only once `ChartClose` succeeds.
 - MT5 only loads an `.ex5` that was on disk when the terminal started, or that a Navigator refresh has picked up since. `POST /experts` runs that refresh inside the Windows VM; see [Chart Deployments](chart-deployments.md).
 
@@ -146,7 +148,8 @@ Three layers converge a terminal back to desired state after any restart
    from the last saved profile. Often that covers everything, with no work
    from the loader.
 2. **Loader reconciliation** repairs whatever native restoration missed
-   (crash before profile save, chart closed by hand, failed `OnInit`).
+   (a hard stop that restored a chart without its expert, chart closed by
+   hand, failed `OnInit`).
 3. **Watchdog** (`monitor.py`) logs loudly if the terminal is alive but the
    loader's `last_loop` goes stale, the one state layers 1 and 2 can't fix
    alone.

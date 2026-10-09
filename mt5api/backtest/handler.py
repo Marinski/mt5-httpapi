@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import configparser
 import io
-import json
 import os
 import shutil
 import subprocess
@@ -26,7 +25,7 @@ import uuid
 
 import psutil
 
-from flask import Response, abort, jsonify, request, send_file
+from flask import Response, jsonify, request, send_file
 
 from mt5api import symbol_cache
 from mt5api.backtest import cache_parser, ini_builder, jobs, optimization_parser, set_builder
@@ -946,7 +945,12 @@ def get_log(job_id):
     path = job.get("logPath")
     if not path or not os.path.exists(path):
         return jsonify({"error": "Log not available yet"}), 404
-    return send_file(path, mimetype="text/plain", as_attachment=False, download_name=f"{job_id}.log")
+    return send_file(
+        path,
+        mimetype="text/plain",
+        as_attachment=False,
+        download_name=f"{job_id}.log",
+    )
 
 
 def _tail_dir_log(log_dir, lines):

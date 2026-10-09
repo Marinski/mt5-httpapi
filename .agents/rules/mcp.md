@@ -23,7 +23,7 @@ Two MCP servers expose the same tools: the per-terminal one in `mt5api/mcp_serve
 ## Docstrings are the contract
 
 - **MCP8:** FastMCP sends each tool's docstring to the agent as its description, so the docstring is the interface. It states what the tool does, every parameter's meaning, allowed values and units, defaults, and what comes back. Keep the two servers' docstrings in agreement apart from the routing parameters.
-- **MCP9:** A tool that moves money on the account says so in its docstring: irreversible on a live account, call only when the user explicitly asked for that action. Today `create_order`, `close_position`, `cancel_order` and the generic `request` tool carry it, and the server instructions repeat it for every trading tool. A new trading tool carries it too.
+- **MCP9:** A tool that changes anything on the account says so in its docstring with a `DESTRUCTIVE:` line and "only call on explicit user request". Actions that cannot be undone (`create_order`, `close_position`, `cancel_order`, the generic `request` tool) also say "irreversible"; `modify_order` and `modify_position` say what they change instead, since another modify undoes them. The same goes for the deployment, chart and file tools that change state. The server instructions repeat it for every trading tool. A new state-changing tool carries it too.
 - **MCP10:** The unified server never defaults the terminal: `broker` and `account` are required, and every unified response carries `terminal` with the key that answered.
 - **MCP11:** Tool lists in the module docstring of `mt5api/mcp_server.py`, in [docs/mcp-and-agents.md](../../docs/mcp-and-agents.md) and in the agent skill are updated with the tool (DOC1).
 

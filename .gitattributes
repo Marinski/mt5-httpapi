@@ -1,0 +1,4 @@
+# Some VM batch scripts keep CRLF line endings; a CR before the newline is
+# not trailing whitespace for `git diff --check`.
+*.bat whitespace=cr-at-eol
+*.cmd whitespace=cr-at-eol

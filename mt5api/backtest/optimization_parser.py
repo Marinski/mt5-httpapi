@@ -71,9 +71,12 @@ def parse_optimization_report(xml_path: str, top_n: int = 50) -> list[dict]:
         return []
 
     if "Result" in headers:
-        parsed_rows.sort(
-            key=lambda row: row["Result"] if isinstance(row.get("Result"), (int, float)) else float("-inf"),
-            reverse=True,
-        )
+        parsed_rows.sort(key=_result_or_lowest, reverse=True)
 
     return parsed_rows[:top_n]
+
+
+def _result_or_lowest(row: dict) -> float:
+    """A row's numeric Result, or -inf so rows without one sort last."""
+    result = row.get("Result")
+    return result if isinstance(result, (int, float)) else float("-inf")

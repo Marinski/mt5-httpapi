@@ -38,7 +38,8 @@ def create_order():
 
     order_type = body["type"].upper()
     if order_type not in ORDER_TYPE_MAP:
-        return jsonify({"error": f"Invalid type: {order_type}. Use: {list(ORDER_TYPE_MAP.keys())}"}), 400
+        valid_types = list(ORDER_TYPE_MAP.keys())
+        return jsonify({"error": f"Invalid type: {order_type}. Use: {valid_types}"}), 400
 
     is_market = order_type in ("BUY", "SELL")
 

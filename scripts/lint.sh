@@ -4,8 +4,9 @@
 #
 # Checks, ordered by how badly each has bitten us:
 #
-#   1. NON-ASCII in .ps1 -- Windows PowerShell 5.1 reads .ps1 as ANSI unless the
-#      file carries a UTF-8 BOM. A multi-byte character in a STRING LITERAL gets
+#   1. NON-ASCII in .ps1, .bat and .cmd -- Windows PowerShell 5.1 reads .ps1 as
+#      ANSI unless the file carries a UTF-8 BOM, and cmd.exe reads batch files
+#      in the console code page. A multi-byte character in a STRING LITERAL gets
 #      mojibaked, terminates the string early, and cascades into
 #      "Unexpected token" / "The hash literal was incomplete" parse errors.
 #      An em-dash in acquire_lock.ps1 did exactly that; start.bat read
@@ -93,6 +94,16 @@ find_ps_scripts() {
     tracked_files '*.ps1'
 }
 
+# Everything Windows itself reads as a script: PowerShell plus the cmd.exe
+# batch files. cmd.exe also reads a .bat in the console's ANSI code page.
+find_windows_scripts() {
+    {
+        tracked_files '*.ps1'
+        tracked_files '*.bat'
+        tracked_files '*.cmd'
+    } | sort
+}
+
 # grep -P (PCRE) because \xHH is DOCUMENTED there. In a POSIX bracket
 # expression `[^\x00-\x7F]` is NOT an escape -- it is the literal set
 # {\,x,0..7,F}, which matches nearly every line on some greps and nothing on
@@ -136,20 +147,20 @@ selftest_non_ascii_detector() {
     return 1
 }
 
-check_ps_ascii() {
-    section "non-ASCII scan (.ps1 must be pure ASCII)"
+check_windows_ascii() {
+    section "non-ASCII scan (.ps1, .bat and .cmd must be pure ASCII)"
     local bad=0 f hits
 
     while IFS= read -r f; do
         if hits=$(LC_ALL=C grep -nP "$NON_ASCII_PCRE" "$f"); then
             bad=1
-            log ERROR "non-ASCII in ${f#"$REPO"/} -- mojibakes under Windows PowerShell 5.1:"
+            log ERROR "non-ASCII in ${f#"$REPO"/} -- Windows reads it in the ANSI code page and mojibakes it:"
             printf '%s\n' "$hits" >&2
         fi
-    done < <(find_ps_scripts)
+    done < <(find_windows_scripts)
 
     if [[ $bad -eq 0 ]]; then
-        log OK "all .ps1 files are pure ASCII"
+        log OK "all .ps1, .bat and .cmd files are pure ASCII"
         return 0
     fi
     return 1
@@ -319,7 +330,7 @@ main() {
     esac
 
     selftest_non_ascii_detector || failures=$((failures + 1))
-    check_ps_ascii || failures=$((failures + 1))
+    check_windows_ascii || failures=$((failures + 1))
     check_ps_parse || failures=$((failures + 1))
     check_psscriptanalyzer || failures=$((failures + 1))
     check_shellcheck || failures=$((failures + 1))

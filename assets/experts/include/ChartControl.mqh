@@ -19,7 +19,7 @@
 #property strict
 
 #define CHARTCTL_PROTOCOL   1
-#define CHARTCTL_VERSION    "1.0.3"
+#define CHARTCTL_VERSION    "1.0.4"
 #define CHARTCTL_DIR        "chartctl"          // under MQL5\Files\
 #define CHARTCTL_OWNED_FILE "owned.json"        // chart_id -> deployment_id
 // Experts on the charts MT5 restores at startup load a few seconds after the
@@ -72,6 +72,11 @@ private:
    long     m_own_charts[];
    string   m_own_ids[];
    bool     m_own_dirty;          // map changed but not yet written to disk
+   // Deployments that owned a chart when this loader started. MT5 records a
+   // chart's expert only when it exits cleanly, so after a hard stop it
+   // restores such a chart without its expert. These deployments re-arm that
+   // bare chart once, when the startup grace ends, instead of opening another.
+   string   m_restored_ids[];
 
    //--- ownership map ------------------------------------------------
    void     LoadOwnership(void);
@@ -96,7 +101,10 @@ private:
    void     ScanCharts(ChartCtlChart &out[]);
    long     FindChartFor(const string dep_id, ChartCtlChart &charts[]);
    long     FindAdoptableChart(const ChartCtlDeployment &dep, ChartCtlChart &charts[]);
+   int      FindBareChart(const ChartCtlDeployment &dep, ChartCtlChart &charts[]);
+   bool     WasRestored(const string dep_id);
    bool     AttachDeployment(const ChartCtlDeployment &dep);
+   bool     ArmChart(const long cid, const ChartCtlDeployment &dep, const bool opened);
    void     DetachChart(const long chart_id);
    ENUM_TIMEFRAMES TF(const string s);
    void     RecordError(const string id, const string code, const string detail);
@@ -223,8 +231,22 @@ void CChartControl::Tick(void)
             continue;   // recent failure — don't hammer ChartOpen every pass
          if(GetTickCount64() - m_owner_since_ms < CHARTCTL_STARTUP_GRACE_MS)
             continue;   // a restored chart may still be loading this expert
+         // Re-arm a bare chart before opening one: a chart this deployment
+         // owns whose expert is gone, or, once after startup, the chart MT5
+         // restored for it without the expert.
+         int bare = FindBareChart(desired[i], charts);
+         if(bare >= 0)
+         {
+            long bare_id = charts[bare].chart_id;
+            Claim(bare_id, desired[i].id);   // kept on failure: retried, never duplicated
+            charts[bare].deployment_id = desired[i].id;
+            ArmChart(bare_id, desired[i], false);
+            continue;
+         }
          AttachDeployment(desired[i]);
       }
+      if(GetTickCount64() - m_owner_since_ms >= CHARTCTL_STARTUP_GRACE_MS)
+         ArrayResize(m_restored_ids, 0);   // never touch a bare chart opened later
 
       // 2) Detach charts we own whose deployment is gone or disabled.
       ScanCharts(charts);   // rescan after possible attaches
@@ -285,13 +307,24 @@ bool CChartControl::AttachDeployment(const ChartCtlDeployment &dep)
                   "ChartOpen failed err=" + IntegerToString(GetLastError()));
       return false;
    }
+   return ArmChart(cid, dep, true);
+}
 
+//+------------------------------------------------------------------+
+//| Apply the deployment's template to a chart and verify the expert |
+//| loaded. opened: the chart was opened for this attempt, so close  |
+//| it on failure; an existing chart stays open.                     |
+//+------------------------------------------------------------------+
+bool CChartControl::ArmChart(const long cid, const ChartCtlDeployment &dep,
+                             const bool opened)
+{
    if(!ChartApplyTemplate(cid, dep.templ))
    {
       RecordError(dep.id, "TEMPLATE_APPLY_FAILED",
                   "ChartApplyTemplate(" + dep.templ + ") err="
                   + IntegerToString(GetLastError()));
-      ChartClose(cid);
+      if(opened)
+         ChartClose(cid);
       return false;
    }
 
@@ -307,8 +340,9 @@ bool CChartControl::AttachDeployment(const ChartCtlDeployment &dep)
       {
          Claim(cid, dep.id);
          ClearError(dep.id);
-         PrintFormat("ChartControl: attached %s on %s %s (chart %I64d)",
-                     en, dep.symbol, dep.timeframe, cid);
+         PrintFormat("ChartControl: %s %s on %s %s (chart %I64d)",
+                     opened ? "attached" : "re-armed", en, dep.symbol,
+                     dep.timeframe, cid);
          return true;
       }
       Sleep(250);
@@ -317,7 +351,8 @@ bool CChartControl::AttachDeployment(const ChartCtlDeployment &dep)
    // Leaving the chart open here leaks an expert-less chart per pass (the
    // expert may still load later, but then adoption reclaims a closed-and-
    // reopened one just as well). Close what we opened.
-   ChartClose(cid);
+   if(opened)
+      ChartClose(cid);
    RecordError(dep.id, "EXPERT_NOT_ATTACHED",
                "template applied but CHART_EXPERT_NAME empty after 10s "
                "(an .ex5 copied in while the terminal runs is not loadable "
@@ -405,6 +440,7 @@ void CChartControl::LoadOwnership(void)
 {
    ArrayResize(m_own_charts, 0);
    ArrayResize(m_own_ids, 0);
+   ArrayResize(m_restored_ids, 0);
    string json;
    if(!ReadFile(CHARTCTL_DIR + "\\" + CHARTCTL_OWNED_FILE, json))
       return;
@@ -437,6 +473,7 @@ void CChartControl::LoadOwnership(void)
          depth--;
       }
    }
+   ArrayCopy(m_restored_ids, m_own_ids);
    PrintFormat("ChartControl: loaded %d owned chart(s) from %s",
                ArraySize(m_own_charts), CHARTCTL_OWNED_FILE);
 }
@@ -464,6 +501,39 @@ long CChartControl::FindAdoptableChart(const ChartCtlDeployment &dep,
       return charts[i].chart_id;
    }
    return -1;
+}
+
+//+------------------------------------------------------------------+
+//| Index of a chart on the deployment's symbol and timeframe with   |
+//| no expert: one the deployment owns, else an unowned one when the |
+//| deployment owned a chart before the terminal restarted. -1 if    |
+//| there is none.                                                   |
+//+------------------------------------------------------------------+
+int CChartControl::FindBareChart(const ChartCtlDeployment &dep,
+                                 ChartCtlChart &charts[])
+{
+   int unowned = -1;
+   for(int i = 0; i < ArraySize(charts); i++)
+   {
+      if(charts[i].expert_enabled)
+         continue;
+      if(charts[i].symbol != dep.symbol
+         || charts[i].timeframe != "PERIOD_" + dep.timeframe)
+         continue;
+      if(charts[i].deployment_id == dep.id)
+         return i;
+      if(charts[i].deployment_id == "" && unowned < 0)
+         unowned = i;
+   }
+   return WasRestored(dep.id) ? unowned : -1;
+}
+
+bool CChartControl::WasRestored(const string dep_id)
+{
+   for(int i = 0; i < ArraySize(m_restored_ids); i++)
+      if(m_restored_ids[i] == dep_id)
+         return true;
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -496,7 +566,8 @@ void CChartControl::ScanCharts(ChartCtlChart &out[])
       c.symbol         = ChartSymbol(cid);
       c.timeframe      = EnumToString(ChartPeriod(cid));
       c.expert         = ChartGetString(cid, CHART_EXPERT_NAME);
-      c.expert_enabled = (c.expert != "");
+      // NULL (no expert) != "" is true in MQL5; test the length.
+      c.expert_enabled = StringLen(c.expert) > 0;
       // We cannot read a foreign expert's inputs from MQL5, so the
       // template's __chartctl_id input cannot mark the chart; the
       // ownership map does.

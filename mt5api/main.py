@@ -1,4 +1,5 @@
 import asyncio
+import json
 import signal
 import sys
 import threading
@@ -20,7 +21,7 @@ from mt5api.mt5client import (
     init_mt5,
     session,
 )
-from mt5api.server import app
+from mt5api.server import UNAUTHORIZED_BODY, app
 
 # Each handler that touches MT5 grabs a process-wide mutex for its full
 # duration (see @with_mt5 in mt5client.py), so only one MT5 worker runs at
@@ -94,7 +95,7 @@ def _mcp_auth_gate(mcp_wsgi_app):
                 "401 Unauthorized",
                 [("Content-Type", "application/json")],
             )
-            return [b'{"error": "unauthorized"}']
+            return [json.dumps(UNAUTHORIZED_BODY).encode("utf-8")]
         return mcp_wsgi_app(environ, start_response)
 
     return _gated

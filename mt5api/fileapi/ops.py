@@ -209,10 +209,18 @@ def list_dir(tree: Tree, path: Resolved) -> dict:
     }
 
 
-def readable_file(tree: Tree, path: Resolved) -> str:
-    """The on-disk path of a file the caller may download."""
+def open_readable(tree: Tree, path: Resolved):
+    """Open a file the caller may download, in binary mode.
+
+    Opened here rather than by the response, so a file another process
+    holds open without sharing (an expert's FileOpen, the terminal's own
+    files) is reported as Locked instead of failing mid-response.
+    """
     tree.check_readable(path)
-    return path.full
+    try:
+        return open(path.full, "rb")  # noqa: SIM115 - the response streams and closes it
+    except PermissionError as err:
+        raise Locked(f"{path.rel} is in use and cannot be read: {err}") from err
 
 
 def write_file(tree: Tree, raw: str, data: bytes) -> dict:

@@ -156,7 +156,9 @@ def _cross_process_lock_path():
             os.makedirs(COMPILE_LOCAL_CACHE, exist_ok=True)
             return os.path.join(COMPILE_LOCAL_CACHE, _CROSS_PROCESS_LOCK_BASENAME)
         except OSError as exc:
-            log.warning("compile: local cache %s unusable for the lock (%s)", COMPILE_LOCAL_CACHE, exc)
+            log.warning(
+                "compile: local cache %s unusable for the lock (%s)", COMPILE_LOCAL_CACHE, exc
+            )
     return os.path.join(os.path.dirname(COMPILE_METAEDITOR), _CROSS_PROCESS_LOCK_BASENAME)
 
 
@@ -478,8 +480,9 @@ def _include_file_digests(include_root):
 
 def _includes_changed_since(wall_time):
     """Whether the file API changed the compile tree after `wall_time`."""
+    marker = os.path.join(COMPILE_LOCAL_CACHE, _INCLUDES_CHANGED_MARKER)
     try:
-        return os.path.getmtime(os.path.join(COMPILE_LOCAL_CACHE, _INCLUDES_CHANGED_MARKER)) > wall_time
+        return os.path.getmtime(marker) > wall_time
     except OSError:
         return False
 

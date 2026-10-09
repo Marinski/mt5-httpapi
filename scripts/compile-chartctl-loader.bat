@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-rem ════════════════════════════════════════════════════════════════
+rem ================================================================
 rem  compile-chartctl-loader.bat
 rem
 rem  Zero-touch bootstrap for the chartctl loader EA:
@@ -15,10 +15,10 @@ rem       inherit it automatically via the base xcopy.
 rem
 rem  Combined with the [StartUp] Expert= line that config_helper.py
 rem  writes into mt5start.ini for live chartctl terminals, the loader
-rem  attaches itself at terminal launch — no RDP, no manual step.
+rem  attaches itself at terminal launch, no RDP, no manual step.
 rem
 rem  Modeled on compile-warmup-ea.bat (same MetaEditor invocation).
-rem ════════════════════════════════════════════════════════════════
+rem ================================================================
 
 set "SHARED=C:\Users\Docker\Desktop\Shared"
 set "ASSETS=C:\Users\Docker\Desktop\Assets"
@@ -74,7 +74,7 @@ for /d %%B in ("%SHARED%\terminals\*") do (
       )
     ) else (
       set /a FAILED+=1
-      echo [%%~nB]   ERROR: compile produced no .ex5 — see %COMPILE_LOG%
+      echo [%%~nB]   ERROR: compile produced no .ex5 - see %COMPILE_LOG%
     )
   )
 )

@@ -6,8 +6,8 @@ Everything under `scripts/*.bat`, `scripts/*.ps1`, `mt5api/`, `assets/` and the 
 
 ## Encoding
 
-- **WIN1:** `.ps1` files are pure ASCII. Windows PowerShell 5.1 reads a `.ps1` without a BOM as ANSI, so an em dash in a string in `acquire_lock.ps1` turned into mojibake, the script failed to parse, `start.bat` read the exit code as "lock held", and every boot deadlocked. Enforced by `check_ps_ascii` in `scripts/lint.sh` (`make lint`), which also self-tests its detector.
-- **WIN2:** `.bat` files are ASCII in every new or changed line, comments included: `cmd.exe` reads them in the OEM code page. The lint does not check `.bat` yet, and some older comment lines still carry box-drawing characters and dashes; do not add more, and replace them when you edit those lines.
+- **WIN1:** `.ps1` files are pure ASCII. Windows PowerShell 5.1 reads a `.ps1` without a BOM as ANSI, so an em dash in a string in `acquire_lock.ps1` turned into mojibake, the script failed to parse, `start.bat` read the exit code as "lock held", and every boot deadlocked. Enforced by `check_windows_ascii` in `scripts/lint.sh` (`make lint`), which also self-tests its detector.
+- **WIN2:** `.bat` and `.cmd` files are pure ASCII too, comments included: `cmd.exe` reads them in the console code page. The same `check_windows_ascii` gate covers them.
 - **WIN3:** Python that runs inside the VM opens text files with an explicit `encoding=` (`config_helper.py write_ini` writes UTF-8). MetaEditor writes its log as UTF-16LE with a BOM; decode it as such (`tests/test_compile.py::test_metaeditor_log_is_decoded_as_utf16`).
 
 ## Boot flow

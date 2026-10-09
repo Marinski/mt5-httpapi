@@ -18,7 +18,10 @@ except ImportError:
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
-        print("ERROR: pip install pyyaml failed — run 'pip install pyyaml' manually", file=sys.stderr)
+        print(
+            "ERROR: pip install pyyaml failed; run 'pip install pyyaml' manually",
+            file=sys.stderr,
+        )
         sys.exit(1)
     import yaml
 
@@ -54,7 +57,7 @@ def _render_compose_template(template_source, vms):
             )
         except subprocess.CalledProcessError:
             print(
-                "ERROR: pip install jinja2 failed — run 'pip install jinja2' manually",
+                "ERROR: pip install jinja2 failed; run 'pip install jinja2' manually",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -102,7 +105,8 @@ COMPILE_PROXY_TIMEOUT = "180s"
 
 #: nginx read/send timeout for the routes that legitimately run for minutes:
 #: PUT /webrequest and /webrequest/apply wait up to 180s for the host's GUI
-#: lock plus the AutoIt run (or a bare-metal terminal restart), a terminal's
+#: lock plus the AutoIt run (or a bare-metal terminal restart), POST
+#: /terminal/restart waits for the relaunched terminal's journal, a terminal's
 #: own /mcp proxies those same calls, and a /files upload or ?extract writes
 #: across the VM's shared folder. Matches the unified /mcp/ route.
 LONG_PROXY_TIMEOUT = "300s"
@@ -111,7 +115,7 @@ LONG_PROXY_TIMEOUT = "300s"
 #: /webrequest also covers /webrequest/apply and /files every file path. No
 #: trailing slash: nginx answers a bare /files with a 301 to /files/ when the
 #: location ends in one, and the API serves the root listing at /files.
-LONG_RUNNING_ROUTES = ("webrequest", "mcp", "files", "compile/files")
+LONG_RUNNING_ROUTES = ("webrequest", "mcp", "files", "compile/files", "terminal/restart")
 
 
 def _feature_block(raw):
@@ -142,7 +146,7 @@ def _terminal_location(match, prefix, container, port, read_timeout=None):
         f"            proxy_set_header Host $host;\n"
         f"            proxy_set_header X-Forwarded-For $remote_addr;\n"
         + timeouts +
-        f"        }}"
+        "        }"
     )
 
 
@@ -269,7 +273,10 @@ def main():
 
     elif cmd == "write_ini":
         if len(sys.argv) < 5:
-            print("Usage: config_helper.py write_ini <broker> <account> <outpath> [instance] [mode]", file=sys.stderr)
+            print(
+                "Usage: config_helper.py write_ini <broker> <account> <outpath> [instance] [mode]",
+                file=sys.stderr,
+            )
             sys.exit(1)
         broker, account, outpath = sys.argv[2], sys.argv[3], sys.argv[4]
         instance = sys.argv[5] if len(sys.argv) > 5 else "default"

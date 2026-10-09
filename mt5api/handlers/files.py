@@ -102,10 +102,14 @@ def _get(tree_factory, rel: str = ""):
         path, entry_kind = ops.kind(tree, rel)
         if entry_kind == ops.ENTRY_DIR:
             return jsonify(ops.list_dir(tree, path))
-        full = ops.readable_file(tree, path)
+        handle = ops.open_readable(tree, path)
     except FileApiError as err:
         return _error(err)
-    return send_file(full, mimetype=_OCTET_STREAM, download_name=os.path.basename(full))
+    return send_file(
+        handle,
+        mimetype=_OCTET_STREAM,
+        download_name=os.path.basename(path.full),
+    )
 
 
 def _put(tree_factory, after_change, rel: str):

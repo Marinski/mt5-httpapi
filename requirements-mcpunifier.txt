@@ -4,10 +4,13 @@
 # Deliberately separate from requirements-api.txt: that file installs inside
 # the VM alongside the MetaTrader5 SDK, which is Windows-only and has no place
 # in this image. Nothing here imports mt5api.
+#
+# Every package is pinned to an exact version (.agents/rules/security.md, SEC14).
+# Bump one only to a release that has been on PyPI for at least seven days.
 # v2 removed mcp.server.fastmcp, which the unifier imports.
 mcp==1.28.0
-fastapi
-uvicorn[standard]
-httpx
-pyyaml
-python-json-logger
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+pyyaml==6.0.3
+python-json-logger==4.2.0

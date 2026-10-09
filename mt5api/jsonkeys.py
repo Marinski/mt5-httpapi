@@ -3,8 +3,9 @@
 Responses use snake_case keys, the same as the MT5 SDK fields the API passes
 through (time_msc, volume_real). The backtest and TA routes used to answer in
 camelCase (jobId, startedAt, wickworksStatus), so for now each of those keys
-is also sent under its old name. The old names are deprecated and will be
-removed; README.md says so.
+is also sent under its old name. The old names are deprecated and go away in
+v5.0.0, as README.md says; removing them means deleting the legacy half of
+with_legacy_keys and accept_snake_keys.
 
 Request bodies that took camelCase keys accept the snake_case form too.
 

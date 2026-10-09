@@ -15,7 +15,7 @@ Prefix: API.
 - **API6:** An error response is JSON with an `error` string that tells the caller what was wrong and, where possible, what to send instead. Routes added since Chart Deployments also carry a stable upper-case `code` (`_err` in `mt5api/handlers/chartctl.py`, `_error` in `mt5api/handlers/files.py`, for example `DUPLICATE_CHART`, `FILE_LOCKED`, `ARCHIVE_TOO_LARGE`). New routes include `code`.
 - **API7:** `POST /compile` is the exception: it answers `{ok, log}` on success and failure, including its 401, because its clients parse that shape. Keep it.
 - **API8:** Use the status codes the existing handlers use: 400 for a bad body or argument, 404 for a missing ticket, symbol or path, 409 for a state conflict, 411 when a required length is missing, 413 for a body over a cap, 422 for a compile error, 429 when too many compiles are already waiting, 503 when MT5 is not initialized or the queue is full (wedged calls add `Retry-After`), 504 for an SDK or compile timeout. `POST /orders` answers 201 only when the retcode is `TRADE_RETCODE_DONE`, otherwise 200 with the broker result.
-- **API9:** The REST bearer check in `mt5api/server.py` answers non-`/compile` failures with Flask's default 401 page, not JSON. Do not rely on a JSON body there, and if you change it, change it for every route and update `tests/test_compile.py` and the docs.
+- **API9:** A missing or wrong bearer token answers 401 with `{"error": "unauthorized", "code": "UNAUTHORIZED"}` (`UNAUTHORIZED_BODY` in `mt5api/server.py`), on every REST route except `/compile` (see API7) and on the per-terminal `/mcp` gate in `mt5api/main.py`. Both use the same constant; `tests/test_auth.py` checks both.
 
 ## Gating and routing
 

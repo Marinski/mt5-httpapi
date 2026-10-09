@@ -156,7 +156,7 @@ def write_common_ini(cfg_dir: str, urls: list[str]) -> None:
     out: list[str] = []
     in_experts = False
     written: set[str] = set()
-    has_experts = any(l.strip().lower() == "[experts]" for l in lines)
+    has_experts = any(line.strip().lower() == "[experts]" for line in lines)
 
     def flush_missing():
         for key, val in kv.items():

@@ -16,7 +16,7 @@ set "LOCKDIR=%SHARED%\start.running"
 mkdir "%LOGDIR%" 2>nul
 rmdir "%FULL_LOG%.lock" 2>nul
 
-:: ── Boot-scoped lock (only one start.bat instance per boot) ──────
+:: -- Boot-scoped lock (only one start.bat instance per boot) ------
 :: A bare `mkdir %LOCKDIR%` used to deadlock the stack permanently. %LOCKDIR%
 :: lives on the host-mounted %SHARED% volume, so it survives a VM reboot; the
 :: MT5AutoReboot task fires `shutdown /r /t 0 /f` with no grace period and can
@@ -28,7 +28,7 @@ rmdir "%FULL_LOG%.lock" 2>nul
 :: previous boot is provably ownerless and gets cleared automatically.
 :: Exit 0 = acquired, exit 1 = a live instance from THIS boot holds it.
 ::
-:: Deliberately does NOT consume %SHARED%\rebooting.flag — install.bat (called
+:: Deliberately does NOT consume %SHARED%\rebooting.flag, install.bat (called
 :: below) owns that flag for its own lock, and eating it here would break it.
 :: Tempfile rather than `for /f` because errorlevel after a for/f loop is the
 :: loop body's exit code, not the invoked command's -- the lock verdict would
@@ -70,7 +70,7 @@ if !LOCK_EC! neq 0 (
 call :log "%START_LOG%" "====== Boot ======"
 call :log "%INSTALL_LOG%" "====== Boot ======"
 
-:: ── Run install ──────────────────────────────────────────────────
+:: -- Run install --------------------------------------------------
 call :log "%START_LOG%" "Running install.bat..."
 call "%SCRIPTS%\install.bat"
 if !errorlevel! equ 3 (
@@ -85,24 +85,24 @@ if !errorlevel! neq 0 (
 )
 call :log "%START_LOG%" "install.bat done."
 
-:: ── Pip install ──────────────────────────────────────────────────
+:: -- Pip install --------------------------------------------------
 :: Install base deps first (pyyaml required for config_helper.py below).
 :: numpy<2 pin: MetaTrader5 5.0.5735 was built against numpy 1.x and breaks
-:: silently with numpy 2.x — reads still work but order_send fails immediately
+:: silently with numpy 2.x - reads still work but order_send fails immediately
 :: with (-2, 'Unnamed arguments not allowed'). Drop the pin once MetaQuotes
 :: ships a numpy-2-compatible wheel.
 ::
 :: Each pip command writes to a per-call temp file so we can detect whether
 :: anything ACTUALLY got installed/upgraded (presence of "Successfully
 :: installed" in pip's output). If so, the python processes already running
-:: from the previous boot are stale → reboot to pick up the new libs.
+:: from the previous boot are stale -> reboot to pick up the new libs.
 set "PIP_TMP=%TEMP%\mt5-pip-%RANDOM%-%RANDOM%.txt"
 set "PIP_CHANGED=0"
 
 call :log "%START_LOG%" "Installing pip packages..."
 call :log "%PIP_LOG%" "Installing pip packages..."
-rem MCP v2 removed mcp.server.fastmcp; keep this synchronized with requirements-api.txt.
-"%PYDIR%\python.exe" -m pip install pyyaml MetaTrader5 "numpy<2" flask waitress flask-compress psutil "mcp==1.28.0" a2wsgi > "%PIP_TMP%" 2>&1
+rem Exact pins, kept identical to requirements-api.txt (tests/test_requirements_sync.py).
+"%PYDIR%\python.exe" -m pip install "pyyaml==6.0.3" "MetaTrader5==5.0.5640" "numpy==1.26.4" "flask==3.1.3" "waitress==3.0.2" "flask-compress==1.24" "psutil==7.2.2" "mcp==1.28.0" "a2wsgi==1.10.10" > "%PIP_TMP%" 2>&1
 set "PIP_EC=!errorlevel!"
 type "%PIP_TMP%" >> "%PIP_LOG%"
 findstr /C:"Successfully installed" "%PIP_TMP%" >nul 2>&1 && set "PIP_CHANGED=1"
@@ -114,7 +114,7 @@ if !PIP_EC! neq 0 (
     exit /b 1
 )
 :: Extra packages from config.yaml requirements list.
-:: NOTE: no `usebackq` — with usebackq, single-quoted strings are LITERAL,
+:: NOTE: no `usebackq` - with usebackq, single-quoted strings are LITERAL,
 :: not commands. Without usebackq, ('cmd') executes the command. This is
 :: the same pattern install.bat uses for the `ports` lookup.
 for /f "delims=" %%R in ('"%PYDIR%\python.exe" "%SCRIPTS%\config_helper.py" requirements 2^>nul') do (
@@ -135,7 +135,7 @@ if "!PIP_CHANGED!"=="1" (
     exit /b 0
 )
 
-:: ── Start Windows event log tailer (background) ────────────────
+:: -- Start Windows event log tailer (background) ----------------
 :: Streams Warning/Error/Critical from System + Application logs into
 :: %LOGDIR%\windows-events.log so OOM kills, BSODs, terminal64 crashes,
 :: etc. show up alongside the API logs. Single-instance via lock file
@@ -143,21 +143,21 @@ if "!PIP_CHANGED!"=="1" (
 call :log "%START_LOG%" "Starting Windows event log tailer..."
 start "Win Event Tailer" /B powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SCRIPTS%\event-log-tailer.ps1"
 
-:: ── Kill lingering MT5 terminals ────────────────────────────────
+:: -- Kill lingering MT5 terminals --------------------------------
 call :log "%START_LOG%" "Killing lingering MT5 terminals..."
 tasklist /fi "imagename eq terminal64.exe" 2>nul | find /i "terminal64.exe" >nul && (
     taskkill /f /im terminal64.exe >nul 2>&1
     timeout /t 2 /nobreak >nul
 )
 
-:: ── Verify config.yaml exists ───────────────────────────────────
+:: -- Verify config.yaml exists -----------------------------------
 if not exist "%CONFIG%\config.yaml" (
     call :log "%START_LOG%" "ERROR: config.yaml not found! Copy config/config.yaml.example and re-run."
     call :release_lock
     exit /b 1
 )
 
-:: ── Parse config.yaml terminals once ────────────────────────────
+:: -- Parse config.yaml terminals once ----------------------------
 set "TERM_LIST=%TEMP%\mt5_terminals.txt"
 "%PYDIR%\python.exe" "%SCRIPTS%\config_helper.py" terminals > "%TERM_LIST%" 2>"%TEMP%\mt5_parse_err.txt"
 if !errorlevel! neq 0 (
@@ -168,7 +168,7 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-:: ── Periodic auto-reboot scheduled task ─────────────────────────
+:: -- Periodic auto-reboot scheduled task -------------------------
 :: MT5 terminals share a desktop with DWM, and DWM/VirtIO-GPU crashes
 :: under sustained load wedge the SDK pipe (terminal64.exe stops
 :: responding to GDI/IPC). Cheapest mitigation: hard-reboot every N
@@ -200,13 +200,13 @@ if "!REBOOT_INTERVAL!"=="0" (
     )
 )
 
-:: ── Compile chartctl loader EA (zero-touch bootstrap) ────────────
+:: -- Compile chartctl loader EA (zero-touch bootstrap) ------------
 :: Compiles MT5ChartLoader in every broker base and propagates the .ex5
 :: into existing terminal instances, so the [StartUp] Expert= line in
 :: mt5start.ini can auto-attach it at launch. Skipped when chartctl is
 :: disabled globally in config.yaml. Non-fatal: a compile failure only
 :: means chart deployments stay unavailable until fixed.
-:: Tempfile read, NOT for /f ('command') — with both python.exe and the
+:: Tempfile read, NOT for /f ('command'), with both python.exe and the
 :: script path quoted, cmd's quote-stripping mangles the subshell command
 :: and it silently outputs nothing (same failure the api_token block
 :: documents; also why install.bat's ports lookup falls back to 6542).
@@ -226,7 +226,7 @@ if "!CHARTCTL_ON!"=="1" (
     call :log "%START_LOG%" "chartctl disabled in config.yaml -- skipping loader compile."
 )
 
-:: ── Launch MT5 terminals ─────────────────────────────────────────
+:: -- Launch MT5 terminals -----------------------------------------
 call :log "%START_LOG%" "Launching MT5 terminals..."
 set TERM_COUNT=0
 for /f "usebackq delims=" %%L in ("%TERM_LIST%") do (
@@ -250,8 +250,8 @@ if !TERM_COUNT! equ 0 (
 call :log "%START_LOG%" "Launched !TERM_COUNT! terminal(s), waiting 30s to initialize..."
 timeout /t 30 /nobreak >nul
 
-:: ── Load API token from config.yaml (optional) ──────────────────
-:: Tempfile path is more robust than `for /f`'s subshell+quoting dance —
+:: -- Load API token from config.yaml (optional) ------------------
+:: Tempfile path is more robust than `for /f`'s subshell+quoting dance,
 :: any python crash, pyyaml fallback install, or stdout buffering quirk
 :: showed up as "API_TOKEN empty" through the for/f path.
 set "API_TOKEN="
@@ -266,7 +266,7 @@ if defined API_TOKEN (
     call :log "%START_LOG%" "WARNING: api_token empty in config.yaml, API running without auth."
 )
 
-:: ── Launch API processes (all background) ────────────────────────
+:: -- Launch API processes (all background) ------------------------
 call :log "%START_LOG%" "Launching API processes..."
 for /f "usebackq delims=" %%L in ("%TERM_LIST%") do (
     call :launch_api_bg %%L
@@ -275,7 +275,7 @@ del "%TERM_LIST%" 2>nul
 call :release_lock
 call :log "%START_LOG%" "All !TERM_COUNT! API(s) running in background."
 
-:: ── Foreground: status + health monitor ──────────────────────────
+:: -- Foreground: status + health monitor --------------------------
 :status_loop
 cls
 echo.
@@ -288,7 +288,7 @@ echo.
 timeout /t 60 /nobreak >nul
 goto status_loop
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :launch_terminal
 :: %1=broker %2=account %3=instance %4=port %5=utc_offset %6=mode (live|backtest)
 set "LT_BROKER=%~1"
@@ -356,7 +356,7 @@ if !LT_STARTED! equ 0 (
 call :log "%START_LOG%" "  !LT_BROKER!/!LT_ACCOUNT!/!LT_INSTANCE! started."
 exit /b 0
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :launch_api_bg
 set "LA_BROKER=%~1"
 set "LA_ACCOUNT=%~2"
@@ -376,7 +376,7 @@ if "!LA_INSTANCE!"=="default" (
 )
 exit /b 0
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :write_ini
 set "WI_DIR=%~1"
 set "WI_BROKER=%~2"
@@ -398,7 +398,7 @@ if errorlevel 1 (
 )
 exit /b 0
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :release_lock
 :: /s /q is REQUIRED: the lock dir contains acquire_lock.ps1's boot.id stamp,
 :: so a bare `rmdir` fails on a non-empty directory and would leave the lock
@@ -406,7 +406,7 @@ exit /b 0
 rmdir /s /q "%LOCKDIR%" 2>nul
 exit /b 0
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :log
 echo [%date% %time%] %~2
 echo [%date% %time%] %~2 >> "%~1"

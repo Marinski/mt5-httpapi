@@ -12,7 +12,7 @@ set "LOCKDIR=%SHARED%\install.running"
 set "DEBLOAT_DONE=%SHARED%\debloat.done"
 mkdir "%LOGDIR%" 2>nul
 
-:: ── Stale lock cleanup after a protocol reboot ─────────────────────
+:: -- Stale lock cleanup after a protocol reboot ---------------------
 :: reboot.bat writes this flag before every reboot. /s /q is REQUIRED now
 :: that acquire_lock.ps1 stamps a boot.id file inside the lock dir -- a bare
 :: rmdir fails on a non-empty directory and would leave the lock behind.
@@ -21,7 +21,7 @@ if exist "%SHARED%\rebooting.flag" (
     rmdir /s /q "%SHARED%\install.running" 2>nul
 )
 
-:: ── Boot-scoped lock ───────────────────────────────────────────────
+:: -- Boot-scoped lock -----------------------------------------------
 :: The flag above only covers reboots that went through reboot.bat. An abrupt
 :: kill -- container OOM, `docker kill`, host power loss -- writes no flag, and
 :: %LOCKDIR% lives on the host-mounted %SHARED% volume so it outlives the VM.
@@ -56,17 +56,17 @@ call :log "============================================"
 call :log " MT5 Setup"
 call :log "============================================"
 
-:: ── Always: idempotent prereqs (safe every boot) ───────────────────
+:: -- Always: idempotent prereqs (safe every boot) -------------------
 call :prereqs
 
-:: ── Force re-debloat if flag dropped ───────────────────────────────
+:: -- Force re-debloat if flag dropped -------------------------------
 if exist "%SHARED%\debloat.flag" (
     del "%SHARED%\debloat.flag" 2>nul
     del "%DEBLOAT_DONE%" 2>nul
     call :log "  debloat.flag detected, will re-debloat."
 )
 
-:: ── Stage detection ─────────────────────────────────────────────────
+:: -- Stage detection -------------------------------------------------
 :: Stage 1: schtask doesn't exist yet
 schtasks /query /tn "MT5Start" >nul 2>&1
 if !errorlevel! neq 0 goto :stage1
@@ -77,11 +77,11 @@ if not exist "%DEBLOAT_DONE%" goto :stage2
 :: Stage 3: debloat done, Python not installed
 if not exist "%PYDIR%\python.exe" goto :stage3
 
-:: Stage 4: Python ready — check/install terminals, then done
+:: Stage 4: Python ready - check/install terminals, then done
 goto :stage4
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :stage1
 :: Runs via startup folder entry (may not be elevated yet).
 :: Creates schtask with HIGHEST privilege for all future boots.
@@ -96,7 +96,7 @@ if !errorlevel! neq 0 (
 )
 call :log "  MT5Start task created."
 
-:: Remove startup folder entries — schtask takes over from next boot
+:: Remove startup folder entries - schtask takes over from next boot
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\start.bat" 2>nul
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\start-mt5.bat" 2>nul
 del "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\StartUp\start.bat" 2>nul
@@ -112,10 +112,10 @@ call :do_reboot
 exit /b 3
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :stage2
 :: Runs elevated via schtask. UAC is now fully disabled.
-:: Runs debloat — kills services, Defender, firewall, telemetry.
+:: Runs debloat - kills services, Defender, firewall, telemetry.
 call :log "[2/4] Running Windows debloat..."
 call "%SCRIPTS%\debloat.bat" >> "%INSTALL_LOG%" 2>&1
 echo done > "%DEBLOAT_DONE%"
@@ -124,7 +124,7 @@ call :do_reboot
 exit /b 3
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :stage3
 :: Runs after debloat reboot. Defender is gone. Install Python + pip.
 call :log "[3/4] Installing Python 3.12..."
@@ -157,11 +157,11 @@ if !errorlevel! neq 0 (
     call :release_lock
     exit /b 1
 )
-rem MetaTrader5 5.0.5735 was built against numpy 1.x. With numpy 2.x installed,
+rem MetaTrader5 wheels are built against numpy 1.x. With numpy 2.x installed,
 rem order_send fails immediately with (-2, 'Unnamed arguments not allowed')
 rem even though read-only calls (account_info, copy_rates, etc.) keep working.
-rem Pin numpy<2 until MetaQuotes ships a wheel rebuilt for numpy 2.x.
-"%PYDIR%\python.exe" -m pip install MetaTrader5 "numpy<2" pyyaml >> "%INSTALL_LOG%" 2>&1
+rem Same exact pins as requirements-api.txt (tests/test_requirements_sync.py).
+"%PYDIR%\python.exe" -m pip install "MetaTrader5==5.0.5640" "numpy==1.26.4" "pyyaml==6.0.3" >> "%INSTALL_LOG%" 2>&1
 if !errorlevel! neq 0 (
     call :log "ERROR: Failed to install MetaTrader5 / numpy / pyyaml"
     call :release_lock
@@ -173,7 +173,7 @@ call :do_reboot
 exit /b 3
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :stage4
 :: Normal operational stage. Runs every boot.
 :: Installs any new MT5 terminals found, then exits 0 so start.bat
@@ -192,7 +192,7 @@ for /d %%D in ("%BROKERS%\*") do (
 
 :: Pre-check: if every mt5setup-X.exe already has its base\terminal64.exe,
 :: skip the install loop entirely. Without this, v4.0.0's loop spuriously
-:: re-installs one broker each boot (root cause unclear — install_one's
+:: re-installs one broker each boot (root cause unclear, install_one's
 :: skip path logs "already installed", but :wait_done still fires once per
 :: cycle, setting NEEDS_REBOOT=1 and triggering an infinite reboot loop).
 :: Genuine first-installs still hit the loop (any installer without a
@@ -258,9 +258,9 @@ call :release_lock
 exit /b 0
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :prereqs
-:: Idempotent setup — runs on every boot before stage detection.
+:: Idempotent setup - runs on every boot before stage detection.
 :: Fast, safe to repeat, no reboots.
 
 :: Ensure Docker user is admin
@@ -302,14 +302,14 @@ tzutil /s "UTC" >nul 2>&1
 exit /b 0
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :release_lock
 :: /s /q is REQUIRED: the lock dir contains acquire_lock.ps1's boot.id stamp,
 :: so a bare `rmdir` fails on a non-empty directory and would strand the lock.
 rmdir /s /q "%LOCKDIR%" 2>nul
 exit /b 0
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :do_reboot
 :: Routed through reboot.bat so there is exactly ONE reboot implementation in
 :: the stack. It writes rebooting.flag (which this script consumes on the next
@@ -319,7 +319,7 @@ call "%SCRIPTS%\reboot.bat" install-requested
 exit /b 0
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :install_one
 :: %~1 = broker name, %~2 = path to installer exe
 set "BROKER=%~1"
@@ -358,7 +358,7 @@ set NEEDS_REBOOT=1
 exit /b 0
 
 
-:: ══════════════════════════════════════════════════════════════════
+:: ==================================================================
 :log
 echo [%date% %time%] %~1
 echo [%date% %time%] %~1 >> "%INSTALL_LOG%"

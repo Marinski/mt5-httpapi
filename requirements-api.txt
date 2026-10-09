@@ -11,20 +11,23 @@
 # Dockerfile.test strips MetaTrader5 before installing — that wheel is
 # Windows-only. tests/conftest.py injects a stub for it at import time.
 #
-# numpy<2 pin: MetaTrader5 5.0.5735 was built against numpy 1.x and breaks
-# silently under numpy 2.x. Read calls (account_info, copy_rates, ...) keep
-# working, but order_send fails immediately with
-# (-2, 'Unnamed arguments not allowed'). Drop the pin once MetaQuotes ships a
-# wheel rebuilt for numpy 2.x.
-pyyaml
-MetaTrader5
-numpy<2
-flask
-waitress
-flask-compress
-psutil
+# Every package is pinned to an exact version (.agents/rules/security.md, SEC14),
+# the versions a running deployment was live-tested with. Bump one only to a
+# release that has been on PyPI for at least seven days, and run the live suite.
+#
+# numpy 1.x: MetaTrader5 wheels are built against numpy 1.x and break silently
+# under numpy 2.x. Read calls (account_info, copy_rates, ...) keep working, but
+# order_send fails immediately with (-2, 'Unnamed arguments not allowed'). Move
+# to numpy 2 only once MetaQuotes ships a wheel rebuilt for it.
+pyyaml==6.0.3
+MetaTrader5==5.0.5640
+numpy==1.26.4
+flask==3.1.3
+waitress==3.0.2
+flask-compress==1.24
+psutil==7.2.2
 # MCP interface (mt5api/mcp_server.py) mounted at /mcp. a2wsgi bridges the ASGI
 # MCP app into the Flask/WSGI stack served by waitress (see mt5api/main.py).
 # v2 removed mcp.server.fastmcp, which both MCP surfaces import.
 mcp==1.28.0
-a2wsgi
+a2wsgi==1.10.10

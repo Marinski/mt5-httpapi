@@ -110,7 +110,10 @@ def _monitor_loop():
             prev_logged_in = None
             prev_trade_allowed = None
             if dead_count >= DEAD_CHECKS_BEFORE_RESTART:
-                log.error("MT5 lock unobtainable for %d checks, killing the terminal to release it...", dead_count)
+                log.error(
+                    "MT5 lock unobtainable for %d checks, killing the terminal to release it...",
+                    dead_count,
+                )
                 if _kill_terminal():
                     log.info("Terminal killed; the next check restarts it.")
                 else:

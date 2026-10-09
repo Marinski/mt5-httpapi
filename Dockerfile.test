@@ -20,7 +20,7 @@ WORKDIR /app
 COPY requirements-api.txt requirements-mcpunifier.txt /tmp/
 RUN grep -v -i '^MetaTrader5' /tmp/requirements-api.txt > /tmp/req-test.txt && \
     pip install --no-cache-dir -r /tmp/req-test.txt -r /tmp/requirements-mcpunifier.txt \
-        pytest requests pytest-cov==7.1.0
+        pytest==9.1.1 requests==2.34.2 pytest-cov==7.1.0
 
 COPY mt5api ./mt5api
 COPY mcpunifier ./mcpunifier
@@ -29,9 +29,10 @@ COPY tests ./tests
 # Copy only the required scripts rather than pulling every installer asset in.
 # docker-compose.yml.j2 is here because the compose-generation test renders the
 # REAL template — a stub would assert nothing about what actually ships.
-COPY requirements-api.txt requirements-mcpunifier.txt docker-compose.yml.example docker-compose.yml.j2 run.sh ./
+COPY requirements-api.txt requirements-mcpunifier.txt requirements-test.txt docker-compose.yml.example docker-compose.yml.j2 run.sh ./
 COPY scripts/config_helper.py \
     scripts/start.bat \
+    scripts/install.bat \
     scripts/check_health.py \
     scripts/healthcheck.sh \
     scripts/rotate-logs.sh \

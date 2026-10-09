@@ -1,7 +1,7 @@
 import os
 import time
 
-from flask import Flask, abort, g, jsonify, request
+from flask import Flask, g, jsonify, request
 from flask_compress import Compress
 from mt5api.backtest import handler as backtest_handler
 from mt5api.config import (
@@ -24,6 +24,9 @@ from mt5api.handlers import (
 from mt5api.logger import log
 
 app = Flask(__name__)
+
+#: The 401 body for a missing or wrong bearer token, on REST and /mcp alike.
+UNAUTHORIZED_BODY = {"error": "unauthorized", "code": "UNAUTHORIZED"}
 
 
 def _client_ip():
@@ -64,7 +67,9 @@ def _start_request():
         return None
 
     if API_TOKEN and auth != f"Bearer {API_TOKEN}":
-        abort(401)
+        # JSON like every other error here: clients treat a non-JSON body as
+        # a broken host rather than a bad token.
+        return jsonify(UNAUTHORIZED_BODY), 401
     return _refuse_oversized_body()
 
 

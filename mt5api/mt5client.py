@@ -622,7 +622,10 @@ def restart_terminal():
     # terminal again on each cycle.
     abandoned = _forget_sdk_workers()
     if abandoned:
-        log.warning("Dropped %d SDK call(s) stuck on the killed terminal from the wedge guard.", abandoned)
+        log.warning(
+            "Dropped %d SDK call(s) stuck on the killed terminal from the wedge guard.",
+            abandoned,
+        )
     log.info("Terminal restarted successfully.")
     _reapply_webrequest_after_restart()
     return True

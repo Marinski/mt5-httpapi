@@ -162,6 +162,39 @@ def test_a_file_downloads_as_bytes(client, trees):
     assert r.data == (trees["terminal"] / "logs" / "20261009.log").read_bytes()
 
 
+def _refuse(*_args, **_kwargs):
+    raise PermissionError(13, "The process cannot access the file")
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs", "refused_call"),
+    [
+        ("get", {}, "open"),
+        ("put", {"data": b"x"}, "os.replace"),
+        ("delete", {}, "os.remove"),
+    ],
+)
+def test_a_file_held_open_by_another_process_is_reported_locked(
+    client, trees, monkeypatch, method, kwargs, refused_call
+):
+    """On Windows a file an expert opened without sharing refuses reads,
+    replaces and deletes; the API answers 409 FILE_LOCKED for each, not a
+    500 halfway through the response. Simulated with the PermissionError
+    Windows raises, on exactly the call Windows refuses."""
+    target = trees["terminal"] / "MQL5" / "Files" / "held.bin"
+    target.write_bytes(b"held")
+    if refused_call == "open":
+        monkeypatch.setattr(ops, "open", _refuse, raising=False)
+    else:
+        monkeypatch.setattr(ops.os, refused_call.split(".")[1], _refuse)
+
+    r = getattr(client, method)("/files/MQL5/Files/held.bin", **kwargs)
+
+    assert r.status_code == 409, r.data
+    assert r.get_json()["code"] == "FILE_LOCKED"
+    assert target.read_bytes() == b"held"
+
+
 def test_a_missing_path_is_404(client):
     r = client.get("/files/MQL5/nope.mqh")
 

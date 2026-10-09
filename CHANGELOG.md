@@ -6,6 +6,28 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.25.0]: 2026-10-09
+
+### Added
+
+- `make test-live` has an opt-in terminal restart test (`MT5_LIVE_RESTART=1`). A probe expert holds a file open and calls `WebRequest()`. The test checks that the file API reports the file locked, restarts the terminal through the API, and checks that the deployment comes back on exactly one chart and that the restarted probe's `WebRequest()` still works, which happens only when the API re-applied the allowlist. See [operations](docs/operations.md).
+
+### Changed
+
+- **A missing or wrong bearer token answers JSON.** REST routes and a terminal's `/mcp` answered 401 with an HTML page. They now answer `{"error": "unauthorized", "code": "UNAUTHORIZED"}` like every other error.
+- **Every Python dependency is pinned to an exact version.** `requirements-api.txt`, the VM's `start.bat` and `install.bat`, `requirements-mcpunifier.txt`, `requirements-test.txt` and `Dockerfile.test` name exact versions, and a unit test fails when one of them loses its pin or drifts from the API's versions. The API keeps the versions the VM already ran.
+
+### Fixed
+
+- **A hard terminal stop still left a deployment on two charts.** MT5 writes a chart's expert into the saved profile only when it exits cleanly. `POST /terminal/restart`, the health monitor's recovery and a VM restart stop the terminal hard, so MT5 restored the deployment's chart without its expert, and loader 1.0.3 opened a second chart beside the bare one. Loader 1.0.4 re-applies the deployment's template to that restored chart instead, once, when its 30 second startup grace ends, and only for deployments it owned a chart for before the restart. It also re-arms a chart it owns whose expert is gone, where it used to report that chart as running. `make up` compiles and installs the new loader. See [docs/chart-control-protocol.md](docs/chart-control-protocol.md#rules).
+- **Downloading a file an expert holds open broke the response.** `GET /files/<path>` opened the file only while sending it, so a file opened without sharing (an expert's `FileOpen`, the terminal's own files) failed mid-response. It now answers 409 `FILE_LOCKED`, as `PUT` and `DELETE` already did.
+- **nginx cut `POST /terminal/restart` off after 60 seconds.** The call waits for the terminal to come back, which can take longer. The route now gets 300 seconds, like the file API and the WebRequest routes.
+- **The VM's `.bat` scripts are plain ASCII.** Some carried non-ASCII characters in comments and messages. `make lint` now checks `.bat` and `.cmd` files as well as `.ps1`.
+
+### Deprecated
+
+- **The camelCase JSON keys go away in v5.0.0.** The README, [backtesting](docs/backtesting.md) and the skill now name the release.
+
 ## [v4.24.0]: 2026-10-09
 
 ### Added

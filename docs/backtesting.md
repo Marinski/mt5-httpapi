@@ -23,7 +23,7 @@ Build Strategy Tester files, launch the job, watch it run, and pull the reports 
 This is the whole Strategy Tester pipeline over HTTP: build the ugly MT5 files, submit them, poll the job, then grab the useful shit when it finishes.
 Responses below use snake_case field names. The old camelCase names still
 show up alongside them in responses, and request bodies still accept either
-one, but the camelCase names are deprecated and will be removed.
+one, but the camelCase names are deprecated and go away in v5.0.0.
 `POST /backtest` execution requires a terminal whose `config.yaml` entry has
 `mode: backtest`. The two stateless builders, `POST /backtest/build-ini` and
 `POST /backtest/build-set`, work in either mode because they only transform

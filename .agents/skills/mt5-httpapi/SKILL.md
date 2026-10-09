@@ -427,7 +427,7 @@ in the URL determines which credentials are injected into the run's `[Common]`
 section. Only one tester runs at a time per API process; extra submissions
 queue. Responses below use snake_case field names. The old camelCase names
 still show up alongside them in responses, and request bodies still accept
-either one, but the camelCase names are deprecated and will be removed.
+either one, but the camelCase names are deprecated and go away in v5.0.0.
 
 The expert and set file can be uploaded inline OR referenced by name from a
 host-managed pool mounted at `assets/experts/*.ex5` and `assets/sets/*.set`.

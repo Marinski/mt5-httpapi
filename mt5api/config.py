@@ -342,15 +342,20 @@ COMPILE_INCLUDE_DIGESTS = _compile_setting(
     "COMPILE_INCLUDE_DIGESTS", "compile_include_digests"
 )
 
-UTC_OFFSET_RAW = _args.utc_offset if _args.utc_offset is not None else os.environ.get("UTC_OFFSET", "")
+UTC_OFFSET_RAW = (
+    _args.utc_offset if _args.utc_offset is not None else os.environ.get("UTC_OFFSET", "")
+)
 UTC_OFFSET_SECONDS = parse_duration_to_seconds(UTC_OFFSET_RAW)
 UTC_OFFSET_HOURS = UTC_OFFSET_SECONDS / 3600.0
 _BACKTEST_TIMEOUT_ENV = os.environ.get("BACKTEST_TIMEOUT")
 _BACKTEST_TIMEOUT_CONFIG = load_yaml_config().get("backtest_timeout")
-BACKTEST_TIMEOUT_RAW = (
-    _BACKTEST_TIMEOUT_ENV
-    if _BACKTEST_TIMEOUT_ENV not in (None, "")
-    else (_BACKTEST_TIMEOUT_CONFIG if _BACKTEST_TIMEOUT_CONFIG not in (None, "") else DEFAULT_BACKTEST_TIMEOUT)
+BACKTEST_TIMEOUT_RAW = next(
+    (
+        value
+        for value in (_BACKTEST_TIMEOUT_ENV, _BACKTEST_TIMEOUT_CONFIG)
+        if value not in (None, "")
+    ),
+    DEFAULT_BACKTEST_TIMEOUT,
 )
 BACKTEST_TIMEOUT = BACKTEST_TIMEOUT_RAW
 BACKTEST_TIMEOUT_SECONDS = parse_duration_to_seconds(BACKTEST_TIMEOUT)

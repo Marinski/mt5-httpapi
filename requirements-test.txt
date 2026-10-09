@@ -4,11 +4,10 @@
 # Dockerfile.test, which installs requirements-api.txt plus pytest. These are
 # only what the testcontainers-driven integration tests need on the host.
 #
-# pytest-cov isn't invoked by test-integration (no --cov flag here); it's
-# listed to keep the package set consistent with Dockerfile.test's install,
-# pinned compatible with pytest==9.0.3 above (pytest-cov 7.1.0 requires
-# pytest>=7).
-pytest==9.0.3
+# pytest and pytest-cov match Dockerfile.test's pins exactly: the suite relies
+# on pytest 9.1's caplog capturing a logger that does not propagate (the
+# mt5api logger), and it fails on 9.0.
+pytest==9.1.1
 pytest-cov==7.1.0
 pyyaml==6.0.3
 testcontainers==4.14.2
@@ -19,8 +18,7 @@ testcontainers==4.14.2
 # to be the real one — a hand-copied list on this side would assert nothing.
 # MetaTrader5 is Windows-only and stays out: tests/conftest.py stubs it.
 #
-# Pinned like the rest of this file. requirements-api.txt pins nothing, so
-# bump these when the version the VM installs moves on.
+# Same versions as requirements-api.txt (tests/test_requirements_sync.py).
 flask==3.1.3
-flask-compress==1.25
+flask-compress==1.24
 psutil==7.2.2

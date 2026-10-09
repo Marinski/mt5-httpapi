@@ -75,7 +75,7 @@ Run `make help` for the list. The targets:
 | --- | --- |
 | `make up` | `./run.sh`: copy code and config into `data/shared`, generate nginx and compose config, start or restart the stack. |
 | `make down`, `make logs`, `make status` | Stop the stack, follow logs, check VM and API health (`scripts/status.sh`). |
-| `make lint` | `scripts/lint.sh` in a throwaway image with the repo mounted read-only: `.ps1` non-ASCII gate, `.ps1` parse check, PSScriptAnalyzer, shellcheck and shfmt on `.sh`. There is no Python linter in CI. |
+| `make lint` | `scripts/lint.sh` in a throwaway image with the repo mounted read-only: non-ASCII gate on `.ps1`, `.bat` and `.cmd`, `.ps1` parse check, PSScriptAnalyzer, shellcheck and shfmt on `.sh`. There is no Python linter in CI; `ruff check --select E,F,W,B --line-length 100` on `mt5api/`, `mcpunifier/` and `scripts/` is clean and should stay that way. |
 | `make format` | shfmt in place on the same file set. |
 | `make test` | The full gate CI runs: `verify-binaries`, `test-unit`, `test-integration`, `test-go`. |
 | `make verify-binaries` | `scripts/verify_binaries.py` on the host against `assets/binaries.lock.json`. |
@@ -94,7 +94,7 @@ Short list. Each has a rule file with the details and the tests that enforce it.
 - **Errors are JSON with an `error` string**; newer routes (chartctl, files) add a machine-readable `code`. `/compile` answers `{ok, log}` instead. See [api-design.md](.agents/rules/api-design.md).
 - **Feature routes are registered only when their flag is on** (`server.py`), and the MCP tools follow the same gate on the per-terminal server.
 - **The two MCP servers expose the same tools with the same parameters**, the unified copy adding `broker`, `account` first and `instance` last (`tests/test_mcp_tool_parity.py`). The unifier's hand-written route catalog must match the Flask routes (`tests/integration/test_mcpunifier.py`). See [mcp.md](.agents/rules/mcp.md).
-- **Windows-side files are ASCII only.** An em dash in `acquire_lock.ps1` once mojibaked under Windows PowerShell 5.1, threw a parse error that `start.bat` read as "lock held", and deadlocked every boot; `make lint` now fails on non-ASCII in any `.ps1`. See [windows-vm.md](.agents/rules/windows-vm.md).
+- **Windows-side files are ASCII only.** An em dash in `acquire_lock.ps1` once mojibaked under Windows PowerShell 5.1, threw a parse error that `start.bat` read as "lock held", and deadlocked every boot; `make lint` now fails on non-ASCII in any `.ps1`, `.bat` or `.cmd`. See [windows-vm.md](.agents/rules/windows-vm.md).
 - **Live accounts are real money.** Order, position, terminal and deployment calls act on a real broker account. Never run them, or `make test-live` order modules, against anything but a demo account unless the user said so for that run. See [security.md](.agents/rules/security.md) and [testing.md](.agents/rules/testing.md).
 - **Docs move with the code** in the same change, and prose carries no em or en dashes. See [docs-and-releases.md](.agents/rules/docs-and-releases.md).
 

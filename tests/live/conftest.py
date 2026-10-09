@@ -17,6 +17,9 @@ Optional:
     MT5_LIVE_TIMEFRAME    timeframe for the test deployment (default M15)
     MT5_LIVE_ALLOW_REAL   "1" to run state-changing tests on a non-demo account
     MT5_LIVE_WEBREQUEST   "1" to test changing the WebRequest allowlist
+    MT5_LIVE_RESTART      "1" to restart the target terminal (test_restart.py)
+    MT5_LIVE_WEBREQUEST_URL  URL the restart test's probe calls (default
+                          https://example.com/)
     MT5_LIVE_COMPILE_WORK_DEPTH, MT5_LIVE_COMPILE_INCLUDE_DEPTH
                           see test_compile_reach.py
 
