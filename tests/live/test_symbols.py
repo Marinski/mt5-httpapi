@@ -18,10 +18,10 @@ def test_symbol_info(symbol_info, config):
 
 def test_volume_min_meets_config(symbol_info, config):
     """If the broker raises volume_min above our configured volume, fail fast
-    so the user knows to bump MT5_TEST_VOLUME — otherwise every order test
+    so the user knows to bump MT5_LIVE_VOLUME; otherwise every order test
     will error with 'invalid volume' and the failure will be obscure."""
     assert config["volume"] >= symbol_info["volume_min"], (
-        f"MT5_TEST_VOLUME={config['volume']} below broker minimum "
+        f"MT5_LIVE_VOLUME={config['volume']} below broker minimum "
         f"{symbol_info['volume_min']} for {config['symbol']}"
     )
 

@@ -1,4 +1,4 @@
-"""Account state — balance/equity/margin must be readable + positive on a demo."""
+"""Account state: balance/equity/margin must be readable + positive on a demo."""
 
 
 def test_get_account(client):

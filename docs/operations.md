@@ -44,7 +44,15 @@ MT5_LIVE_URL=http://127.0.0.1:8888 MT5_LIVE_TOKEN=... \
 MT5_LIVE_BROKER=yourbroker MT5_LIVE_ACCOUNT=demo make test-live
 ```
 
-It checks the REST API, both MCP endpoints, and the route catalog against the routes the terminal really serves. On a terminal with [Chart Deployments](chart-deployments.md) enabled it also compiles a probe expert that never trades, stages it over MCP, deploys it, reads its chart from screenshots, switches its set file, and deletes it again. Those steps change state, so they run only on a demo account unless `MT5_LIVE_ALLOW_REAL=1`, and everything they create is named `livetest-` and removed afterwards. `MT5_LIVE_WEBREQUEST=1` adds a round trip through the WebRequest allowlist that drives the terminal's GUI. `MT5_LIVE_TRADING=1`, set in the environment, also runs `tests/real`, which places and closes real orders. `LIVE_ARGS` passes extra pytest arguments, for example `LIVE_ARGS="-k chartctl"`.
+It checks the REST API, market data, history, both MCP endpoints, and the route catalog against the routes the terminal really serves, and runs the `/compile` sandbox cases against the real MetaEditor. It places, modifies and closes real orders on `MT5_LIVE_SYMBOL` (`test_market_order`, `test_limit_order`, `test_position_management`, `test_history`), at `MT5_LIVE_VOLUME` or the symbol's minimum, each tagged with `MT5_LIVE_MAGIC` so it only ever closes its own. On a terminal with [Chart Deployments](chart-deployments.md) enabled it also compiles a probe expert that never trades, stages it over MCP, deploys it, reads its chart from screenshots, switches its set file, and deletes it again. The order and deployment tests change state, so they run only on a demo account unless `MT5_LIVE_ALLOW_REAL=1`, and everything they create is removed before and after the run. `MT5_LIVE_WEBREQUEST=1` adds a round trip through the WebRequest allowlist that drives the terminal's GUI.
+
+To run part of it, name the modules in `LIVE_TESTS`. This skips the order tests:
+
+```bash
+make test-live LIVE_TESTS="tests/live/test_rest.py tests/live/test_mcp.py tests/live/test_chartctl.py"
+```
+
+`LIVE_ARGS` passes extra pytest arguments, for example `LIVE_ARGS="-k chartctl"`.
 
 `make test-unit` is the offline suite — it runs inside a throwaway image with
 the MT5 SDK stubbed, so it needs nothing but docker and finishes in seconds.

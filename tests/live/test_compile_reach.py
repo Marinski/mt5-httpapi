@@ -1,20 +1,14 @@
-"""What caller-supplied MQL5 source can reach, against a real MetaEditor.
-
-Not collected by the default run (see pytest.ini): it needs a deployed API
-whose /compile runs a real MetaEditor. Point it at one and run:
-
-    MT5_COMPILE_URL=http://host:port/<broker>/<account>/compile \
-    MT5_COMPILE_TOKEN=... \
-    python -m pytest -v tests/real_compile/
+"""What caller-supplied MQL5 source can reach, against the target's real
+MetaEditor. Skipped when the target terminal does not serve /compile.
 
 Every escape names C:\\Windows\\win.ini, which exists on every Windows host and
 holds nothing secret, so a failure shows a real read rather than a wrong path,
 and its assertion message cannot print anything sensitive. MetaEditor does not
 stop a `..` walk at the drive root, so the walks need the depth below the
 drive root of the per-request temp directory and of the include tree:
-MT5_COMPILE_WORK_DEPTH (default 7, for
+MT5_LIVE_COMPILE_WORK_DEPTH (default 7, for
 C:\\Users\\Docker\\Desktop\\Shared\\logs\\compile-work\\compile-xxxx) and
-MT5_COMPILE_INCLUDE_DEPTH (default 9, for
+MT5_LIVE_COMPILE_INCLUDE_DEPTH (default 9, for
 ...\\Shared\\terminals\\metaquotes\\base\\MQL5\\Include).
 
 Each escape must come back as a 400 from the handler. A 200 means the file was
@@ -23,42 +17,42 @@ read; a 422 means MetaEditor ran on it, which is how a file's tokens end up in
 ordinary code.
 """
 
-import json
 import os
-import urllib.error
-import urllib.request
 
 import pytest
 
-URL = os.environ.get("MT5_COMPILE_URL", "")
-TOKEN = os.environ.get("MT5_COMPILE_TOKEN", "")
+from tests.live.live_client import RestClient
 
-pytestmark = pytest.mark.skipif(
-    not (URL and TOKEN), reason="set MT5_COMPILE_URL and MT5_COMPILE_TOKEN"
-)
+_HTTP_NOT_FOUND = 404
+_COMPILE_STATUSES = (200, 400, 422)
+_COMPILE_TIMEOUT_SECONDS = 180
 
 BODY = "\nint OnInit(){ return(INIT_SUCCEEDED); }\nvoid OnTick(){}\n"
 TARGET = r"C:\Windows\win.ini"
 # `..` walks from the temp directory, the include tree and the MQL5 root back
 # to the drive root, then down to the target.
-UP_WORK = "..\\" * int(os.environ.get("MT5_COMPILE_WORK_DEPTH", "7"))
-UP_INCLUDE = "..\\" * int(os.environ.get("MT5_COMPILE_INCLUDE_DEPTH", "9"))
+UP_WORK = "..\\" * int(os.environ.get("MT5_LIVE_COMPILE_WORK_DEPTH") or "7")
+UP_INCLUDE = "..\\" * int(os.environ.get("MT5_LIVE_COMPILE_INCLUDE_DEPTH") or "9")
 UP_MQL5 = UP_INCLUDE[3:]
 TAIL = r"Windows\win.ini"
 
 
-def _compile(source):
-    request = urllib.request.Request(
-        URL,
-        data=json.dumps({"source": source, "filename": "reach.mq5"}).encode(),
-        method="POST",
-        headers={"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+@pytest.fixture(scope="module")
+def compile_source(rest: RestClient):
+    """POST /compile on the target; skip the module when it has no /compile."""
+
+    def run(source: str) -> tuple[int, dict]:
+        resp = rest.session.post(
+            rest.base + "/compile",
+            json={"source": source, "filename": "reach.mq5"},
+            timeout=_COMPILE_TIMEOUT_SECONDS,
+        )
+        if resp.status_code == _HTTP_NOT_FOUND:
+            pytest.skip("POST /compile is not available on the target")
+        assert resp.status_code in _COMPILE_STATUSES, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        return resp.status_code, resp.json()
+
+    return run
 
 
 ESCAPES = {
@@ -89,16 +83,16 @@ IN_TREE = {
 
 
 @pytest.mark.parametrize("name", list(ESCAPES))
-def test_source_cannot_reach_outside_the_sandbox(name):
-    status, body = _compile(ESCAPES[name] + BODY)
+def test_source_cannot_reach_outside_the_sandbox(compile_source, name):
+    status, body = compile_source(ESCAPES[name] + BODY)
     assert status == 400, f"{name}: HTTP {status}, log={body.get('log', '')[:300]!r}"
     assert body["ok"] is False
     assert "refused" in body["log"] or "literal" in body["log"]
 
 
 @pytest.mark.parametrize("name", list(IN_TREE))
-def test_in_tree_directives_still_compile(name):
-    status, body = _compile(IN_TREE[name] + BODY)
+def test_in_tree_directives_still_compile(compile_source, name):
+    status, body = compile_source(IN_TREE[name] + BODY)
     assert status == 200, f"{name}: HTTP {status}, log={body.get('log', '')[-300:]!r}"
     assert body["ok"] is True
     assert body["ex5_base64"]

@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.21.0]: 2026-10-09
+
+### Changed
+
+- **One live suite.** The live-trading tests (`tests/real/`) and the `/compile` sandbox tests (`tests/real_compile/`) moved into `tests/live/`, and `make test-live` runs all of it against the one `MT5_LIVE_*` target, real orders included. Name modules in `LIVE_TESTS` to run a subset, for example to leave the order tests out. `tests/real/run.sh` and its variables are gone: `MT5_API_URL` and `MT5_API_TOKEN` become `MT5_LIVE_URL`, `MT5_LIVE_BROKER`, `MT5_LIVE_ACCOUNT` and `MT5_LIVE_TOKEN`; `MT5_TEST_SYMBOL`, `MT5_TEST_VOLUME` and `MT5_TEST_MAGIC` become `MT5_LIVE_SYMBOL`, `MT5_LIVE_VOLUME` and `MT5_LIVE_MAGIC`; `MT5_COMPILE_URL` and `MT5_COMPILE_TOKEN` follow the same target, and the depth overrides become `MT5_LIVE_COMPILE_WORK_DEPTH` and `MT5_LIVE_COMPILE_INCLUDE_DEPTH`. The order volume now defaults to the symbol's minimum, and the order tests skip on a non-demo account unless `MT5_LIVE_ALLOW_REAL=1`, the same as the deployment tests. `MT5_LIVE_TRADING` is gone.
+
 ## [v4.20.0]: 2026-10-09
 
 ### Added

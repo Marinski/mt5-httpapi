@@ -746,7 +746,7 @@ _DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
 def _outside_path_reason(directive, path):
     """Why `path` could name a file outside the allowed trees, or None.
 
-    Measured on MetaEditor 5.00 build 5836 (tests/real_compile/): #include
+    Measured on MetaEditor 5.00 build 5836 (tests/live/test_compile_reach.py): #include
     reads an absolute path and a `..` walk out of the temp directory or the
     include tree, with either slash; #property icon reads a `..` walk;
     #resource refuses both itself. The rule here does not lean on which ones

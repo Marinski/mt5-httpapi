@@ -1,4 +1,4 @@
-"""GET /history/orders and /history/deals — both require `from`+`to` unix
+"""GET /history/orders and /history/deals. Both require `from`+`to` unix
 timestamps. We pull a 30-day window ending now; demo has been open long
 enough that there must be SOME deals. If not, we accept an empty list
 (brand-new account) but require valid JSON shape.
@@ -69,7 +69,7 @@ def test_history_after_a_trade_contains_our_magic(client, config, cleanup_after)
     """End-to-end: open + close a position, then verify the resulting deals
     show up in /history/deals tagged with our magic number."""
     RETCODE_DONE = 10009
-    from tests.real.helpers import find_position_by_magic, wait_until
+    from tests.live.helpers import find_position_by_magic, wait_until
 
     open_t = int(time.time())
     result = client.post(

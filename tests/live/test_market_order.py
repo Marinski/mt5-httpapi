@@ -1,14 +1,14 @@
-"""Market order lifecycle — place via POST /orders, verify position appears,
+"""Market order lifecycle: place via POST /orders, verify position appears,
 close via DELETE /positions/<ticket>, verify it's gone.
 
-Every test order is tagged with MT5_TEST_MAGIC so the session cleanup fixture
+Every test order is tagged with MT5_LIVE_MAGIC so the session cleanup fixture
 can purge it even if a test crashes mid-flight.
 """
 from __future__ import annotations
 
 import requests
 
-from tests.real.helpers import find_position_by_magic, wait_until
+from tests.live.helpers import find_position_by_magic, wait_until
 
 # MT5 retcode 10009 = TRADE_RETCODE_DONE
 RETCODE_DONE = 10009
@@ -66,7 +66,7 @@ def test_sell_market_open_then_close(client, config, cleanup_after):
     assert cleanup_after is None or True
 
 
-def test_order_invalid_symbol_does_not_500(client, config):
+def test_order_invalid_symbol_does_not_500(client, config, trading):
     """Unknown symbol must NOT 500. Either rejected at validation (4xx) or
     routed to MT5 which surfaces an error retcode in body."""
     base = client.base_url.rstrip("/")
@@ -84,10 +84,10 @@ def test_order_invalid_symbol_does_not_500(client, config):
     assert resp.status_code != 500, f"server crashed: {resp.text[:300]}"
     if resp.status_code == 200:
         body = resp.json()
-        assert body.get("retcode") != RETCODE_DONE, "DONE retcode for fake symbol — broker took it?"
+        assert body.get("retcode") != RETCODE_DONE, "DONE retcode for fake symbol: broker took it?"
 
 
-def test_order_missing_required_field_returns_400(client, config):
+def test_order_missing_required_field_returns_400(client, config, trading):
     base = client.base_url.rstrip("/")
     resp = requests.post(
         f"{base}/orders",

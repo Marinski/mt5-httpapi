@@ -1,4 +1,4 @@
-"""Wickworks TA passthrough — POST /symbols/<symbol>/rates/ta with an
+"""Wickworks TA passthrough: POST /symbols/<symbol>/rates/ta with an
 indicators spec returns bars + computed TA.
 
 Wickworks is primitives-only (rsi/ema/sma/atr/macd/bbands/stoch/adx/...)

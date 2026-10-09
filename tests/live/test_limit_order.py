@@ -1,10 +1,10 @@
-"""Pending order lifecycle — place a BUY_LIMIT far below market so it can't
+"""Pending order lifecycle: place a BUY_LIMIT far below market so it can't
 fill, verify it's in /orders, modify its price via PUT, then cancel via
 DELETE. Same for SELL_LIMIT far above market.
 """
 from __future__ import annotations
 
-from tests.real.helpers import find_order_by_magic, wait_until
+from tests.live.helpers import find_order_by_magic, wait_until
 
 RETCODE_DONE = 10009
 
@@ -103,7 +103,7 @@ def test_buy_stop_place_and_cancel(client, config, symbol_info, current_tick, cl
 def test_get_order_by_ticket(client, config, symbol_info, cleanup_after):
     """GET /orders/<ticket> returns the same pending order as the list view.
 
-    No /tick pre-call — order endpoint auto-selects the symbol. Limit price
+    No /tick pre-call; the order endpoint auto-selects the symbol. Limit price
     is derived from session-scoped symbol_info (ask/bid baked in there)
     rather than a per-test current_tick fetch.
     """

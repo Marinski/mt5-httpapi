@@ -8,7 +8,7 @@ CLAUDE.md
 git-update.sh
 .env
 .env.*
-# Test-suite credentials (tests/real/.env, tests/live/.env) never enter an image.
+# Test-suite credentials (tests/live/.env) never enter an image.
 **/.env
 **/.env.*
 data/

@@ -5,7 +5,7 @@ both values land in /positions, then close.
 """
 from __future__ import annotations
 
-from tests.real.helpers import find_position_by_magic, wait_until
+from tests.live.helpers import find_position_by_magic, wait_until
 
 RETCODE_DONE = 10009
 
@@ -16,7 +16,7 @@ def _round(p, digits):
 
 def test_modify_sl_tp_on_open_position(client, config, symbol_info, current_tick, cleanup_after):
     digits = symbol_info["digits"]
-    assert current_tick["ask"] > 0  # sanity — broker has live price
+    assert current_tick["ask"] > 0  # sanity: broker has live price
 
     open_body = {
         "symbol": config["symbol"],
@@ -82,7 +82,7 @@ def test_modify_sl_only(client, config, symbol_info, current_tick, cleanup_after
 def test_get_position_by_ticket(client, config, cleanup_after):
     """GET /positions/<ticket> returns the same position as the list view.
 
-    Order endpoint auto-selects the symbol — no pre-call to /tick or
+    Order endpoint auto-selects the symbol, so no pre-call to /tick or
     /symbols/<s> needed before placing the order.
     """
     open_body = {

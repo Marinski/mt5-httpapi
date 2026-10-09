@@ -1,4 +1,4 @@
-"""Rates + ticks endpoints — historical market data."""
+"""Rates + ticks endpoints: historical market data."""
 
 
 def test_get_rates_count(client, config):

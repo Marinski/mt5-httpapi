@@ -1,7 +1,7 @@
-"""Polling + lookup helpers shared by the integration tests.
+"""Polling + lookup helpers shared by the trading tests.
 
 Lives outside conftest so test modules can import it without tripping
-pyright's `tests.real.conftest` resolution quirk.
+pyright's `tests.live.conftest` resolution quirk.
 """
 from __future__ import annotations
 

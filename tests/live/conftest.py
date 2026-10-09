@@ -10,15 +10,22 @@ Optional:
 
     MT5_LIVE_TOKEN        API bearer token (empty when auth is off)
     MT5_LIVE_INSTANCE     terminal instance (default "default")
-    MT5_LIVE_SYMBOL       symbol for market data and deployments (default EURUSD)
+    MT5_LIVE_SYMBOL       symbol for market data, orders and deployments
+                          (default EURUSD)
+    MT5_LIVE_VOLUME       order volume (default: the symbol's minimum)
+    MT5_LIVE_MAGIC        magic number tagging the suite's orders (default 99999)
     MT5_LIVE_TIMEFRAME    timeframe for the test deployment (default M15)
     MT5_LIVE_ALLOW_REAL   "1" to run state-changing tests on a non-demo account
     MT5_LIVE_WEBREQUEST   "1" to test changing the WebRequest allowlist
-    MT5_LIVE_TRADING      "1" to also run tests/real (places real orders)
+    MT5_LIVE_COMPILE_WORK_DEPTH, MT5_LIVE_COMPILE_INCLUDE_DEPTH
+                          see test_compile_reach.py
 
 Values may also live in tests/live/.env (gitignored); real environment
-variables win. Every artifact the suite creates is named with ARTIFACT_PREFIX
-and removed before and after the run.
+variables win. Every artifact the suite creates is named with ARTIFACT_PREFIX,
+every order carries MT5_LIVE_MAGIC, and both are removed before and after the
+run. The order tests (test_market_order, test_limit_order,
+test_position_management, test_history) place real orders; leave them out by
+naming the modules to run.
 """
 from __future__ import annotations
 
@@ -36,9 +43,11 @@ from tests.live.live_client import (
     terminal_mcp,
     unified_mcp,
 )
+from tests.live.trading_client import APIError, Client
 
 ARTIFACT_PREFIX = "livetest-"
 ACCOUNT_TRADE_MODE_DEMO = 0
+DEFAULT_MAGIC = 99999
 _ENABLED = "1"
 _HTTP_NOT_FOUND = 404
 _REQUIRED_ENV = ("MT5_LIVE_URL", "MT5_LIVE_BROKER", "MT5_LIVE_ACCOUNT")
@@ -152,3 +161,71 @@ def purge_artifacts(mcp: McpClient) -> None:
             # Still referenced while its deployment's chart closes; the purge
             # at the other end of the session gets it.
             warnings.warn(f"left {expert['name']} staged for the next purge: {err}", stacklevel=2)
+
+
+@pytest.fixture(scope="session")
+def client(target: Target) -> Client:
+    """The target terminal for the trading and market-data tests."""
+    c = Client(target.url.rstrip("/") + target.terminal_path, target.token)
+    assert c.get("/ping"), "API /ping returned empty: terminal unreachable or not initialized"
+    return c
+
+
+@pytest.fixture(scope="session")
+def config(client: Client, settings: dict[str, str]) -> dict:
+    symbol = settings["symbol"]
+    volume = os.environ.get("MT5_LIVE_VOLUME") or client.get(f"/symbols/{symbol}")["volume_min"]
+    return {
+        "symbol": symbol,
+        "volume": float(volume),
+        "magic": int(os.environ.get("MT5_LIVE_MAGIC") or DEFAULT_MAGIC),
+    }
+
+
+def purge_orders(client: Client, magic: int) -> None:
+    """Close every position and cancel every pending order tagged with magic."""
+    for pos in client.get("/positions") or []:
+        if int(pos.get("magic", 0)) != magic:
+            continue
+        try:
+            client.delete(f"/positions/{pos['ticket']}")
+        except APIError as err:
+            warnings.warn(f"could not close position {pos.get('ticket')}: {err}", stacklevel=2)
+    for order in client.get("/orders") or []:
+        if int(order.get("magic", 0)) != magic:
+            continue
+        try:
+            client.delete(f"/orders/{order['ticket']}")
+        except APIError as err:
+            warnings.warn(f"could not cancel order {order.get('ticket')}: {err}", stacklevel=2)
+
+
+@pytest.fixture(scope="session")
+def trading(client: Client, config: dict, state_changes_allowed: None):
+    """Gate for the tests that place orders: purges the suite's magic before
+    and after the session."""
+    purge_orders(client, config["magic"])
+    yield
+    purge_orders(client, config["magic"])
+
+
+@pytest.fixture
+def cleanup_after(client: Client, config: dict, trading: None):
+    """Closes everything the suite's magic placed during this test."""
+    yield
+    purge_orders(client, config["magic"])
+
+
+@pytest.fixture(scope="session")
+def symbol_info(client: Client, config: dict) -> dict:
+    info = client.get(f"/symbols/{config['symbol']}")
+    assert isinstance(info, dict), f"symbol info for {config['symbol']} not a dict: {info}"
+    assert info.get("name") == config["symbol"]
+    return info
+
+
+@pytest.fixture
+def current_tick(client: Client, config: dict) -> dict:
+    tick = client.get(f"/symbols/{config['symbol']}/tick")
+    assert tick.get("ask", 0) > 0 and tick.get("bid", 0) > 0, f"bad tick: {tick}"
+    return tick

@@ -1,11 +1,11 @@
-"""Thin HTTP client for hitting a live mt5-httpapi terminal.
+"""Thin HTTP client the trading and market-data tests use against the target
+terminal.
 
 Wraps requests with the auth header + base URL once so each test reads
 like API usage, not URL plumbing.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Optional
 from urllib.parse import urljoin
 
@@ -25,7 +25,8 @@ class Client:
         self.token = token
         self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Bearer {token}"})
+        if token:
+            self.session.headers.update({"Authorization": f"Bearer {token}"})
 
     def _url(self, path: str) -> str:
         return urljoin(self.base_url, path.lstrip("/"))
@@ -67,25 +68,3 @@ class Client:
             self.session.delete(self._url(path), json=json, timeout=self.timeout),
             expect=expect,
         )
-
-
-def _live_suite_url() -> Optional[str]:
-    """The terminal URL from the live suite's MT5_LIVE_* variables, so
-    `MT5_LIVE_TRADING=1 make test-live` drives this suite at the same target."""
-    root = os.environ.get("MT5_LIVE_URL")
-    broker = os.environ.get("MT5_LIVE_BROKER")
-    account = os.environ.get("MT5_LIVE_ACCOUNT")
-    if not (root and broker and account):
-        return None
-    instance = os.environ.get("MT5_LIVE_INSTANCE") or "default"
-    return f"{root.rstrip('/')}/{broker}/{account}/{instance}"
-
-
-def from_env() -> Client:
-    url = os.environ.get("MT5_API_URL") or _live_suite_url()
-    token = os.environ.get("MT5_API_TOKEN") or os.environ.get("MT5_LIVE_TOKEN")
-    if not url or not token:
-        raise RuntimeError(
-            "MT5_API_URL and MT5_API_TOKEN must be set (see tests/real/.env.example)"
-        )
-    return Client(url, token)
