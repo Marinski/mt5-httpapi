@@ -40,7 +40,7 @@ tailscale:
   auth_key: ""       # leave empty to disable the tailscale sidecar entirely
   login_server: ""   # Headscale login server URL; empty = Tailscale cloud
 
-# Chart Deployments (chartctl) — EA hosting primitives. Stage .ex5/.set
+# Chart Deployments (chartctl): remote EA hosting. Stage .ex5/.set
 # artifacts and declare "run expert X with set Y on symbol S timeframe T"
 # as desired state; a resident loader EA (assets/experts/MT5ChartLoader.mq5,
 # or your own EA using assets/experts/include/ChartControl.mqh) reconciles

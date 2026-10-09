@@ -1,7 +1,7 @@
 # Chart Control Protocol v1
 
 How mt5-httpapi's **Chart Deployments** feature attaches Expert Advisors to
-charts remotely, keeps them running, and reports what's actually live —
+charts remotely, keeps them running, and reports what's actually live,
 without RDP, without restarting terminals, and without any orchestrator.
 
 MT5 has no SDK call to attach an EA to a chart. The only programmatic path
@@ -13,7 +13,7 @@ The protocol is intentionally file-based so that:
 
 - it needs zero WebRequest whitelist entries (works on locked-down terminals),
 - it's trivially debuggable over RDP during rollout, and
-- **any** EA can implement it — the bundled `MT5ChartLoader`, or your own
+- **any** EA can implement it: the bundled `MT5ChartLoader`, or your own
   resident utility EA (e.g. an account tracker) that adopts
   `ChartControl.mqh`.
 
@@ -34,7 +34,7 @@ desired**, never as "the API copied some files."
 
 ## Files (all under `MQL5\Files\chartctl\`)
 
-### `desired.json` — API → loader
+### `desired.json` (API → loader)
 
 ```json
 {
@@ -57,14 +57,14 @@ desired**, never as "the API copied some files."
 
 `revision` is a monotonic counter; the loader can skip a full parse when it
 hasn't changed. `template` is passed verbatim to `ChartApplyTemplate()`;
-the leading backslash makes MT5 resolve it against `<data>\MQL5` — the
+the leading backslash makes MT5 resolve it against `<data>\MQL5`, the
 only search root that doesn't depend on which EX5 hosts the loader
 (paths without a leading backslash resolve relative to the calling EX5's
 own folder, and the `templates\` GUI directory is never searched). The
 API generates one `.tpl` per deployment, written into the
 `MQL5\Files\chartctl\` protocol directory.
 
-### `observed.json` — loader → API (rewritten every reconcile pass, ~5s)
+### `observed.json` (loader → API, rewritten every reconcile pass, ~5s)
 
 ```json
 {
@@ -89,7 +89,7 @@ is the only definition of a converged deployment. The API's
 `GET /deployments` merges the two files and derives per-deployment status
 (`pending → running → degraded → failed → paused`).
 
-### `command.json` / `command_result.json` — one-shot imperatives
+### `command.json` / `command_result.json` (one-shot commands)
 
 For operations that produce an artifact rather than converge state
 (currently `screenshot`, `close_chart`, and a `reconcile` nudge). One
@@ -97,7 +97,7 @@ command in flight; the loader writes the result keyed by `command_id` and
 deletes the command.
 
 `close_chart` closes an arbitrary chart by `chart_id` (from the observed
-charts list) — the cleanup escape hatch for charts the loader cannot
+charts list), the cleanup escape hatch for charts the loader cannot
 attribute. The loader refuses (`CLOSE_REFUSED`) to close its own chart.
 
 ---
@@ -144,11 +144,12 @@ Three layers converge a terminal back to desired state after any restart
 (including the optional `reboot_interval` VM reboots):
 
 1. **MT5 native chart restoration** brings back charts + attached experts
-   from the last saved profile — often everything, for free.
+   from the last saved profile. Often that covers everything, with no work
+   from the loader.
 2. **Loader reconciliation** repairs whatever native restoration missed
    (crash before profile save, chart closed by hand, failed `OnInit`).
 3. **Watchdog** (`monitor.py`) logs loudly if the terminal is alive but the
-   loader's `last_loop` goes stale — the one state layers 1–2 can't fix
+   loader's `last_loop` goes stale, the one state layers 1 and 2 can't fix
    alone.
 
 ---
@@ -167,7 +168,7 @@ void OnTimer(){ ctl.Tick(); }
 void OnDeinit(const int r){ ctl.Deinit(); }
 ```
 
-That's it — your account tracker (or any always-on EA) becomes the loader,
+That's it. Your account tracker (or any always-on EA) becomes the loader,
 so one resident EA does telemetry *and* chart deployment instead of two. The
 mutex makes running both your EA and the standalone `MT5ChartLoader`
 degrade safely. See `assets/experts/MT5ChartLoader.mq5` for the reference
@@ -177,7 +178,7 @@ glue and `assets/experts/include/ChartControl.mqh` for the implementation.
 
 ## Bootstrapping the loader
 
-**Zero-touch (default).** Provisioning does everything — no RDP, no manual
+**Zero-touch (default).** Provisioning does everything. No RDP, no manual
 attach, fully API/config-driven:
 
 1. On VM boot, `start.bat` runs `compile-chartctl-loader.bat`, which copies
@@ -186,12 +187,12 @@ attach, fully API/config-driven:
    `.ex5` into every existing terminal instance (new instances inherit it
    from the base copy).
 2. `config_helper.py` writes a `[StartUp] Expert=Advisors\MT5ChartLoader`
-   section into each terminal's generated `mt5start.ini` — so the terminal
+   section into each terminal's generated `mt5start.ini`, so the terminal
    attaches the loader itself at every launch. The startup chart symbol
    honors the terminal's `symbol_suffix` (e.g. `EURUSD.r`).
 3. The `[StartUp]` line re-fires on every launch (including the periodic
    `reboot_interval` reboots); the GlobalVariable mutex makes this
-   idempotent — a duplicate loader closes its own chart and vanishes, so
+   idempotent. A duplicate loader closes its own chart and vanishes, so
    charts never accumulate.
 
 Both steps honor the same gating as the API: live-mode terminals only,

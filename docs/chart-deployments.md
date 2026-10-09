@@ -1,4 +1,4 @@
-# Chart Deployments — remote EA deployment over HTTP
+# Chart Deployments: remote EA deployment over HTTP
 
 Attach Expert Advisors to charts with set files over the HTTP API. No RDP, no
 terminal restart, and no human clicking through the Navigator.
@@ -11,21 +11,21 @@ terminal restart, and no human clicking through the Navigator.
 - [`GET /charts`](#get-charts)
 - [Screenshots](#post-chartschart_idscreenshot) and [closing charts](#post-chartschart_idclose)
 - [WebRequest allowlist](#webrequest-allowlist)
-- [Chart Control Protocol](chart-control-protocol.md) — the file contract the loader speaks
+- [Chart Control Protocol](chart-control-protocol.md), the file contract the loader speaks
 
 
-> 📹 **Video walkthrough:** *Coming soon — a full walkthrough of staging, deploying, and
+> **Video walkthrough:** *Coming soon. A full walkthrough of staging, deploying, and
 > debugging EAs via the chartctl API.*
 
-Attach Expert Advisors to charts with set files over the HTTP API — no RDP,
+Attach Expert Advisors to charts with set files over the HTTP API. No RDP,
 no terminal restart. Stage an `.ex5` + `.set`, declare a deployment (expert +
 set + symbol + timeframe), and a resident loader EA inside the terminal
 reconciles the terminal's actual charts to match. The API holds *desired
 state*; the loader reports *observed truth* back, so a deployment only reads
 `running` once the expert is confirmed live on a chart.
 
-Any client — a dashboard, a script, an AI agent — drives it over plain REST.
-Full protocol contract and file formats: [`docs/chart-control-protocol.md`](docs/chart-control-protocol.md).
+Any client (a dashboard, a script, an AI agent) drives it over plain REST.
+Full protocol contract and file formats: [`docs/chart-control-protocol.md`](chart-control-protocol.md).
 
 | Method                                           | Endpoint                              | Description                                              |
 | ------------------------------------------------ | ------------------------------------- | -------------------------------------------------------- |
@@ -35,7 +35,7 @@ Full protocol contract and file formats: [`docs/chart-control-protocol.md`](docs
 | `GET` / `PATCH` / `DELETE`                       | `/deployments/<id>`                   | Inspect, pause/resume/change set, tear down a deployment |
 | `POST`                                           | `/deployments/reconcile`              | Force an immediate reconcile cycle (otherwise periodic)  |
 | `GET`                                            | `/charts`                             | Live chart/EA inventory from inside the terminal         |
-| `GET`                                            | `/loader`                             | Loader EA status — alive, version, chart open count      |
+| `GET`                                            | `/loader`                             | Loader EA status (alive, version, chart open count)      |
 | `POST`                                           | `/charts/<chart_id>/screenshot`       | Capture a chart PNG from inside the terminal             |
 | `POST`                                           | `/charts/<chart_id>/close`            | Close a chart by id (any chart, including leaks)         |
 
@@ -44,16 +44,16 @@ Full protocol contract and file formats: [`docs/chart-control-protocol.md`](docs
 terminal can stay clear of it with `chartctl: false`.
 
 That default is deliberate. Enabling this writes a `[StartUp]` section into every
-live terminal's INI, so the loader EA attaches itself at launch — fleet-wide
+live terminal's INI, so the loader EA attaches itself at launch. That is fleet-wide
 behaviour that must be asked for, never inherited from an upgrade. With the block
 absent nothing changes and the endpoints return 404.
 
 **Once enabled, setup is none.** On boot, provisioning auto-compiles the bundled loader EA
 (`assets/experts/MT5ChartLoader.mq5`) in every broker base and wires a
 `[StartUp] Expert=` line into each live terminal's `mt5start.ini`, so the
-loader attaches itself at launch — the whole path is API/config-driven, no
+loader attaches itself at launch. The whole path is API/config-driven, no
 RDP. Already have a resident utility EA on every terminal? Adopt the protocol
-into it with three calls instead of running a second EA — see
+into it with three calls instead of running a second EA. See
 `assets/experts/include/ChartControl.mqh`. The standalone loader steps aside
 automatically (single-loader mutex via terminal GlobalVariable).
 
@@ -68,14 +68,14 @@ export MT5_API_TOKEN=$(grep api_token config/config.yaml | awk -F'"' '{print $2}
 curl -F "expert=@HappyGoldScalp.ex5" "$MT5_API_URL/experts"
 curl -F "set=@gold-m5.set"          "$MT5_API_URL/sets"   # returns parsed inputs
 
-# 2. Deploy — declare desired state
+# 2. Deploy: declare desired state
 curl -X POST "$MT5_API_URL/deployments" \
   -H "Authorization: Bearer $MT5_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"expert":"HappyGoldScalp.ex5","set":"gold-m5.set","symbol":"XAUUSD","timeframe":"M5"}'
 # -> {"id":"dep_a1b2c3","status":"pending"}
 
-# 3. Verify — status flips to "running" once the loader confirms attach
+# 3. Verify: status flips to "running" once the loader confirms attach
 curl -H "Authorization: Bearer $MT5_API_TOKEN" "$MT5_API_URL/deployments"
 
 # 4. Change the set file in place (no restart), pause, or tear down
@@ -134,7 +134,7 @@ Returns the resident loader EA's status:
 }
 ```
 
-If `alive` is `false`, the loader hasn't started yet — check that
+If `alive` is `false`, the loader hasn't started yet. Check that
 `chartctl.enabled` is on and the terminal was restarted after provisioning.
 The first boot compile log lives at `logs/compile-chartctl-loader.log` inside
 the VM.
@@ -161,7 +161,7 @@ Charts with no deployment (e.g. leftover duplicates) can be closed with
 ### `POST /charts/<chart_id>/screenshot`
 
 Captures a PNG of the chart from inside the terminal. Returns the raw binary
-(`image/png`). No query-string auth — put the token in the header.
+(`image/png`). No query-string auth. Put the token in the header.
 
 ```bash
 curl -H "Authorization: Bearer $MT5_API_TOKEN" \
@@ -204,11 +204,11 @@ curl -X POST "$MT5_API_URL/webrequest/apply" \
   -H "Authorization: Bearer $MT5_API_TOKEN"   # re-apply current list now
 ```
 
-Inside the Windows VM the allowlist is **not** stored in `common.ini` — it
+Inside the Windows VM the allowlist is **not** stored in `common.ini`. It
 lives in the machine-bound `MQL5\experts.dat` and MT5 drops it on every
 restart. So the list is applied the way a user would: a bundled AutoIt
 interpreter (`assets/autoit/`; unmodified official binary, redistributed
-with its EULA and notices — see `assets/autoit/NOTICE.txt`) drives
+with its EULA and notices, see `assets/autoit/NOTICE.txt`) drives
 Tools → Options → Expert Advisors and types the URLs in. This takes effect immediately in-session (no restart), and
 because MT5 forgets it on restart, the API re-applies the persisted list
 automatically ~25 s after each terminal (re)start, so it survives the periodic
@@ -218,6 +218,6 @@ falls back to writing `common.ini` + restarting.
 The desired list is persisted per terminal (`Config/webrequest.json`); the
 first call migrates whatever the terminal already has, so manually configured
 URLs are preserved. GUI applies are serialized across every terminal on a host
-by a named Windows kernel mutex (crash-safe — a dead holder is auto-released),
+by a named Windows kernel mutex (crash-safe, since a dead holder is auto-released),
 and each terminal's boot re-apply is staggered by its port, so many terminals
 per VM can safely provision WebRequest URLs without their keystrokes colliding.

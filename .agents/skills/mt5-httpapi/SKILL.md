@@ -326,7 +326,7 @@ Deal fields: `type` (0=buy, 1=sell), `entry` (0=opening, 1=closing), `profit` (0
 
 ### Chart Deployments
 
-Deploy Expert Advisors to charts over HTTP — no RDP, no terminal restart.
+Deploy Expert Advisors to charts over HTTP. No RDP, no terminal restart.
 Stage `.ex5` + `.set` files, declare deployments, and a resident loader EA
 inside the terminal reconciles charts to match. The API holds desired state;
 the loader reports observed truth. A deployment only flips to `running` once
