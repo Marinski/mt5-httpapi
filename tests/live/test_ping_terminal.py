@@ -16,6 +16,14 @@ def test_get_terminal_metadata(client):
     assert info["connected"] is True, "terminal is not connected to broker"
 
 
+def test_busy_reports_what_would_hold_a_reboot(client):
+    busy = client.get("/busy")
+
+    assert set(busy) == {"busy", "reasons", "backtests", "writes_in_flight", "draining"}
+    assert busy["busy"] is bool(busy["reasons"])
+    assert busy["draining"] is False
+
+
 def test_last_error_endpoint(client):
     err = client.get("/error")
     # Returns the last MT5 SDK error tuple/object, which should be JSON-serializable.

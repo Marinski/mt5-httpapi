@@ -195,6 +195,23 @@ def test_a_file_held_open_by_another_process_is_reported_locked(
     assert target.read_bytes() == b"held"
 
 
+def test_a_file_deleted_between_the_check_and_the_open_is_404(client, trees, monkeypatch):
+    """Windows keeps a just-deleted entry visible while its delete is pending,
+    so the existence check passes and the open finds nothing."""
+    target = trees["terminal"] / "MQL5" / "Files" / "gone.bin"
+    target.write_bytes(b"gone")
+
+    def _vanished(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(ops, "open", _vanished, raising=False)
+
+    r = client.get("/files/MQL5/Files/gone.bin")
+
+    assert r.status_code == 404, r.data
+    assert r.get_json()["code"] == "NOT_FOUND"
+
+
 def test_a_missing_path_is_404(client):
     r = client.get("/files/MQL5/nope.mqh")
 

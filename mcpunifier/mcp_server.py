@@ -71,6 +71,7 @@ _FLAG_ON = "1"
 _ROUTE_CATALOG: tuple[tuple[str, str], ...] = (
     ("GET", "/ping"),
     ("GET", "/error"),
+    ("GET", "/busy"),
     ("GET", "/terminal"),
     ("POST", "/terminal/init"),
     ("POST", "/terminal/shutdown"),

@@ -203,6 +203,8 @@ scripts/                     Scripts that run inside the Windows VM
   start.bat                  Boot entrypoint (install + start terminals + APIs)
   reboot.bat                 The only reboot path — writes rebooting.flag and
                              releases both lock dirs before shutting down
+  reboot_guard.py            Holds a scheduled reboot while an API runs a
+                             backtest or a write request (GET /busy)
   acquire_lock.ps1           Boot-stamped lock acquire for start.bat and
                              install.bat; auto-clears reboot-orphaned locks
   debloat.bat                Windows debloat script
@@ -438,9 +440,26 @@ grace. When you catch a single wedged terminal before the watchdog does,
 `POST /terminal/restart` on that terminal (see `docs/rest-api.md`) is the
 cheaper first response.
 
-This complements the in-VM `MT5AutoReboot` scheduled task, which reboots on a
-fixed timer and can interrupt long-running backtests; operators who disable that
+This complements the in-VM `MT5AutoReboot` scheduled task (see [Scheduled reboots](#scheduled-reboots)); operators who disable that
 task still get crash recovery from the watchdog.
+
+### Scheduled reboots
+
+The `MT5AutoReboot` task in the VM runs `scripts/reboot.bat scheduled` every `reboot_interval` minutes. Before rebooting, `scripts/reboot_guard.py` asks every API on the VM through `GET /busy` whether it is doing something a reboot would break:
+
+- a backtest of that terminal is queued or running;
+- a request that changes something is in flight: placing, modifying or closing an order or position (a new stop loss included), a deployment change, a file write, a compile, a terminal restart.
+
+Reads (`GET`, `HEAD`, `OPTIONS`) never hold a reboot. While any API is busy the reboot waits and the guard checks again every 30 seconds. Each wait goes to `full.log` with the terminal and the reason, again whenever the reasons change and every 5 minutes while they do not:
+
+```
+[2026-10-09 22:10:01] [reboot-guard] reboot postponed (reason=busy, waited 0 min): teletrade/demo/default: backtest 3f2a... running
+[2026-10-09 22:41:31] [reboot-guard] all 8 API(s) idle, rebooting (reason=idle)
+```
+
+When every API is idle the guard creates `reboot.draining` in the shared folder and checks once more. While that flag is fresh (under 2 minutes old) the APIs answer any new write with 503 `REBOOT_PENDING` and `Retry-After: 120`, so nothing starts in the seconds before the reboot. `start.bat` deletes the flag on the next boot.
+
+`reboot_max_postpone` (minutes, default 360) caps the wait, so a job that never ends cannot keep a wedged VM from its reboot. The guard then reboots anyway and logs `reason=max_postpone` with what was still busy. `0` turns the guard off. An API that does not answer counts as idle, and a guard that fails logs `reason=guard_error` and lets the reboot go ahead: the guard decides when, never whether. Reboots made during boot (`pip-changed`, `install-requested`) happen before any API is up and skip the guard.
 
 ### The probe budget: why the ports are probed concurrently
 

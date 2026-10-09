@@ -219,6 +219,10 @@ def open_readable(tree: Tree, path: Resolved):
     tree.check_readable(path)
     try:
         return open(path.full, "rb")  # noqa: SIM115 - the response streams and closes it
+    except FileNotFoundError as err:
+        # Deleted between the existence check and the open: Windows keeps a
+        # just-deleted entry visible for a moment while the delete is pending.
+        raise NotFound(f"{path.rel} does not exist") from err
     except PermissionError as err:
         raise Locked(f"{path.rel} is in use and cannot be read: {err}") from err
 

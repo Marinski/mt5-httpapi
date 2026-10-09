@@ -21,6 +21,7 @@ from mt5api.handlers import (
     symbols,
     terminal,
 )
+from mt5api import reboot_guard
 from mt5api.logger import log
 
 app = Flask(__name__)
@@ -45,6 +46,44 @@ def _start_request():
         g.req_id, request.method, request.full_path,
         _client_ip(), request.headers.get("User-Agent", "-"),
     )
+    refusal = _authorize()
+    if refusal is not None:
+        return refusal
+    return _guard_write()
+
+
+def _guard_write():
+    """Hold a scheduled reboot while this request changes something.
+
+    Runs only for an authorized request, so a caller without the token can
+    neither hold a reboot nor learn that one is pending.
+    """
+    if not reboot_guard.is_write(request.method):
+        return None
+    if reboot_guard.draining():
+        log.warning(
+            "%s refused %s %s: a scheduled reboot is about to happen (reason=reboot_pending)",
+            g.req_id, request.method, request.path,
+        )
+        response = jsonify({
+            "error": "a scheduled VM reboot is about to happen; retry after it",
+            "code": "REBOOT_PENDING",
+        })
+        response.headers["Retry-After"] = str(reboot_guard.DRAIN_RETRY_AFTER_SECONDS)
+        return response, 503
+    reboot_guard.write_started(g.req_id, request.method, request.path)
+    return None
+
+
+@app.teardown_request
+def _end_write(_exc):
+    req_id = getattr(g, "req_id", None)
+    if req_id is not None:
+        reboot_guard.write_finished(req_id)
+
+
+def _authorize():
+    """Refuse a request without the right token or with an oversized body."""
     auth = request.headers.get("Authorization", "")
 
     # /compile carries a SECOND, compile-only credential.
@@ -148,6 +187,13 @@ Compress(app)
 # ── Health / System ──────────────────────────────────────────────
 app.get("/ping")(terminal.ping)
 app.get("/error")(terminal.last_error)
+
+
+@app.get("/busy")
+def busy():
+    """Whether a VM reboot now would break work here, and why. Polled by
+    scripts/reboot_guard.py before every scheduled reboot."""
+    return jsonify(reboot_guard.status())
 
 # ── Terminal ─────────────────────────────────────────────────────
 app.get("/terminal")(terminal.get_terminal)

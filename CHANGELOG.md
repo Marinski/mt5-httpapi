@@ -6,6 +6,22 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.27.0]: 2026-10-09
+
+### Added
+
+- **The scheduled VM reboot waits for running work.** Every `reboot_interval` minutes the VM rebooted no matter what, cutting off a running backtest or an order, stop loss change, deployment or file write halfway. The reboot now first asks every API on the VM what it is doing and waits while any of them runs a backtest or a request that changes something. Reads never hold it. Each wait goes to `full.log` with the terminal and the reason (`reboot postponed (reason=busy ...): teletrade/demo/default: backtest ... running`), and so does the reboot (`reason=idle`, or `reason=max_postpone` with what was still busy). Once everything is idle, the APIs refuse new writes for the last seconds with 503 `REBOOT_PENDING` and `Retry-After: 120`, so nothing starts just before the reboot. See [docs/operations.md](docs/operations.md#scheduled-reboots).
+- **`reboot_max_postpone`** in `config.yaml` caps that wait in minutes (default `360`, the default backtest timeout). `0` reboots on schedule without waiting.
+- **`GET /busy`** reports whether a reboot now would break work in that terminal's API: `busy`, `reasons`, the queued and running `backtests`, the `writes_in_flight` with method, path and age, and `draining`. See [docs/rest-api.md](docs/rest-api.md#health).
+
+### Changed
+
+- The agent sign-off rule in `.agents/rules/chat.md` now also covers pull request, issue and discussion comments, other messages, and commit message bodies (CHAT3, CHAT4). Code, docs, the CHANGELOG and tag messages stay without it.
+
+### Fixed
+
+- **Downloading a file deleted a moment earlier answered 500.** Windows keeps a deleted entry visible briefly while the delete is pending, so `GET /files/<path>` could find it and then fail to open it. It now answers 404 `NOT_FOUND`.
+
 ## [v4.26.2]: 2026-10-09
 
 ### Fixed

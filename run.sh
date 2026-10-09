@@ -77,6 +77,8 @@ cp "${DIR}/scripts/start.bat" "${DIR}/data/shared/scripts/start.bat"
 # Single reboot path for the stack — always writes rebooting.flag and releases
 # both lock dirs, so a reboot can never strand a lock the way it used to.
 cp "${DIR}/scripts/reboot.bat" "${DIR}/data/shared/scripts/reboot.bat"
+# Holds a scheduled reboot while an API runs a backtest or a write request.
+cp "${DIR}/scripts/reboot_guard.py" "${DIR}/data/shared/scripts/reboot_guard.py"
 # Boot-stamped lock acquire used by both start.bat and install.bat.
 cp "${DIR}/scripts/acquire_lock.ps1" "${DIR}/data/shared/scripts/acquire_lock.ps1"
 cp "${DIR}/scripts/api_runner.bat" "${DIR}/data/shared/scripts/api_runner.bat"

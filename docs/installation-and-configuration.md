@@ -49,6 +49,7 @@ api_token: "paste-the-output-of-openssl-rand-hex-32-here"
 
 # VM auto-reboot every N minutes (flushes DWM/VirtIO-GPU state). 0 = disable.
 reboot_interval: 30
+reboot_max_postpone: 360
 
 # Default Strategy Tester timeout. POST /backtest can override per job.
 backtest_timeout: "6h"
@@ -101,6 +102,7 @@ Per-field notes:
 
 - **`api_token`** — if set, every endpoint requires `Authorization: Bearer <token>`. Empty = open. Generate with `openssl rand -hex 32`.
 - **`reboot_interval`** — minutes between scheduled VM reboots. `0` disables.
+- **`reboot_max_postpone`**: the longest a scheduled reboot waits, in minutes (default `360`), while any API on the VM is running a backtest or a request that changes something. Reads never hold it. `0` reboots on schedule without waiting. See [operations](operations.md#scheduled-reboots).
 - **`backtest_timeout`** — default Strategy Tester timeout for `POST /backtest`. Accepts the same duration grammar as `utc_offset`: `"6h"`, `"30m"`, `"3h30m"`, `"90m"`, or a bare number interpreted as hours. Per-request form field `timeout` overrides it.
 - **`wickworks.url`** — technical-analysis sidecar URL as seen from inside the Windows VM. The default reaches the sidecar sharing the MT5 container's network namespace; override it only when changing that network topology. `WICKWORKS_URL` overrides the file at runtime.
 - **`wickworks.timeout`** — sidecar request timeout as a duration. Defaults to `"30s"`; `WICKWORKS_TIMEOUT` overrides the file at runtime.

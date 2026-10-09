@@ -68,6 +68,10 @@ if !LOCK_EC! neq 0 (
 )
 
 call :log "%START_LOG%" "====== Boot ======"
+
+:: reboot_guard.py leaves reboot.draining up so no write starts before the
+:: reboot; on the way back up it must not keep refusing writes.
+del "%SHARED%\reboot.draining" 2>nul
 call :log "%INSTALL_LOG%" "====== Boot ======"
 
 :: -- Run install --------------------------------------------------

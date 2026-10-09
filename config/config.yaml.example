@@ -24,6 +24,11 @@ compile_local_cache: ""
 # before sustained-load crashes wedge the MT5 SDK pipe. 0 = disabled.
 reboot_interval: 30
 
+# Longest a scheduled reboot waits, in minutes, while an API runs a backtest
+# or a request that changes something (orders, stop losses, deployments, file
+# writes). Reads never hold it. 0 reboots on schedule without waiting.
+reboot_max_postpone: 360
+
 # Default Strategy Tester timeout. Accepts the same duration strings as
 # utc_offset ("6h", "30m", "3h30m"). POST /backtest can override per job.
 backtest_timeout: "6h"

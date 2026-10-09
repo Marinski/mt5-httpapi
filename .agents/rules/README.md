@@ -14,6 +14,6 @@ Every rule starts with a bold ID: one prefix per file and a number counted from 
 | [windows-vm.md](windows-vm.md) | WIN | Code that runs inside the Windows VM: ASCII only, boot flow, the shared folder, locks. |
 | [security.md](security.md) | SEC | Credentials, auth tokens, file API and compile protections, live-account safety, supply-chain review. |
 | [docs-and-releases.md](docs-and-releases.md) | DOC | Docs kept in step with code, prose style, CHANGELOG, versions, tags, CI publishing. |
-| [chat.md](chat.md) | CHAT | How an agent signs off its chat replies to the maintainer. |
+| [chat.md](chat.md) | CHAT | How an agent signs off its chat replies, PR, issue and discussion comments, messages and commit messages. |
 
 When a rule here and the code disagree, the code and its tests win; fix the rule in the same change.

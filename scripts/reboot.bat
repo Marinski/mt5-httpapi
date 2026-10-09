@@ -32,11 +32,25 @@ set "INSTALL_LOCK=%SHARED%\install.running"
 :: volume before the OS tears the filesystem down.
 set "GRACE_SECONDS=5"
 
+set "PYDIR=C:\Program Files\Python312"
+set "SCRIPTS=%SHARED%\scripts"
+
 set "REASON=%~1"
 if "!REASON!"=="" set "REASON=unspecified"
 
 mkdir "%LOGDIR%" 2>nul
 echo [%date% %time%] [reboot] reboot requested (reason=!REASON!) >> "%FULL_LOG%"
+
+:: A scheduled reboot waits until no API is running a backtest or a request
+:: that changes something (orders, stop losses, deployments, file writes).
+:: reboot_guard.py logs every wait with its reason and always returns, at the
+:: latest after reboot_max_postpone minutes. The boot-time reboots
+:: (pip-changed, install-requested) run before any API exists, so they skip it.
+if /i "!REASON!"=="scheduled" (
+    if exist "%SCRIPTS%\reboot_guard.py" (
+        "%PYDIR%\python.exe" "%SCRIPTS%\reboot_guard.py"
+    )
+)
 
 :: Tell the next boot that any lock it finds belongs to a dead instance.
 :: install.bat consumes this flag; start.bat uses the boot-stamp check in
