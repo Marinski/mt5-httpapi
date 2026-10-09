@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.26.1]: 2026-10-09
+
+### Fixed
+
+- **CI failed before running any test.** The `test` and `lint` jobs pull their base images from Docker Hub without logging in, and Docker Hub refused with 429 because GitHub's shared runner IPs had used up the anonymous pull limit. Both jobs now log in to Docker Hub first, except on pull requests from forks, which get no secrets. The v4.25.0 and v4.26.0 tag pipelines failed this way, so neither published the skill or the OpenClaw plugin to ClawHub; this release publishes both.
+
 ## [v4.26.0]: 2026-10-09
 
 ### Added
