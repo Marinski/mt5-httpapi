@@ -6,6 +6,20 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.20.0]: 2026-10-09
+
+### Added
+
+- **`make test-live`** tests a running stack. Set `MT5_LIVE_URL`, `MT5_LIVE_TOKEN`, `MT5_LIVE_BROKER` and `MT5_LIVE_ACCOUNT` (or fill `tests/live/.env`) and it checks the REST API, both MCP endpoints and the route catalog against that terminal. If the terminal has Chart Deployments on, it also compiles a probe expert that never trades, deploys it, and checks the chart in screenshots. Steps that change state run only on a demo account unless `MT5_LIVE_ALLOW_REAL=1`. `MT5_LIVE_TRADING=1` adds the real-order suite in `tests/real`. See [operations](docs/operations.md#testing-a-running-stack).
+
+### Fixed
+
+- **A newly uploaded expert could not be deployed until the terminal restarted.** MT5 only loads an `.ex5` it saw on disk at startup or after a Navigator refresh, so a template naming a freshly uploaded expert opened an empty chart and the deployment failed with `EXPERT_NOT_ATTACHED` on every retry. Every successful `POST /experts` now refreshes the terminal's Navigator inside the Windows VM through the bundled AutoIt (`assets/autoit/refresh_navigator.au3`), and so does the first deployment of a host-managed expert. The response's `navigator_refresh` is `ok`, `failed` (upload the same file again to retry) or `unavailable` (no GUI automation, as on bare metal, where the terminal still needs a restart first).
+- **The loader lost track of charts whose expert calls `Comment()`.** Loader 1.0.2 marked a deployment's chart by writing `chartctl:<id>` into the chart comment, which any expert calling `Comment()` overwrites, and wrote over the expert's own comment in turn. Loader 1.0.3 keeps the chart-to-deployment map in `MQL5\Files\chartctl\owned.json` instead and never touches the chart comment. Charts the map does not know, such as the ones MT5 restores under new ids after a terminal restart, are adopted by expert, symbol and timeframe as before.
+- **A terminal restart could leave a deployment running on two charts.** The loader starts before the experts on MT5's restored charts have loaded, so it saw no chart to adopt and opened a second one, and the restored copy kept running its own expert unmanaged. Loader 1.0.3 only adopts during its first 30 seconds and opens no new charts. It also forgets a chart only once `ChartClose` succeeds, so a failed close no longer looks like a closed chart.
+- `run.sh` (`make up`) now builds images as it starts the stack. It used to start whatever image was built first, so an update never reached the MCP unifier.
+- `POST /webrequest/apply?script=` with an unknown script name answers 400 instead of an HTML 500.
+
 ## [v4.19.0]: 2026-10-09
 
 ### Added

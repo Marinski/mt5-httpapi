@@ -246,3 +246,84 @@ def test_close_chart_loader_failure(client):
 def test_close_chart_bad_id(client):
     r = client.post("/charts/notanint/close")
     assert r.status_code == 400
+
+
+# ── Navigator refresh after staging an expert ────────────────────────
+#
+# MT5 loads only experts it saw at startup or after a Navigator refresh, so
+# every staged .ex5 must be followed by one, or its deployment never attaches.
+
+
+@pytest.fixture
+def navigator(monkeypatch):
+    """Pretend AutoIt is available and record each Navigator refresh."""
+    from mt5api.chartctl import autoit_webrequest as autoit
+
+    state = {"calls": 0, "result": ("OK", "")}
+
+    def refresh(timeout=60):
+        state["calls"] += 1
+        if isinstance(state["result"], Exception):
+            raise state["result"]
+        return state["result"]
+
+    monkeypatch.setattr(autoit, "available", lambda: True)
+    monkeypatch.setattr(autoit, "refresh_navigator", refresh)
+    return state
+
+
+def test_upload_without_gui_automation_says_a_restart_is_needed(client):
+    body = _upload_expert(client).get_json()
+
+    assert body["navigator_refresh"] == "unavailable"
+    assert "restart the terminal" in body["note"]
+
+
+@pytest.mark.parametrize("second_upload", ["same bytes", "overwrite"])
+def test_every_successful_upload_refreshes_the_navigator(client, navigator, second_upload):
+    first = _upload_expert(client).get_json()
+    if second_upload == "same bytes":
+        second = _upload_expert(client)
+    else:
+        second = client.post("/experts?overwrite=true", data={
+            "expert": (io.BytesIO(b"MZ\x00changed"), "EA.ex5")},
+            content_type="multipart/form-data")
+
+    assert first["navigator_refresh"] == "ok"
+    assert second.get_json()["navigator_refresh"] == "ok"
+    assert navigator["calls"] == 2
+
+
+def test_a_refused_upload_does_not_refresh(client, navigator):
+    _upload_expert(client, content=b"one")
+    refused = _upload_expert(client, content=b"two")
+
+    assert refused.status_code == 409
+    assert navigator["calls"] == 1
+
+
+@pytest.mark.parametrize("result", [("FAIL", "log"), RuntimeError("no AutoIt")])
+def test_a_failed_refresh_is_reported_and_the_file_stays_staged(client, navigator, result):
+    navigator["result"] = result
+
+    r = _upload_expert(client)
+
+    assert r.status_code == 201
+    assert r.get_json()["navigator_refresh"] == "failed"
+    assert "upload the same file again" in r.get_json()["note"]
+    assert [e["name"] for e in client.get("/experts").get_json()["experts"]] == ["EA.ex5"]
+
+
+def test_deploying_a_host_expert_refreshes_after_copying_it_in(client, navigator):
+    from mt5api.chartctl import paths
+
+    with open(os.path.join(paths.HOST_EXPERTS_DIR, "Host.ex5"), "wb") as handle:
+        handle.write(b"MZ\x00host")
+
+    r = client.post("/deployments", json={
+        "expert": "Host.ex5", "symbol": "EURUSD", "timeframe": "M5"})
+
+    assert r.status_code == 202
+    assert r.get_json()["navigator_refresh"] == "ok"
+    assert os.path.exists(os.path.join(paths.EXPERTS_DIR, "Host.ex5"))
+    assert navigator["calls"] == 1

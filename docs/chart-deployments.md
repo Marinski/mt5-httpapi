@@ -6,6 +6,7 @@ terminal restart, and no human clicking through the Navigator.
 ## Contents
 
 - [Quick start](#quick-start)
+- [`POST /experts` and the Navigator refresh](#post-experts-and-the-navigator-refresh)
 - [`POST /deployments`](#post-deployments)
 - [`GET /loader`](#get-loader)
 - [`GET /charts`](#get-charts)
@@ -98,6 +99,18 @@ curl -X PATCH  "$MT5_API_URL/deployments/dep_a1b2c3" \
 curl -X DELETE "$MT5_API_URL/deployments/dep_a1b2c3" \
   -H "Authorization: Bearer $MT5_API_TOKEN"
 ```
+
+### `POST /experts` and the Navigator refresh
+
+MT5 only loads an expert it saw on disk when the terminal started, or that a Navigator refresh has picked up since. A template naming any other `.ex5` opens the chart with no expert on it, and the deployment fails with `EXPERT_NOT_ATTACHED`. So every successful `POST /experts`, including a re-upload of identical bytes, refreshes the terminal's Navigator by driving it with the bundled AutoIt (`assets/autoit/refresh_navigator.au3`), the same way a user would right-click "Expert Advisors" and choose Refresh. Deploying a host-managed expert for the first time does the same after copying it in.
+
+The response's `navigator_refresh` says how that went:
+
+| Value | Meaning |
+| ----- | ------- |
+| `ok` | The terminal can load the expert; deploy away. |
+| `failed` | The refresh did not run (see `note`). Upload the same file again to retry, or restart the terminal. |
+| `unavailable` | No GUI automation on this host (a bare-metal terminal). Restart the terminal before deploying a newly uploaded expert. |
 
 ### `POST /deployments`
 

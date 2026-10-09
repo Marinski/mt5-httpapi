@@ -26,6 +26,7 @@ make test        Run the complete automated test suite
 make test-unit   Run unit and contract tests in a throwaway Docker image
 make test-integration  Container-backed suites: nginx routing + MCP unifier
 make test-go     Compile and race-test the public Go client
+make test-live   Test a running stack end to end (see below)
 make clean       Nuke VM disk and state (keeps ISO)
 make distclean   Nuke everything including ISO
 ```
@@ -33,6 +34,17 @@ make distclean   Nuke everything including ISO
 `make test` is the complete automated gate: it runs `make test-unit`,
 `make test-integration`, and `make test-go`. Use a scoped target directly while
 iterating.
+
+### Testing a running stack
+
+`make test-live` points the suite in `tests/live/` at a deployed stack and one of its terminals, so you can check what is actually running after an update. Set the target in the environment or in `tests/live/.env` (copy `tests/live/.env.example`; the file is gitignored and never baked into an image):
+
+```bash
+MT5_LIVE_URL=http://127.0.0.1:8888 MT5_LIVE_TOKEN=... \
+MT5_LIVE_BROKER=yourbroker MT5_LIVE_ACCOUNT=demo make test-live
+```
+
+It checks the REST API, both MCP endpoints, and the route catalog against the routes the terminal really serves. On a terminal with [Chart Deployments](chart-deployments.md) enabled it also compiles a probe expert that never trades, stages it over MCP, deploys it, reads its chart from screenshots, switches its set file, and deletes it again. Those steps change state, so they run only on a demo account unless `MT5_LIVE_ALLOW_REAL=1`, and everything they create is named `livetest-` and removed afterwards. `MT5_LIVE_WEBREQUEST=1` adds a round trip through the WebRequest allowlist that drives the terminal's GUI. `MT5_LIVE_TRADING=1`, set in the environment, also runs `tests/real`, which places and closes real orders. `LIVE_ARGS` passes extra pytest arguments, for example `LIVE_ARGS="-k chartctl"`.
 
 `make test-unit` is the offline suite — it runs inside a throwaway image with
 the MT5 SDK stubbed, so it needs nothing but docker and finishes in seconds.

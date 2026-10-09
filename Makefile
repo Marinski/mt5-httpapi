@@ -1,4 +1,4 @@
-.PHONY: up down logs status lint format test test-unit test-integration test-go verify-binaries clean distclean help
+.PHONY: up down logs status lint format test test-unit test-integration test-go test-live verify-binaries clean distclean help
 
 GO_TEST_IMAGE := golang@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
 
@@ -97,6 +97,25 @@ test-go:
 		$(GO_TEST_IMAGE) \
 		sh -c '/usr/local/go/bin/go test -race ./...'
 
+# Tests a RUNNING stack: REST, both MCP endpoints, and, where enabled, Chart
+# Deployments end to end. The target comes from MT5_LIVE_* environment
+# variables or tests/live/.env (see tests/live/conftest.py). MT5_LIVE_TRADING=1
+# (environment only) adds tests/real, which places real orders.
+# --network=host so a loopback or tailnet target resolves as it does on the host.
+LIVE_ENV_FILE := tests/live/.env
+LIVE_SUITES := tests/live/ $(if $(filter 1,$(MT5_LIVE_TRADING)),tests/real/)
+test-live:
+	@TAG=mt5-httpapi-live:$$(date +%s)-$$RANDOM; \
+	docker build -q -f Dockerfile.test -t $$TAG . >/dev/null && \
+	(docker run --rm --network=host \
+		-e MT5_LIVE_URL -e MT5_LIVE_TOKEN -e MT5_LIVE_BROKER -e MT5_LIVE_ACCOUNT \
+		-e MT5_LIVE_INSTANCE -e MT5_LIVE_SYMBOL -e MT5_LIVE_TIMEFRAME \
+		-e MT5_LIVE_ALLOW_REAL -e MT5_LIVE_WEBREQUEST \
+		-e MT5_TEST_SYMBOL -e MT5_TEST_VOLUME -e MT5_TEST_MAGIC \
+		$(if $(wildcard $(LIVE_ENV_FILE)),-v "$$PWD/$(LIVE_ENV_FILE):/app/$(LIVE_ENV_FILE):ro") \
+		$$TAG pytest -v -p no:cacheprovider $(LIVE_SUITES) $(LIVE_ARGS); \
+	STATUS=$$?; docker rmi -f $$TAG >/dev/null; exit $$STATUS)
+
 clean: down
 	sudo rm -rf data/storage data/shared data/metatrader5 data/oem run.log
 
@@ -115,5 +134,6 @@ help:
 	@echo "  test-unit - Run unit and contract tests in a throwaway Docker image"
 	@echo "  test-integration - Container-backed suites: nginx routing + MCP unifier (needs docker)"
 	@echo "  test-go  - Compile and race-test the public Go client in a pinned container"
+	@echo "  test-live - Test a RUNNING stack set by MT5_LIVE_* / tests/live/.env (MT5_LIVE_TRADING=1 adds real orders)"
 	@echo "  clean     - Remove VM disk and state (keeps ISO)"
 	@echo "  distclean - Remove everything including ISO"

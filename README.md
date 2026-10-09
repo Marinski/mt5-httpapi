@@ -160,6 +160,7 @@ That is just the hello-world shit. The [REST API docs](docs/rest-api.md) link to
 ```bash
 make status            # see whether the whole contraption is alive
 make test              # run all the tests, including integration + Go race
+make test-live         # test a running stack, set by MT5_LIVE_* (see docs/operations.md)
 make lint              # lint the PowerShell and shell shit
 make format            # format the shell scripts
 make verify-binaries   # check every vendored executable against the manifest

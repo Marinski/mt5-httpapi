@@ -69,9 +69,21 @@ class Client:
         )
 
 
+def _live_suite_url() -> Optional[str]:
+    """The terminal URL from the live suite's MT5_LIVE_* variables, so
+    `MT5_LIVE_TRADING=1 make test-live` drives this suite at the same target."""
+    root = os.environ.get("MT5_LIVE_URL")
+    broker = os.environ.get("MT5_LIVE_BROKER")
+    account = os.environ.get("MT5_LIVE_ACCOUNT")
+    if not (root and broker and account):
+        return None
+    instance = os.environ.get("MT5_LIVE_INSTANCE") or "default"
+    return f"{root.rstrip('/')}/{broker}/{account}/{instance}"
+
+
 def from_env() -> Client:
-    url = os.environ.get("MT5_API_URL")
-    token = os.environ.get("MT5_API_TOKEN")
+    url = os.environ.get("MT5_API_URL") or _live_suite_url()
+    token = os.environ.get("MT5_API_TOKEN") or os.environ.get("MT5_LIVE_TOKEN")
     if not url or not token:
         raise RuntimeError(
             "MT5_API_URL and MT5_API_TOKEN must be set (see tests/real/.env.example)"

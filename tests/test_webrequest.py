@@ -248,6 +248,19 @@ def test_apply_endpoint_reapplies_desired(client, monkeypatch):
     assert seen["urls"] == REAL_URLS
 
 
+def test_apply_endpoint_unknown_dev_script_is_a_400(client, monkeypatch):
+    def refuse(script, timeout=60, use_runas=False):
+        raise ValueError(f"script not found: {script}")
+
+    monkeypatch.setattr(client._autoit, "available", lambda: True)
+    monkeypatch.setattr(client._autoit, "run_named", refuse)
+
+    r = client.post("/webrequest/apply?script=missing.au3")
+
+    assert r.status_code == 400
+    assert r.get_json() == {"success": False, "error": "script not found: missing.au3"}
+
+
 def test_apply_endpoint_noop_when_empty(client):
     r = client.post("/webrequest/apply")
     assert r.status_code == 200

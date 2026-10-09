@@ -24,7 +24,7 @@ The protocol is intentionally file-based so that:
 | Side | Writes | Reads |
 |------|--------|-------|
 | **API** (mt5-httpapi) | `desired.json`, `command.json`, generated `.tpl` files | `observed.json`, `command_result.json` |
-| **Loader EA** (in terminal) | `observed.json`, `command_result.json`, screenshots | `desired.json`, `command.json` |
+| **Loader EA** (in terminal) | `observed.json`, `command_result.json`, `owned.json`, screenshots | `desired.json`, `command.json`, `owned.json` |
 
 The API owns *desired state*. The loader owns *observed truth*. Neither
 writes the other's files. Success is defined as **observed converging on
@@ -89,6 +89,14 @@ is the only definition of a converged deployment. The API's
 `GET /deployments` merges the two files and derives per-deployment status
 (`pending → running → degraded → failed → paused`).
 
+### `owned.json` (loader's own state)
+
+```json
+{ "owned": [ { "chart_id": 133039117, "deployment_id": "dep_a1b2c3" } ] }
+```
+
+Which open chart belongs to which deployment. The loader keeps this map in memory, writes it whenever it changes, and reads it back when it starts, so a reloaded loader still knows its charts. The API never reads it; `observed.json` already carries each chart's `deployment_id`.
+
 ### `command.json` / `command_result.json` (one-shot commands)
 
 For operations that produce an artifact rather than converge state
@@ -108,15 +116,9 @@ Every pass (timer-driven, ~1s), the owning loader:
 
 1. Reads `desired.json`; if `revision` changed, reconciles.
 2. **Reconcile** = diff desired deployments against actual charts:
-   - Enabled deployment with no matching chart → first try to **adopt** an
-     unowned chart already running the exact expert + symbol + timeframe
-     (stamp it `chartctl:<id>`); only if none exists, `SymbolSelect` →
-     `ChartOpen` → `ChartApplyTemplate` → verify `CHART_EXPERT_NAME`
-     within 10s → stamp `chartctl:<id>` into the chart comment. Stamps
-     are verified by read-back (`ChartSetString` is asynchronous); a
-     failed attach closes the chart it opened and backs off 60s.
-   - A chart it owns (comment starts `chartctl:`) whose deployment is gone
-     or disabled → `ChartClose`.
+   - Enabled deployment with no chart in the ownership map → first try to **adopt** an unowned chart already running the exact expert + symbol + timeframe and record it in `owned.json`; only if none exists, `SymbolSelect` → `ChartOpen` → `ChartApplyTemplate` → verify `CHART_EXPERT_NAME` within 10s → record the chart in `owned.json`. A failed attach closes the chart it opened and backs off 60s.
+   - A chart it owns whose deployment is gone or disabled → `ChartClose`, and the chart leaves the map.
+   - Map entries for charts that no longer exist are dropped.
    - Charts it doesn't own are **reported but never touched** by
      reconcile (an explicit `close_chart` command can close them).
 3. Writes `observed.json`.
@@ -129,12 +131,9 @@ Every pass (timer-driven, ~1s), the owning loader:
   `GlobalVariable` mutex (`chartctl_loader_owner`). A second loader detects
   the live mutex and stays passive, reclaiming only if the owner vanishes.
 - All file writes are atomic (temp + `FileMove`).
-- Attribution is by the `chartctl:<id>` chart comment the loader sets at
-  attach time. The comment does **not** reliably survive a terminal
-  restart (observed live: MT5's saved profile restores the chart and
-  expert but drops the comment, leaking one duplicate chart per reboot),
-  which is why reconcile adopts exact-match unowned charts instead of
-  trusting the comment alone.
+- Attribution is by the `owned.json` map, never by anything on the chart itself. Loader 1.0.2 and earlier wrote `chartctl:<id>` into the chart comment, which any expert calling `Comment()` overwrites. MT5 gives the charts it restores from the saved profile new ids, so after a terminal restart the map's old entries are dropped and reconcile adopts the exact-match restored charts instead. Experts on restored charts load a few seconds after the terminal starts, so for its first 30 seconds the loader only adopts and opens no new charts; opening one earlier would duplicate a chart that is still loading.
+- A chart leaves the map only once `ChartClose` succeeds.
+- MT5 only loads an `.ex5` that was on disk when the terminal started, or that a Navigator refresh has picked up since. `POST /experts` runs that refresh inside the Windows VM; see [Chart Deployments](chart-deployments.md).
 
 ---
 

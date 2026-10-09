@@ -350,7 +350,10 @@ Endpoint reference:
 
 ```bash
 # Stage artifacts. Re-uploading identical bytes is skipped; different bytes
-# under the same .ex5 name need ?overwrite=true.
+# under the same .ex5 name need ?overwrite=true. The response's
+# "navigator_refresh" must be "ok" before a deployment of a NEW expert can
+# attach: on "failed" upload the same file again, on "unavailable" (bare metal)
+# the terminal needs a restart first.
 curl -H "Authorization: Bearer $MT5_API_TOKEN" \
   -F "expert=@HappyGoldScalp.ex5" "$MT5_API_URL/experts"
 curl -H "Authorization: Bearer $MT5_API_TOKEN" \

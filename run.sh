@@ -221,7 +221,9 @@ if docker compose -f "${DIR}/docker-compose.yml" ps -q 2>/dev/null | grep -q .; 
 fi
 
 echo "Starting MT5 Windows VM..."
-docker compose -f "${DIR}/docker-compose.yml" up -d
+# --build: services built from this checkout (the MCP unifier) otherwise keep
+# whatever image was built first, so a `git pull` never reaches them.
+docker compose -f "${DIR}/docker-compose.yml" up -d --build
 
 API_HOST_PORT="${API_HOST_PORT:-8888}"
 echo ""

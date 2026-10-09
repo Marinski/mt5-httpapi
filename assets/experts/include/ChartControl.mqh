@@ -19,8 +19,13 @@
 #property strict
 
 #define CHARTCTL_PROTOCOL   1
-#define CHARTCTL_VERSION    "1.0.2"
+#define CHARTCTL_VERSION    "1.0.3"
 #define CHARTCTL_DIR        "chartctl"          // under MQL5\Files\
+#define CHARTCTL_OWNED_FILE "owned.json"        // chart_id -> deployment_id
+// Experts on the charts MT5 restores at startup load a few seconds after the
+// loader does. Until this much time has passed the loader only adopts and
+// opens no charts, or it would duplicate a chart whose expert is still loading.
+#define CHARTCTL_STARTUP_GRACE_MS 30000
 #define CHARTCTL_MUTEX_GV   "chartctl_loader_owner"
 #define CHARTCTL_ID_INPUT   "__chartctl_id"
 
@@ -43,7 +48,7 @@ struct ChartCtlChart
    string timeframe;
    string expert;
    bool   expert_enabled;
-   string deployment_id;   // parsed from the chart's __chartctl_id if present
+   string deployment_id;   // from the ownership map; "" when no deployment owns it
 };
 
 //+------------------------------------------------------------------+
@@ -51,6 +56,7 @@ class CChartControl
 {
 private:
    bool     m_owner;              // did we win the single-loader mutex?
+   ulong    m_owner_since_ms;     // GetTickCount64() when we became owner
    long     m_applied_revision;   // last desired revision we reconciled
    long     m_last_revision_seen;
    datetime m_started;
@@ -60,6 +66,20 @@ private:
    string   m_err_codes[];
    string   m_err_details[];
    datetime m_err_times[];        // drives the failed-attach retry cooldown
+   // Which deployment owns which chart (parallel arrays), persisted to
+   // CHARTCTL_OWNED_FILE. Kept here rather than in the chart comment
+   // because any expert that calls Comment() overwrites the comment.
+   long     m_own_charts[];
+   string   m_own_ids[];
+   bool     m_own_dirty;          // map changed but not yet written to disk
+
+   //--- ownership map ------------------------------------------------
+   void     LoadOwnership(void);
+   void     SaveOwnership(void);
+   string   OwnerOf(const long chart_id);
+   void     Claim(const long chart_id, const string dep_id);
+   void     Release(const long chart_id);
+   void     PruneOwnership(ChartCtlChart &charts[]);
 
    //--- file helpers -------------------------------------------------
    bool     ReadFile(const string relpath, string &out);
@@ -76,7 +96,6 @@ private:
    void     ScanCharts(ChartCtlChart &out[]);
    long     FindChartFor(const string dep_id, ChartCtlChart &charts[]);
    long     FindAdoptableChart(const ChartCtlDeployment &dep, ChartCtlChart &charts[]);
-   bool     StampChart(const long cid, const string dep_id);
    bool     AttachDeployment(const ChartCtlDeployment &dep);
    void     DetachChart(const long chart_id);
    ENUM_TIMEFRAMES TF(const string s);
@@ -105,9 +124,11 @@ public:
 CChartControl::CChartControl(void)
 {
    m_owner = false;
+   m_owner_since_ms = 0;
    m_applied_revision = -1;
    m_last_revision_seen = -1;
    m_started = 0;
+   m_own_dirty = false;
 }
 
 //+------------------------------------------------------------------+
@@ -140,6 +161,8 @@ bool CChartControl::Init(const bool close_own_chart_on_duplicate)
    GlobalVariableSet(CHARTCTL_MUTEX_GV, (double)TimeCurrent());
    GlobalVariableTemp(CHARTCTL_MUTEX_GV);   // auto-clears if terminal exits
    m_owner = true;
+   m_owner_since_ms = GetTickCount64();
+   LoadOwnership();
    PrintFormat("ChartControl v%s active (owner). dir=MQL5\\Files\\%s",
                CHARTCTL_VERSION, CHARTCTL_DIR);
    return true;
@@ -183,28 +206,23 @@ void CChartControl::Tick(void)
             continue;
          // Adopt before opening: an unowned chart already running this
          // exact expert/symbol/timeframe is almost certainly a previous
-         // incarnation of this deployment whose comment stamp was lost
-         // (comments do NOT reliably survive terminal restarts). Claiming
-         // it instead of opening a fresh chart is what stops duplicates
-         // from accumulating one-per-reboot.
+         // incarnation of this deployment, such as one MT5 restored under a
+         // new chart id after a terminal restart. Claiming it instead of
+         // opening a fresh chart is what stops duplicates accumulating.
          cid = FindAdoptableChart(desired[i], charts);
          if(cid >= 0)
          {
-            if(StampChart(cid, desired[i].id))
-            {
-               ClearError(desired[i].id);
-               PrintFormat("ChartControl: adopted chart %I64d for %s (%s %s)",
-                           cid, desired[i].id, desired[i].symbol,
-                           desired[i].timeframe);
-            }
-            else
-               RecordError(desired[i].id, "STAMP_FAILED",
-                           "adoption stamp on chart "
-                           + IntegerToString(cid) + " did not read back");
+            Claim(cid, desired[i].id);
+            ClearError(desired[i].id);
+            PrintFormat("ChartControl: adopted chart %I64d for %s (%s %s)",
+                        cid, desired[i].id, desired[i].symbol,
+                        desired[i].timeframe);
             continue;
          }
          if(InRetryCooldown(desired[i].id))
             continue;   // recent failure — don't hammer ChartOpen every pass
+         if(GetTickCount64() - m_owner_since_ms < CHARTCTL_STARTUP_GRACE_MS)
+            continue;   // a restored chart may still be loading this expert
          AttachDeployment(desired[i]);
       }
 
@@ -224,6 +242,7 @@ void CChartControl::Tick(void)
 
       m_applied_revision = rev;
       ScanCharts(charts);
+      PruneOwnership(charts);
       WriteObserved(desired, charts);
    }
    else
@@ -231,9 +250,13 @@ void CChartControl::Tick(void)
       // No desired file yet — still publish liveness + inventory.
       ChartCtlChart charts[];
       ScanCharts(charts);
+      PruneOwnership(charts);
       ChartCtlDeployment none[];
       WriteObserved(none, charts);
    }
+
+   if(m_own_dirty)
+      SaveOwnership();   // retry a write that failed earlier
 }
 
 //+------------------------------------------------------------------+
@@ -282,16 +305,7 @@ bool CChartControl::AttachDeployment(const ChartCtlDeployment &dep)
       string en = ChartGetString(cid, CHART_EXPERT_NAME);
       if(StringLen(en) > 0)
       {
-         if(!StampChart(cid, dep.id))
-         {
-            // Without the stamp we could never re-identify the chart and
-            // would open a duplicate next pass — better to fail visibly.
-            RecordError(dep.id, "STAMP_FAILED",
-                        "expert attached but CHART_COMMENT stamp did not "
-                        "read back; closing chart");
-            ChartClose(cid);
-            return false;
-         }
+         Claim(cid, dep.id);
          ClearError(dep.id);
          PrintFormat("ChartControl: attached %s on %s %s (chart %I64d)",
                      en, dep.symbol, dep.timeframe, cid);
@@ -305,36 +319,132 @@ bool CChartControl::AttachDeployment(const ChartCtlDeployment &dep)
    // reopened one just as well). Close what we opened.
    ChartClose(cid);
    RecordError(dep.id, "EXPERT_NOT_ATTACHED",
-               "template applied but CHART_EXPERT_NAME empty after 10s; "
-               "GetLastError=" + IntegerToString(GetLastError()));
+               "template applied but CHART_EXPERT_NAME empty after 10s "
+               "(an .ex5 copied in while the terminal runs is not loadable "
+               "until the Navigator is refreshed); GetLastError="
+               + IntegerToString(GetLastError()));
    return false;
 }
 
 //+------------------------------------------------------------------+
-//| Stamp attribution into the chart comment and verify it stuck.    |
-//| ChartSetString is asynchronous — the write is only queued — so   |
-//| read it back (with retries) before trusting it.                  |
+//| Ownership map: which deployment owns which open chart.           |
 //+------------------------------------------------------------------+
-bool CChartControl::StampChart(const long cid, const string dep_id)
+string CChartControl::OwnerOf(const long chart_id)
 {
-   string want = "chartctl:" + dep_id;
-   for(int i = 0; i < 12; i++)
+   for(int i = 0; i < ArraySize(m_own_charts); i++)
+      if(m_own_charts[i] == chart_id)
+         return m_own_ids[i];
+   return "";
+}
+
+// One chart per deployment: claiming drops any older chart the deployment
+// held, and replaces any other owner of this chart.
+void CChartControl::Claim(const long chart_id, const string dep_id)
+{
+   for(int i = ArraySize(m_own_charts) - 1; i >= 0; i--)
+      if(m_own_charts[i] == chart_id || m_own_ids[i] == dep_id)
+         Release(m_own_charts[i]);
+   int n = ArraySize(m_own_charts);
+   ArrayResize(m_own_charts, n + 1);
+   ArrayResize(m_own_ids, n + 1);
+   m_own_charts[n] = chart_id;
+   m_own_ids[n] = dep_id;
+   m_own_dirty = true;
+   SaveOwnership();
+}
+
+void CChartControl::Release(const long chart_id)
+{
+   for(int i = 0; i < ArraySize(m_own_charts); i++)
    {
-      ChartSetString(cid, CHART_COMMENT, want);
-      ChartRedraw(cid);
-      Sleep(250);
-      if(ChartGetString(cid, CHART_COMMENT) == want)
-         return true;
+      if(m_own_charts[i] != chart_id)
+         continue;
+      int last = ArraySize(m_own_charts) - 1;
+      m_own_charts[i] = m_own_charts[last];
+      m_own_ids[i] = m_own_ids[last];
+      ArrayResize(m_own_charts, last);
+      ArrayResize(m_own_ids, last);
+      m_own_dirty = true;
+      return;
    }
-   PrintFormat("ChartControl: CHART_COMMENT stamp failed on chart %I64d (%s)",
-               cid, dep_id);
-   return false;
+}
+
+// Drop entries for charts that no longer exist: closed by hand, or given a
+// new id by a terminal restart.
+void CChartControl::PruneOwnership(ChartCtlChart &charts[])
+{
+   for(int i = ArraySize(m_own_charts) - 1; i >= 0; i--)
+   {
+      bool open = false;
+      for(int c = 0; c < ArraySize(charts); c++)
+         if(charts[c].chart_id == m_own_charts[i]) { open = true; break; }
+      if(!open)
+         Release(m_own_charts[i]);
+   }
+   if(m_own_dirty)
+      SaveOwnership();
+}
+
+void CChartControl::SaveOwnership(void)
+{
+   string j = "{\"owned\":[";
+   for(int i = 0; i < ArraySize(m_own_charts); i++)
+   {
+      if(i) j += ",";
+      j += "{\"chart_id\":" + IntegerToString(m_own_charts[i])
+         + ",\"deployment_id\":\"" + JsonEscape(m_own_ids[i]) + "\"}";
+   }
+   j += "]}";
+   // On failure the map stays dirty and Tick retries; the in-memory map
+   // stays authoritative meanwhile.
+   if(WriteFileAtomic(CHARTCTL_DIR + "\\" + CHARTCTL_OWNED_FILE, j))
+      m_own_dirty = false;
+}
+
+void CChartControl::LoadOwnership(void)
+{
+   ArrayResize(m_own_charts, 0);
+   ArrayResize(m_own_ids, 0);
+   string json;
+   if(!ReadFile(CHARTCTL_DIR + "\\" + CHARTCTL_OWNED_FILE, json))
+      return;
+   int depth = 0, obj_start = -1;
+   for(int i = 0; i < StringLen(json); i++)
+   {
+      ushort ch = StringGetCharacter(json, i);
+      if(ch == '{')
+      {
+         depth++;
+         if(depth == 2) obj_start = i;
+      }
+      else if(ch == '}')
+      {
+         if(depth == 2 && obj_start >= 0)
+         {
+            string obj = StringSubstr(json, obj_start, i - obj_start + 1);
+            long cid = JsonNum("chart_id", obj);
+            string dep = JsonStr("deployment_id", "", obj);
+            if(cid != 0 && dep != "")
+            {
+               int n = ArraySize(m_own_charts);
+               ArrayResize(m_own_charts, n + 1);
+               ArrayResize(m_own_ids, n + 1);
+               m_own_charts[n] = cid;
+               m_own_ids[n] = dep;
+            }
+            obj_start = -1;
+         }
+         depth--;
+      }
+   }
+   PrintFormat("ChartControl: loaded %d owned chart(s) from %s",
+               ArraySize(m_own_charts), CHARTCTL_OWNED_FILE);
 }
 
 //+------------------------------------------------------------------+
 //| An unowned chart matching a deployment's expert+symbol+timeframe |
-//| (a prior incarnation whose stamp was lost, or a verify-timeout   |
-//| chart whose expert loaded late).                                 |
+//| (a prior incarnation from before a terminal restart, or a        |
+//| verify-timeout chart whose expert loaded late).                  |
 //+------------------------------------------------------------------+
 long CChartControl::FindAdoptableChart(const ChartCtlDeployment &dep,
                                        ChartCtlChart &charts[])
@@ -360,12 +470,18 @@ long CChartControl::FindAdoptableChart(const ChartCtlDeployment &dep,
 void CChartControl::DetachChart(const long chart_id)
 {
    PrintFormat("ChartControl: detaching chart %I64d", chart_id);
-   ChartClose(chart_id);
+   // Kept in the map on failure: the chart and its expert are still there,
+   // and the next pass tries again.
+   if(ChartClose(chart_id))
+      Release(chart_id);
+   else
+      PrintFormat("ChartControl: ChartClose(%I64d) failed (err=%d)",
+                  chart_id, GetLastError());
 }
 
 //+------------------------------------------------------------------+
-//| Enumerate all open charts and classify ownership by the          |
-//| __chartctl_id we baked into each deployment template.            |
+//| Enumerate all open charts and attribute each to its deployment   |
+//| through the ownership map.                                       |
 //+------------------------------------------------------------------+
 void CChartControl::ScanCharts(ChartCtlChart &out[])
 {
@@ -381,20 +497,10 @@ void CChartControl::ScanCharts(ChartCtlChart &out[])
       c.timeframe      = EnumToString(ChartPeriod(cid));
       c.expert         = ChartGetString(cid, CHART_EXPERT_NAME);
       c.expert_enabled = (c.expert != "");
-      c.deployment_id  = "";   // attribution below
-
-      // Attribution is by the chart comment we set at attach time
-      // (ChartSetString CHART_COMMENT = "chartctl:<id>"). We cannot read
-      // a foreign expert's inputs from MQL5, which is why the comment —
-      // not the template's __chartctl_id input — is the marker. The
-      // comment does NOT reliably survive a terminal restart (observed
-      // live 2026-07-16: one duplicate chart accumulated per reboot), so
-      // reconcile also adopts unowned exact-match charts (see
-      // FindAdoptableChart) instead of trusting this alone.
-      string cmt = ChartGetString(cid, CHART_COMMENT);
-      int p = StringFind(cmt, "chartctl:");
-      if(p >= 0)
-         c.deployment_id = StringSubstr(cmt, p + 9);
+      // We cannot read a foreign expert's inputs from MQL5, so the
+      // template's __chartctl_id input cannot mark the chart; the
+      // ownership map does.
+      c.deployment_id  = OwnerOf(cid);
 
       int n = ArraySize(out);
       ArrayResize(out, n + 1);

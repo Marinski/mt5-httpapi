@@ -86,7 +86,10 @@ def apply_webrequest():
     # inspect_options.au3. ?runas=0 launches it non-elevated for diagnostics.
     dev_script = request.args.get("script")
     if dev_script and autoit.available():
-        status, txt = autoit.run_named(dev_script, use_runas=_use_runas())
+        try:
+            status, txt = autoit.run_named(dev_script, use_runas=_use_runas())
+        except ValueError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 400
         return jsonify({"script": dev_script, "status": status, "log": txt})
 
     urls = wr.effective_urls(_cfg_dir())

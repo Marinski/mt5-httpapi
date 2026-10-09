@@ -16,6 +16,10 @@ process itself already runs elevated here (verified: AutoIt reports ``IsAdmin=1`
 so a plain, blocking ``subprocess.run`` inherits that elevation, drives MT5 fine,
 and lets us capture the exit code. A ``use_runas`` path (async ``Start-Process
 -Verb RunAs`` + log polling) is kept as a fallback for non-elevated deployments.
+
+The same machinery refreshes the Navigator (``refresh_navigator``): MT5 cannot
+load an expert copied in while it runs until the Navigator is refreshed, and
+there is no MQL5 or command-line way to do that.
 """
 from __future__ import annotations
 
@@ -233,6 +237,13 @@ def apply_urls(urls: list[str], timeout: float = 120, use_runas: bool = False) -
     with open(urlfile, "w", encoding="utf-8") as f:
         f.write("\n".join(urls))
     return _run_script("set_webrequest.au3", [urlfile], timeout, use_runas)
+
+
+def refresh_navigator(timeout: float = 60) -> tuple[str, str]:
+    """Refresh the running terminal's Navigator so it can load an .ex5 that
+    was copied into MQL5\\Experts after it started. Returns (status,
+    autoit_log); status == 'OK' on success."""
+    return _run_script("refresh_navigator.au3", [], timeout)
 
 
 def run_named(script: str, timeout: float = 60, use_runas: bool = False) -> tuple[str, str]:

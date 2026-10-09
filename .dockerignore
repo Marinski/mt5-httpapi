@@ -8,6 +8,9 @@ CLAUDE.md
 git-update.sh
 .env
 .env.*
+# Test-suite credentials (tests/real/.env, tests/live/.env) never enter an image.
+**/.env
+**/.env.*
 data/
 mt5installers/
 assets/experts/
@@ -27,3 +30,7 @@ examples/
 .plan-and-delegate/
 
 .gitleaks-export/
+
+# local caches, never part of a build
+.pytest_cache/
+.ruff_cache/

@@ -691,6 +691,12 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
         ``overwrite`` replaces the file a running deployment of that expert
         loads, so treat it like a deployment change: only on explicit user
         request.
+
+        MT5 loads only experts it has seen, so the upload also refreshes the
+        terminal's Navigator. ``navigator_refresh`` in the response: ``ok``
+        (deployable now), ``failed`` (upload the same file again to retry),
+        or ``unavailable`` (no GUI automation on that host: the terminal
+        must restart before a deployment of this expert can attach).
         """
         content = _decode_base64("content_base64", content_base64)
         query = {"overwrite": "true"} if overwrite else None
