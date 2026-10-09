@@ -2,8 +2,8 @@ name: pipeline
 
 # mt5-httpapi ships as a docker-compose / Windows-VM stack, not a single
 # pushable image, so there's no docker-image build in CI. Beyond running the
-# test suite, this pipeline publishes the skill(s) under .agents/skills/ to
-# ClawHub on tag pushes.
+# test suite, this pipeline validates the agent skill and OpenClaw plugin under
+# .agents/ on every push and publishes both to ClawHub on tag pushes.
 on:
   push:
     branches:
@@ -62,14 +62,23 @@ jobs:
       contents: write
     uses: psyb0t/reusable-github-workflows/.github/workflows/create-badges.yml@master
 
-  # Publish the skills under .agents/skills/ to ClawHub, one ClawHub slug per
-  # subdir. The `if` is load-bearing: the workflow also runs on branch pushes
-  # and pull requests now, and without it every one of those would publish.
-  # Gated on the suite so a tag with failing tests never reaches ClawHub.
-  publish-skills-to-clawhub:
+  # The mt5-httpapi skill (.agents/skills/mt5-httpapi) and the OpenClaw plugin
+  # (.agents/plugins/mt5-httpapi) on ClawHub. The reusable workflow validates
+  # both on every call and publishes only on a tag, after that validation. The
+  # skill version mirrors the tag; the plugin's comes from its package.json,
+  # which the release bumps. Gated on the suite so a failing tag never reaches
+  # ClawHub. Pull requests from forks are skipped: they get no CLAWHUB_TOKEN,
+  # and the skill dry-run needs it.
+  clawhub:
     needs: [test, lint]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
     uses: psyb0t/reusable-github-workflows/.github/workflows/clawhub-publish.yml@master
-
+    with:
+      publish_skills: true
+      publish_plugins: true
+      skill_names: '["mt5-httpapi"]'
+      plugin_names: '["mt5-httpapi"]'
     secrets:
       clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}

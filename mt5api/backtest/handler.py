@@ -46,6 +46,7 @@ from mt5api.config import (
     load_yaml_config,
     parse_duration_to_seconds,
 )
+from mt5api.jsonkeys import accept_snake_keys, with_legacy_keys
 from mt5api.logger import log
 
 RUN_LOCK = threading.Lock()
@@ -69,8 +70,11 @@ MAX_TOP_PASSES = 500
 def build_ini_route():
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 400
+    body = request.get_json(silent=True) or {}
     try:
-        ini_text = ini_builder.build_ini(request.get_json(silent=True) or {})
+        if isinstance(body, dict):
+            body = accept_snake_keys(body, ini_builder.CAMEL_CASE_FIELDS)
+        ini_text = ini_builder.build_ini(body)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return Response(ini_text, mimetype="text/plain")
@@ -87,6 +91,16 @@ def build_set_route():
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
+
+
+def _form_field(name: str, legacy_name: str) -> str | None:
+    """A form field under its snake_case name or its deprecated camelCase
+    one. Both with different values is a ValueError."""
+    value = request.form.get(name)
+    legacy = request.form.get(legacy_name)
+    if value is not None and legacy is not None and value != legacy:
+        raise ValueError(f"{name} and {legacy_name} are the same field; send one")
+    return value if value is not None else legacy
 
 
 def _load_account_config():
@@ -569,7 +583,7 @@ def run_backtest():
 
     try:
         timeout_value = (request.form.get("timeout") or "").strip()
-        top_passes = _parse_top_passes(request.form.get("topPasses"))
+        top_passes = _parse_top_passes(_form_field("top_passes", "topPasses"))
         timeout_seconds = (
             parse_duration_to_seconds(timeout_value)
             if timeout_value
@@ -1010,7 +1024,7 @@ def get_tail(job_id):
     tester_log_dir = os.path.join(TERMINAL_DIR, "Tester", "logs")
     tester_log_file, tester_log = _tail_dir_log(tester_log_dir, n_lines)
 
-    return jsonify({
+    return jsonify(with_legacy_keys({
         "jobId": job_id,
         "status": job.get("status"),
         "startedAt": job.get("startedAt"),
@@ -1021,4 +1035,4 @@ def get_tail(job_id):
         "testerLog": tester_log,
         "terminalLogFile": os.path.basename(terminal_log_file) if terminal_log_file else None,
         "testerLogFile": os.path.basename(tester_log_file) if tester_log_file else None,
-    })
+    }))

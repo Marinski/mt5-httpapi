@@ -53,3 +53,36 @@ def test_history_answers_a_list(rest):
 
     assert isinstance(rest.get("/history/deals", params=window), list)
     assert isinstance(rest.get("/history/orders", params=window), list)
+
+
+def _build_ini(rest, body: dict) -> str:
+    resp = rest.request("POST", "/backtest/build-ini", json=body)
+    return resp.text
+
+
+def test_build_ini_takes_snake_case_and_legacy_camel_case_fields(rest, settings):
+    """Builds only an INI; nothing is run."""
+    base = {"symbol": settings["symbol"], "timeframe": "H1", "expert": "Probe.ex5"}
+
+    snake = _build_ini(rest, {**base, "from_date": "2026-01-01", "to_date": "2026-02-01"})
+    camel = _build_ini(rest, {**base, "fromDate": "2026-01-01", "toDate": "2026-02-01"})
+
+    assert "FromDate=2026.01.01" in snake
+    assert "ToDate=2026.02.01" in snake
+    assert snake == camel
+
+
+def test_build_ini_refuses_a_field_given_twice_with_different_values(rest, settings):
+    body = {
+        "symbol": settings["symbol"],
+        "timeframe": "H1",
+        "expert": "Probe.ex5",
+        "from_date": "2026-01-01",
+        "fromDate": "2025-01-01",
+        "to_date": "2026-02-01",
+    }
+
+    resp = rest.session.post(f"{rest.base}/backtest/build-ini", json=body, timeout=60)
+
+    assert resp.status_code == 400
+    assert "from_date and fromDate" in resp.json()["error"]

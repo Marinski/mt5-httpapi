@@ -18,7 +18,7 @@ _HTTP_BAD_GATEWAY = 502
 def _skip_if_wickworks_unreachable(resp):
     if resp.status_code != _HTTP_BAD_GATEWAY:
         return
-    if "wickworksStatus" in resp.json():
+    if "wickworks_status" in resp.json():
         return
     pytest.skip(f"wickworks unavailable: {resp.text[:200]}")
 

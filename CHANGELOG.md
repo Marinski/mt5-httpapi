@@ -6,6 +6,22 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.24.0]: 2026-10-09
+
+### Added
+
+- **`AGENTS.md` and `.agents/rules/`.** `AGENTS.md` is the guide for coding agents working on this repository: what each component does, how code reaches the VM, the layout, the Make targets and test layers, the conventions, and how releases work. `.agents/rules/` holds the project rules, one file per topic (architecture, Python code, API design, MCP, testing, the Windows VM, security, docs and releases, chat), each rule with a stable ID such as `API1` or `TST3`.
+
+### Changed
+
+- **CI validates the ClawHub skill and plugin on every push.** The pipeline's ClawHub job names the `mt5-httpapi` skill and plugin explicitly and runs the reusable workflow's validation on every push and same-repository pull request, not only on tags. Publishing is still tag-only and still waits for the test and lint jobs. Pull requests from forks skip it, since they get no ClawHub token.
+
+- **JSON keys are snake_case everywhere.** The backtest routes (`POST /backtest`, `GET /backtest/<job_id>`, `GET /backtest/<job_id>/tail`, including the `summary` and `optimization_cache` objects) and the TA route's wickworks error answered in camelCase while everything else, including the MT5 fields the API passes through, used snake_case. They now answer in snake_case (`job_id`, `started_at`, `poll_after_seconds`, `net_profit`, `wickworks_status`, ...). `POST /backtest/build-ini` accepts its fields in snake_case (`from_date`, `last_days`, `latency_ms`, ...) and `POST /backtest` accepts `top_passes`. Optimization result rows keep the report's column names and the EA's input names as they are.
+
+### Deprecated
+
+- **The camelCase keys.** Responses still carry every old camelCase key next to its snake_case twin, and request bodies still accept camelCase, so existing clients keep working. Both will be removed in a later release; move clients to the snake_case names now. Sending a field under both names with different values is refused with 400.
+
 ## [v4.23.0]: 2026-10-09
 
 ### Added

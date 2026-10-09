@@ -215,16 +215,45 @@ def test_public_payload_shape(tmp_jobs_dir):
         "exitCode": 0,
     }
     payload = jobs.public_payload(job)
-    assert payload["jobId"] == "xyz"
-    assert payload["statusUrl"] == "/backtest/xyz"
-    assert payload["reportUrl"] == "/backtest/xyz/report"
-    assert payload["logUrl"] == "/backtest/xyz/log"
-    assert payload["summary"] == {"netProfit": 1.0}
-    assert payload["optimizationType"] == 2
-    assert payload["optimizationResults"] == [{"Pass": 7, "Result": 12.5}]
-    assert payload["optimizationCache"] == {"name": "cache.opt", "rowCount": 27}
-    assert payload["exitCode"] == 0
-    assert "queuePosition" not in payload  # completed → no position
+    assert payload["job_id"] == "xyz"
+    assert payload["status_url"] == "/backtest/xyz"
+    assert payload["report_url"] == "/backtest/xyz/report"
+    assert payload["log_url"] == "/backtest/xyz/log"
+    assert payload["summary"] == {"net_profit": 1.0, "netProfit": 1.0}
+    assert payload["optimization_type"] == 2
+    # Rows are data keyed by the report's columns and the EA's inputs.
+    assert payload["optimization_results"] == [{"Pass": 7, "Result": 12.5}]
+    assert payload["optimization_cache"] == {
+        "name": "cache.opt",
+        "row_count": 27,
+        "rowCount": 27,
+    }
+    assert payload["exit_code"] == 0
+    assert "queue_position" not in payload  # completed → no position
+
+
+def test_public_payload_keeps_every_legacy_camel_case_key(tmp_jobs_dir):
+    """The camelCase names are deprecated but still sent, each with the
+    same value as its snake_case twin."""
+    job = {
+        "jobId": "legacy",
+        "status": "running",
+        "submittedAt": "2026-05-12T10:00:00Z",
+        "durationSeconds": 3.0,
+        "optimizationType": 0,
+    }
+    payload = jobs.public_payload(job)
+
+    pairs = {
+        "jobId": "job_id",
+        "submittedAt": "submitted_at",
+        "durationSeconds": "duration_seconds",
+        "statusUrl": "status_url",
+        "pollAfterSeconds": "poll_after_seconds",
+        "optimizationType": "optimization_type",
+    }
+    for camel, snake in pairs.items():
+        assert payload[camel] == payload[snake], camel
 
 
 def test_store_and_load_job_roundtrip(tmp_jobs_dir):

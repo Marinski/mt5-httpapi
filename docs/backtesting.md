@@ -10,9 +10,9 @@ Build Strategy Tester files, launch the job, watch it run, and pull the reports 
 - [Regenerate the warm-up expert](#regenerating-mt5systemwarmupex5)
 - [Build an INI](#post-backtestbuild-ini)
 - [Submit a job](#post-backtest)
-- [Poll job status](#get-backtestjobid)
-- [Download report and log](#get-backtestjobidreport--log)
-- [Read live diagnostic tails](#get-backtestjobidtail)
+- [Poll job status](#get-backtestjob_id)
+- [Download report and log](#get-backtestjob_idreport--log)
+- [Read live diagnostic tails](#get-backtestjob_idtail)
 - [Worked example](#worked-example)
 - [Optimization example](#optimization-example)
 - [Optimization guide](backtest-optimization.md)
@@ -21,6 +21,9 @@ Build Strategy Tester files, launch the job, watch it run, and pull the reports 
 ## Backtest API
 
 This is the whole Strategy Tester pipeline over HTTP: build the ugly MT5 files, submit them, poll the job, then grab the useful shit when it finishes.
+Responses below use snake_case field names. The old camelCase names still
+show up alongside them in responses, and request bodies still accept either
+one, but the camelCase names are deprecated and will be removed.
 `POST /backtest` execution requires a terminal whose `config.yaml` entry has
 `mode: backtest`. The two stateless builders, `POST /backtest/build-ini` and
 `POST /backtest/build-set`, work in either mode because they only transform
@@ -42,10 +45,10 @@ symbols, set `symbol_suffix: ""` explicitly.
 | POST | `/backtest/build-ini` | Build a complete `tester.ini` from JSON. |
 | POST | `/backtest/build-set` | Build an MT5 `.set` parameter file from JSON. |
 | POST | `/backtest` | Submit an INI plus expert and optional set file. |
-| GET | `/backtest/<jobId>` | Poll job state and parsed results. |
-| GET | `/backtest/<jobId>/report` | Download the raw MT5 report. |
-| GET | `/backtest/<jobId>/log` | Download the terminal log. |
-| GET | `/backtest/<jobId>/tail` | Read live diagnostic tails while a job runs. |
+| GET | `/backtest/<job_id>` | Poll job state and parsed results. |
+| GET | `/backtest/<job_id>/report` | Download the raw MT5 report. |
+| GET | `/backtest/<job_id>/log` | Download the terminal log. |
+| GET | `/backtest/<job_id>/tail` | Read live diagnostic tails while a job runs. |
 
 For a plain backtest, leave `[Tester].Optimization=0` or omit it. For an
 optimization, set `[Tester].Optimization` to one of:
@@ -69,7 +72,7 @@ Optimization modes do not all emit the same MT5 artifacts:
 Mode `3` is the odd bastard out. MT5 still writes a report file, but it is the
 header-only `.symbols.xml` variant and the actual pass rows live in the tester
 cache. mt5-httpapi parses that cache, recovers pass-to-symbol mappings from the
-agent logs, and exposes the discovered cache artifact in `optimizationCache`.
+agent logs, and exposes the discovered cache artifact in `optimization_cache`.
 If you want the full mode-by-mode request/response examples, see
 [`docs/backtest-optimization.md`](backtest-optimization.md).
 
@@ -243,20 +246,20 @@ Body (JSON):
 | `symbol`           | yes      | e.g. `NZDJPY`                                      |
 | `timeframe`        | yes      | `M1` `M5` `M15` `H1` `D1` … (21 standard values)   |
 | `expert`           | yes      | filename ending in `.ex5`                          |
-| `fromDate`+`toDate`| one of   | `YYYY-MM-DD`                                       |
-| `lastYears`        | one of   | integer; window ends today UTC                     |
-| `lastDays`         | one of   | integer                                            |
+| `from_date`+`to_date`| one of   | `YYYY-MM-DD`                                       |
+| `last_years`        | one of   | integer; window ends today UTC                     |
+| `last_days`         | one of   | integer                                            |
 | `modelling`        | no       | `every-tick` `1m-ohlc` `open-prices` `real-ticks`  |
-| `latencyMs`        | no       | integer milliseconds → `ExecutionMode`             |
+| `latency_ms`        | no       | integer milliseconds → `ExecutionMode`             |
 | `deposit`          | no       | default `10000`                                    |
 | `currency`         | no       | default `USD`                                      |
 | `leverage`         | no       | default `100`, written as `1:N`                    |
-| `expertParameters` | no       | `.set` filename                                    |
+| `expert_parameters` | no       | `.set` filename                                    |
 | `optimization`     | no       | `0` off, `1` slow complete, `2` genetic, `3` Market Watch symbols |
-| `optimizationCriterion` | no  | `0..7`; default `0` (max balance)                 |
-| `forwardMode`      | no       | `0..4`; default `0`                               |
+| `optimization_criterion` | no  | `0..7`; default `0` (max balance)                 |
+| `forward_mode`      | no       | `0..4`; default `0`                               |
 | `visual`           | no       | truthy enables visual tester mode; default off    |
-| `reportName`       | no       | default `backtest-report.htm` for backtests, `optimization-report.xml` for optimizations |
+| `report_name`       | no       | default `backtest-report.htm` for backtests, `optimization-report.xml` for optimizations |
 
 Returns `text/plain` with the generated INI.
 
@@ -267,12 +270,12 @@ Example JSON for an optimization INI:
   "symbol": "GBPUSD",
   "timeframe": "M15",
   "expert": "MyEA.ex5",
-  "lastYears": 3,
+  "last_years": 3,
   "modelling": "open-prices",
-  "expertParameters": "myea-optimizer.set",
+  "expert_parameters": "myea-optimizer.set",
   "optimization": 2,
-  "optimizationCriterion": 5,
-  "reportName": "gbpusd-m15-sharpe-search"
+  "optimization_criterion": 5,
+  "report_name": "gbpusd-m15-sharpe-search"
 }
 ```
 
@@ -287,26 +290,26 @@ Multipart form fields:
 | `expert_name`  | one of   | filename in `assets/experts/`                                  |
 | `set`          | no       | `.set` upload                                                  |
 | `set_name`     | no       | filename in `assets/sets/`                                     |
-| `topPasses`    | no       | For optimization jobs, keep the top `1..500` parsed XML passes in the status payload. Default `50`. |
+| `top_passes`    | no       | For optimization jobs, keep the top `1..500` parsed XML passes in the status payload. Default `50`. |
 | `timeout`      | no       | Duration string override (`"30m"`, `"6h"`, `"3h30m"`). Defaults to `backtest_timeout` from `config.yaml`, then hardcoded `6h`. Must be positive and at most `BACKTEST_MAX_TIMEOUT` (env, default `48h`) — out-of-range values are rejected with `400` rather than silently clamped, since the terminal's run lock is held for the whole timeout. |
 
 Responds `202 Accepted` with `Retry-After` header and the queued job payload:
 
 ```json
 {
-  "jobId": "b3f7…",
+  "job_id": "b3f7…",
   "status": "queued",
   "broker": "darwinex",
   "account": "live",
-  "submittedAt": "2026-05-12T10:00:00Z",
-  "statusUrl": "/backtest/b3f7…",
-  "reportUrl": "/backtest/b3f7…/report",
-  "logUrl": "/backtest/b3f7…/log",
-  "pollAfterSeconds": 60,
-  "optimizationType": 0,
-  "optimizationResults": null,
-  "optimizationCache": null,
-  "queuePosition": 1
+  "submitted_at": "2026-05-12T10:00:00Z",
+  "status_url": "/backtest/b3f7…",
+  "report_url": "/backtest/b3f7…/report",
+  "log_url": "/backtest/b3f7…/log",
+  "poll_after_seconds": 60,
+  "optimization_type": 0,
+  "optimization_results": null,
+  "optimization_cache": null,
+  "queue_position": 1
 }
 ```
 
@@ -315,18 +318,18 @@ overwritten with the credentials from `config.yaml` for the request's
 broker/account. The expert path is rewritten to `Uploaded\<basename>` and the
 set file is namespaced per job to avoid collisions.
 
-### `GET /backtest/{jobId}`
+### `GET /backtest/{job_id}`
 
 Status payload. `status` ∈ `queued` `running` `completed` `failed`. When
 completed, includes a `summary` object parsed from the HTML report
-(`netProfit`, `profitFactor`, `recoveryFactor`, `expectedPayoff`, `sharpeRatio`,
-`maxDrawdown`, `totalTrades`, `profitTrades`, `lossTrades`, …).
+(`net_profit`, `profit_factor`, `recovery_factor`, `expected_payoff`, `sharpe_ratio`,
+`max_drawdown`, `total_trades`, `profit_trades`, `loss_trades`, …).
 
 For optimization jobs, the payload instead includes:
 
-- `optimizationType` — the submitted MT5 optimization mode (`1`, `2`, or `3`)
-- `optimizationResults` — a parsed top-N list sorted by `Result` descending
-- `optimizationCache` — cache artifact metadata when results came from an MT5 `.opt` cache file
+- `optimization_type`: the submitted MT5 optimization mode (`1`, `2`, or `3`)
+- `optimization_results`: a parsed top-N list sorted by `Result` descending
+- `optimization_cache`: cache artifact metadata when results came from an MT5 `.opt` cache file
 
 Result source depends on the submitted mode:
 
@@ -336,22 +339,22 @@ Result source depends on the submitted mode:
 The API keeps the MT5 column names as-is. If the XML export includes columns
 such as `Profit`, `Profit Factor`, `Expected Payoff`, `Drawdown`,
 `Recovery Factor`, `Sharpe Ratio`, or optimized input names, those same fields
-appear in each `optimizationResults` row.
+appear in each `optimization_results` row.
 
 Example optimization status payload:
 
 ```json
 {
-  "jobId": "8c2a…",
+  "job_id": "8c2a…",
   "status": "completed",
   "broker": "darwinex",
   "account": "tester",
-  "reportName": "gbpusd-m15-sharpe-search.xml",
-  "reportUrl": "/backtest/8c2a…/report",
-  "logUrl": "/backtest/8c2a…/log",
-  "optimizationType": 2,
-  "optimizationCache": null,
-  "optimizationResults": [
+  "report_name": "gbpusd-m15-sharpe-search.xml",
+  "report_url": "/backtest/8c2a…/report",
+  "log_url": "/backtest/8c2a…/log",
+  "optimization_type": 2,
+  "optimization_cache": null,
+  "optimization_results": [
     {
       "Pass": 184,
       "Result": 2.41,
@@ -372,24 +375,24 @@ Example mode-3 optimization payload:
 
 ```json
 {
-  "jobId": "b05643…",
+  "job_id": "b05643…",
   "status": "completed",
   "broker": "darwinex",
   "account": "live",
-  "reportName": "mode3-gbpcad-m15-last5y-rerun5.symbols.xml",
-  "reportUrl": "/backtest/b05643…/report",
-  "logUrl": "/backtest/b05643…/log",
-  "optimizationType": 3,
-  "optimizationCache": {
+  "report_name": "mode3-gbpcad-m15-last5y-rerun5.symbols.xml",
+  "report_url": "/backtest/b05643…/report",
+  "log_url": "/backtest/b05643…/log",
+  "optimization_type": 3,
+  "optimization_cache": {
     "name": "EA Studio GBPCAD M15 1615044595.all_symbols.M15.20210525.20260525.22.788ECDD113BA3097A58EF888EBEFF9CA.opt",
     "pattern": "EA Studio GBPCAD M15 1615044595.all_symbols.M15.20210525.20260525.*.opt",
     "build": "22",
-    "cacheHash": "788ECDD113BA3097A58EF888EBEFF9CA",
-    "rowCount": 28,
-    "symbolComponent": "all_symbols",
+    "cache_hash": "788ECDD113BA3097A58EF888EBEFF9CA",
+    "row_count": 28,
+    "symbol_component": "all_symbols",
     "period": "M15"
   },
-  "optimizationResults": [
+  "optimization_results": [
     {
       "Pass": 21,
       "Symbol": "GBPJPY",
@@ -407,18 +410,18 @@ Example mode-3 optimization payload:
 }
 ```
 
-### `GET /backtest/{jobId}/report` & `/log`
+### `GET /backtest/{job_id}/report` & `/log`
 
 Stream the raw report and terminal log file. Backtests return the MT5 HTML
 report. Optimizations return the MT5 XML spreadsheet export. `404` until the
 job finishes.
 
-### `GET /backtest/{jobId}/tail`
+### `GET /backtest/{job_id}/tail`
 
 Return the live diagnostic guts for queued, running, or finished jobs as JSON.
 `?lines=N` controls the terminal/tester journal depth and is clamped to
-`10..1000` (default `200`). The response includes `runLog`, `terminalLog`,
-`testerLog`, status/timestamps, and the selected journal filenames.
+`10..1000` (default `200`). The response includes `run_log`, `terminal_log`,
+`tester_log`, status/timestamps, and the selected journal filenames.
 
 ### Worked example
 
@@ -429,7 +432,7 @@ export TOK=changeme-mt5-httpapi-token
 # 1. Build INI for a 5-year NZDJPY M15 open-prices run with 5 ms latency.
 curl -sS -X POST "$URL/backtest/build-ini" \
   -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
-  -d '{"symbol":"NZDJPY","timeframe":"M15","expert":"EA Studio NZDJPY M15 1615044595.ex5","lastYears":5,"modelling":"open-prices","latencyMs":5,"expertParameters":"ea studio nzdjpy m15 1615044595.set"}' \
+  -d '{"symbol":"NZDJPY","timeframe":"M15","expert":"EA Studio NZDJPY M15 1615044595.ex5","last_years":5,"modelling":"open-prices","latency_ms":5,"expert_parameters":"ea studio nzdjpy m15 1615044595.set"}' \
   > tester.ini
 
 # 2. Submit using a host-managed expert + set already sitting in assets/.
@@ -438,7 +441,7 @@ JOB=$(curl -sS -X POST "$URL/backtest" \
   -F "ini=@tester.ini" \
   -F "expert_name=EA Studio NZDJPY M15 1615044595.ex5" \
   -F "set_name=ea studio nzdjpy m15 1615044595.set" \
-  | jq -r .jobId)
+  | jq -r .job_id)
 
 # 3. Poll until done.
 while :; do
@@ -468,16 +471,16 @@ trap 'rm -f "$tmp_ini" "$job_json"' EXIT && \
 curl -sS -X POST "$URL/backtest/build-ini" \
   -H "Authorization: Bearer $TOK" \
   -H "Content-Type: application/json" \
-  -d '{"symbol":"GBPCAD","timeframe":"M15","expert":"EA Studio GBPCAD M15 1615044595.ex5","lastYears":1,"modelling":"open-prices","expertParameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set","optimization":1,"optimizationCriterion":0,"reportName":"gbpcad-m15-last1y-openprices-opt"}' \
+  -d '{"symbol":"GBPCAD","timeframe":"M15","expert":"EA Studio GBPCAD M15 1615044595.ex5","last_years":1,"modelling":"open-prices","expert_parameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set","optimization":1,"optimization_criterion":0,"report_name":"gbpcad-m15-last1y-openprices-opt"}' \
   > "$tmp_ini" && \
 curl -sS -X POST "$URL/backtest" \
   -H "Authorization: Bearer $TOK" \
   -F "ini=@$tmp_ini;filename=tester.ini" \
   -F "expert_name=EA Studio GBPCAD M15 1615044595.ex5" \
   -F "set_name=ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set" \
-  -F "topPasses=20" \
+  -F "top_passes=20" \
   > "$job_json" && \
-JOB=$(jq -r '.jobId' "$job_json") && \
+JOB=$(jq -r '.job_id' "$job_json") && \
 echo "Submitted job: $JOB" && \
 while :; do \
   STATUS_JSON=$(curl -sS -H "Authorization: Bearer $TOK" "$URL/backtest/$JOB") && \
@@ -487,7 +490,7 @@ while :; do \
   sleep 10; \
 done && \
 echo && echo "Final API summary:" && \
-printf '%s\n' "$STATUS_JSON" | jq '{jobId,status,exitCode,durationSeconds,optimizationResults}' && \
+printf '%s\n' "$STATUS_JSON" | jq '{job_id,status,exit_code,duration_seconds,optimization_results}' && \
 echo && echo "Report preview:" && \
 curl -sS -H "Authorization: Bearer $TOK" "$URL/backtest/$JOB/report" \
   | grep -E '(<Row>|<Cell><Data ss:Type="String">|<Cell><Data ss:Type="Number">|<Cell ss:StyleID="[^"]+"><Data ss:Type="Number">)' \
@@ -498,5 +501,5 @@ Notes:
 
 - Use a terminal configured with `mode: backtest`, not a live terminal namespace.
 - Optimization results depend on the ranges encoded in the `.set` file. If no ranges are enabled in MT5, optimization is not meaningful.
-- `optimizationResults` is a convenience summary. For modes `1` and `2`, the raw XML at `/report` remains the full source of truth. For mode `3`, the parsed `.opt` cache plus `optimizationCache` metadata are the best debugging source because `/report` is the MT5 `.symbols.xml` header export.
-- If a metric you expect is missing from `optimizationResults`, first check the raw XML report. The API preserves MT5's exported columns rather than remapping them to a fixed schema.
+- `optimization_results` is a convenience summary. For modes `1` and `2`, the raw XML at `/report` remains the full source of truth. For mode `3`, the parsed `.opt` cache plus `optimization_cache` metadata are the best debugging source because `/report` is the MT5 `.symbols.xml` header export.
+- If a metric you expect is missing from `optimization_results`, first check the raw XML report. The API preserves MT5's exported columns rather than remapping them to a fixed schema.

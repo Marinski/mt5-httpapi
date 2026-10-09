@@ -32,6 +32,20 @@ VALID_TIMEFRAMES = (
 )
 
 # MT5 reads tester dates as "YYYY.MM.DD".
+# The body fields build_ini reads under camelCase names. The route also
+# accepts each one in snake_case (from_date, last_days, ...).
+CAMEL_CASE_FIELDS = (
+    "fromDate",
+    "toDate",
+    "lastDays",
+    "lastYears",
+    "optimizationCriterion",
+    "expertParameters",
+    "latencyMs",
+    "reportName",
+    "forwardMode",
+)
+
 _DATE_FMT_OUT = "%Y.%m.%d"
 _DATE_FMT_IN = "%Y-%m-%d"
 

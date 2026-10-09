@@ -28,6 +28,7 @@ from mt5api.config import (
     load_yaml_config,
     normalize_instance,
 )
+from mt5api.jsonkeys import with_legacy_keys
 from mt5api.logger import log
 
 JOB_LOCK = threading.Lock()
@@ -156,10 +157,14 @@ def public_payload(job: dict) -> dict:
     if job.get("error"):
         payload["error"] = job["error"]
     if job.get("summary") is not None:
-        payload["summary"] = job["summary"]
+        payload["summary"] = with_legacy_keys(job["summary"])
     if job.get("exitCode") is not None:
         payload["exitCode"] = job["exitCode"]
-    return payload
+    if payload["optimizationCache"]:
+        payload["optimizationCache"] = with_legacy_keys(payload["optimizationCache"])
+    # optimizationResults rows are keyed by the report's own columns and the
+    # EA's input names: data, left as they are.
+    return with_legacy_keys(payload)
 
 
 def _configured_terminals(broker: str, account: str) -> int:

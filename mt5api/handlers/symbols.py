@@ -19,6 +19,7 @@ from mt5api.config import (
     WICKWORKS_TIMEOUT_SECONDS,
     WICKWORKS_URL,
 )
+from mt5api.jsonkeys import with_legacy_keys
 from mt5api.logger import log
 from mt5api.mt5client import (
     broker_to_utc_ms,
@@ -449,11 +450,11 @@ def get_rates_ta(symbol):
         log.warning("wickworks call failed: %s", conn_err)
         return jsonify({"error": conn_err}), 502
     if status >= 400:
-        return jsonify({
+        return jsonify(with_legacy_keys({
             "error": "wickworks rejected request",
             "wickworksStatus": status,
             "wickworksBody": ta_body,
-        }), 502
+        })), 502
 
     return jsonify({
         "symbol": symbol,
