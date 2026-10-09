@@ -6,6 +6,17 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.23.0]: 2026-10-09
+
+### Added
+
+- **File listings carry what `ls -al` shows.** Each entry now has `size_human`, `mode`, the Windows `attributes` (`readonly`, `hidden`, `system`, `archive`, ...), `nlink`, created, modified and accessed times as epoch seconds and as UTC ISO 8601, and `is_symlink`, with `link_target` and `link_outside_tree` for a symlink or junction. The listing itself adds `count` and `total_size`. See [docs/files.md](docs/files.md#endpoints).
+- `make test-live` now covers the file API's REST routes through nginx against the terminal's real file system: binary, multipart and urlencoded uploads, a 20 MiB upload, the 25 MiB cap, overwrites, case-insensitive paths, zip extraction into the terminal tree, bad and zip-slip archives, protected paths, Windows device names, recursive deletes and the listing fields.
+
+### Fixed
+
+- A symlink inside a listed directory that pointed out of the tree made the whole listing fail with 400. It is now listed, flagged `link_outside_tree`, and neither readable nor writable.
+
 ## [v4.22.1]: 2026-10-09
 
 ### Fixed

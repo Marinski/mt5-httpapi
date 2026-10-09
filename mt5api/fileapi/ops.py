@@ -15,6 +15,7 @@ import shutil
 import stat
 import zipfile
 import zlib
+from datetime import datetime, timezone
 
 from mt5api.fileapi.errors import (
     ArchiveTooLarge,
@@ -32,6 +33,26 @@ ENTRY_DIR = "dir"
 _CHUNK_BYTES = 1024 * 1024
 _ZIP_FLAG_ENCRYPTED = 0x1
 _ZIP_UNIX_MODE_SHIFT = 16
+
+_SIZE_STEP = 1024
+_SIZE_UNITS = ("", "K", "M", "G", "T")
+
+ATTRIBUTE_READONLY = "readonly"
+ATTRIBUTE_HIDDEN = "hidden"
+# Windows FILE_ATTRIBUTE_* bits (os.stat_result.st_file_attributes).
+_WINDOWS_ATTRIBUTES = (
+    (0x1, ATTRIBUTE_READONLY),
+    (0x2, ATTRIBUTE_HIDDEN),
+    (0x4, "system"),
+    (0x20, "archive"),
+    (0x100, "temporary"),
+    (0x200, "sparse"),
+    (0x400, "reparse_point"),
+    (0x800, "compressed"),
+    (0x1000, "offline"),
+    (0x2000, "not_content_indexed"),
+    (0x4000, "encrypted"),
+)
 
 
 def _hasher():
@@ -54,18 +75,97 @@ def _join(parent: str, child: str) -> str:
     return f"{parent}/{child}" if parent else child
 
 
+def _iso(timestamp: float) -> str:
+    moment = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _human_size(size: int) -> str:
+    """`ls -h` style: 812, 4.2K, 1.3M, 2.0G."""
+    value = float(size)
+    for unit in _SIZE_UNITS:
+        if value < _SIZE_STEP or unit == _SIZE_UNITS[-1]:
+            return f"{int(value)}" if unit == "" else f"{value:.1f}{unit}"
+        value /= _SIZE_STEP
+    return f"{size}"
+
+
+def _attributes(name: str, info: os.stat_result) -> list[str]:
+    """Windows file attributes by name (readonly, hidden, system, ...).
+
+    Off Windows there are none to read, so a dot-name counts as hidden and a
+    file without a write bit as readonly, the closest equivalents.
+    """
+    flags = getattr(info, "st_file_attributes", None)
+    if flags is None:
+        derived = []
+        if not info.st_mode & stat.S_IWUSR:
+            derived.append(ATTRIBUTE_READONLY)
+        if name.startswith("."):
+            derived.append(ATTRIBUTE_HIDDEN)
+        return derived
+    return [label for flag, label in _WINDOWS_ATTRIBUTES if flags & flag]
+
+
+def _created(info: os.stat_result) -> float:
+    """Creation time: st_birthtime where the platform has it, else st_ctime,
+    which is the creation time on Windows."""
+    return getattr(info, "st_birthtime", info.st_ctime)
+
+
 def _entry(tree: Tree, path: Resolved) -> dict:
-    info = os.stat(path.full)
-    is_dir = stat.S_ISDIR(info.st_mode)
-    return {
+    """One `ls -al` style entry. Describes a symlink itself (lstat) and
+    reports where it points; one leading out of the tree is listed but
+    neither readable nor writable here."""
+    info = os.lstat(path.full)
+    is_link = stat.S_ISLNK(info.st_mode) or _is_junction(path.full)
+    target_info = info
+    escapes = False
+    if is_link:
+        escapes = not tree.contains(path.full)
+        try:
+            target_info = os.stat(path.full)
+        except OSError:
+            target_info = info
+    is_dir = stat.S_ISDIR(target_info.st_mode)
+    size = 0 if is_dir else target_info.st_size
+    accessible = not escapes and not tree.is_hidden(path)
+    created = _created(info)
+    entry = {
         "name": os.path.basename(path.full),
         "path": path.rel,
         "type": ENTRY_DIR if is_dir else ENTRY_FILE,
-        "size": 0 if is_dir else info.st_size,
+        "size": size,
+        "size_human": _human_size(size),
+        "mode": stat.filemode(info.st_mode),
+        "attributes": _attributes(os.path.basename(path.full), info),
+        "nlink": info.st_nlink,
         "modified_at": int(info.st_mtime),
-        "readable": not tree.is_hidden(path),
-        "writable": not tree.is_hidden(path) and not tree.is_readonly(path),
+        "modified": _iso(info.st_mtime),
+        "created_at": int(created),
+        "created": _iso(created),
+        "accessed_at": int(info.st_atime),
+        "accessed": _iso(info.st_atime),
+        "is_symlink": is_link,
+        "readable": accessible,
+        "writable": accessible and not tree.is_readonly(path),
     }
+    if is_link:
+        entry["link_target"] = _link_target(path.full)
+        entry["link_outside_tree"] = escapes
+    return entry
+
+
+def _is_junction(full: str) -> bool:
+    is_junction = getattr(os.path, "isjunction", None)
+    return bool(is_junction and is_junction(full))
+
+
+def _link_target(full: str) -> str | None:
+    try:
+        return os.readlink(full)
+    except OSError:
+        return None
 
 
 def kind(tree: Tree, raw: str) -> tuple[Resolved, str]:
@@ -84,15 +184,29 @@ def kind(tree: Tree, raw: str) -> tuple[Resolved, str]:
 
 
 def list_dir(tree: Tree, path: Resolved) -> dict:
-    """One directory's entries, directories first, then by name."""
+    """One directory's entries, directories first, then by name.
+
+    Entries are described as they are on disk, without Tree.resolve, so a
+    symlink leading out of the tree shows up (flagged) instead of failing
+    the whole listing.
+    """
     entries = []
     for name in os.listdir(path.full):
         if name.startswith(STAGING_PREFIX):
             continue
-        child = tree.resolve(_join(path.rel, name))
-        entries.append(_entry(tree, child))
+        child = Resolved(rel=_join(path.rel, name), full=os.path.join(path.full, name))
+        try:
+            entries.append(_entry(tree, child))
+        except OSError as err:
+            log.warning("files: could not stat %s:%s: %s", tree.name, child.rel, err)
     entries.sort(key=lambda item: (item["type"] != ENTRY_DIR, item["name"].lower()))
-    return {"tree": tree.name, "path": path.rel, "entries": entries}
+    return {
+        "tree": tree.name,
+        "path": path.rel,
+        "count": len(entries),
+        "total_size": sum(entry["size"] for entry in entries),
+        "entries": entries,
+    }
 
 
 def readable_file(tree: Tree, path: Resolved) -> str:

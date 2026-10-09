@@ -825,9 +825,12 @@ def _register_files_tools(mcp: FastMCP) -> None:
         against, where shared ``.mqh`` libraries go. ``path``: relative to
         the tree root, ``/``-separated; empty lists the root.
 
-        Each entry has ``name``, ``path``, ``type`` (``file`` or ``dir``),
-        ``size``, ``modified_at`` and whether it is ``readable`` and
-        ``writable`` through this API.
+        Each entry carries what ``ls -al`` shows: ``name``, ``path``,
+        ``type`` (``file`` or ``dir``), ``size`` and ``size_human``,
+        ``mode``, the Windows ``attributes``, ``nlink``, created, modified
+        and accessed times (epoch ``*_at`` and ISO), ``is_symlink`` (with
+        ``link_target``), and whether it is ``readable`` and ``writable``
+        through this API.
         """
         url = _file_url(tree, path)
         status, content_type, data = await _call_bytes("GET", url)

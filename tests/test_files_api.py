@@ -77,6 +77,74 @@ def test_the_root_lists_with_access_flags(client):
     assert names.index("MQL5") < names.index("terminal64.exe"), "directories first"
 
 
+def test_entries_carry_ls_style_metadata(client, trees):
+    target = trees["terminal"] / "logs" / "20261009.log"
+    os.utime(target, (1_700_000_000, 1_700_000_100))
+    os.chmod(target, 0o444)
+
+    body = client.get("/files/logs").get_json()
+
+    assert body["count"] == 1
+    assert body["total_size"] == target.stat().st_size
+    (entry,) = body["entries"]
+    assert entry["mode"] == "-r--r--r--"
+    assert entry["attributes"] == ["readonly"]
+    assert entry["nlink"] == 1
+    assert entry["modified_at"] == 1_700_000_100
+    assert entry["modified"] == "2023-11-14T22:15:00Z"
+    assert entry["accessed_at"] == 1_700_000_000
+    assert entry["accessed"] == "2023-11-14T22:13:20Z"
+    assert isinstance(entry["created_at"], int)
+    assert entry["created"].endswith("Z")
+    assert entry["is_symlink"] is False
+    assert "link_target" not in entry
+    assert entry["size_human"] == str(entry["size"])
+
+
+@pytest.mark.parametrize(
+    ("size", "human"),
+    [(0, "0"), (1023, "1023"), (1024, "1.0K"), (4300, "4.2K"), (1_363_149, "1.3M"),
+     (3 * 1024**3, "3.0G")],
+)
+def test_sizes_read_like_ls_h(size, human):
+    assert ops._human_size(size) == human
+
+
+def test_a_directory_entry_reads_as_one(client):
+    entries = {e["name"]: e for e in client.get("/files").get_json()["entries"]}
+
+    assert entries["MQL5"]["mode"].startswith("d")
+    assert entries["MQL5"]["size"] == 0
+    assert entries["MQL5"]["size_human"] == "0"
+
+
+def test_a_symlink_out_of_the_tree_is_listed_but_not_reachable(client, trees, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, trees["terminal"] / "MQL5" / "Files" / "link")
+
+    r = client.get("/files/MQL5/Files")
+
+    assert r.status_code == 200
+    link = next(e for e in r.get_json()["entries"] if e["name"] == "link")
+    assert link["is_symlink"] is True
+    assert link["link_target"] == str(outside)
+    assert link["link_outside_tree"] is True
+    assert link["readable"] is False
+    assert link["writable"] is False
+
+
+def test_a_symlink_inside_the_tree_is_listed_as_reachable(client, trees):
+    os.symlink(trees["terminal"] / "logs", trees["terminal"] / "MQL5" / "Files" / "logs-link")
+
+    entries = client.get("/files/MQL5/Files").get_json()["entries"]
+
+    link = next(e for e in entries if e["name"] == "logs-link")
+    assert link["type"] == "dir"
+    assert link["link_outside_tree"] is False
+    assert link["readable"] is True
+
+
 def test_a_subdirectory_lists_relative_paths(client):
     r = client.get("/files/MQL5/Files")
 

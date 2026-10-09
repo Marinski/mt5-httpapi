@@ -99,6 +99,11 @@ class Tree:
         if guarded:
             raise Protected(f"{path.rel} contains protected paths: {', '.join(sorted(guarded))}")
 
+    def contains(self, full: str) -> bool:
+        """Whether `full`, after following symlinks and junctions, is inside
+        the root."""
+        return self._inside_root(full)
+
     def _inside_root(self, full: str) -> bool:
         root = os.path.realpath(self.root)
         target = os.path.realpath(full)

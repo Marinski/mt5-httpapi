@@ -65,7 +65,46 @@ curl "${AUTH[@]}" "$MT5_API_URL/files/logs/$(date +%Y%m%d).log" -o journal.log
 curl "${AUTH[@]}" -X DELETE "$MT5_API_URL/files/MQL5/Include/MyLib?recursive"
 ```
 
-A directory listing returns each entry's `name`, `path`, `type` (`file` or `dir`), `size`, `modified_at`, and whether it is `readable` and `writable` through this API. An upload answers `201` when it created the file and `200` when it replaced one, with the stored `size` and `sha256`.
+A directory listing is the JSON version of `ls -al`. The response carries `count` and `total_size`, plus one entry per file or directory, directories first:
+
+```json
+{
+  "tree": "terminal",
+  "path": "MQL5/Include/MyLib",
+  "count": 1,
+  "total_size": 5000,
+  "entries": [
+    {
+      "name": "Signals.mqh",
+      "path": "MQL5/Include/MyLib/Signals.mqh",
+      "type": "file",
+      "size": 5000,
+      "size_human": "4.9K",
+      "mode": "-rw-rw-rw-",
+      "attributes": ["archive"],
+      "nlink": 1,
+      "modified_at": 1791580800,
+      "modified": "2026-10-09T20:00:00Z",
+      "created_at": 1791580800,
+      "created": "2026-10-09T20:00:00Z",
+      "accessed_at": 1791580800,
+      "accessed": "2026-10-09T20:00:00Z",
+      "is_symlink": false,
+      "readable": true,
+      "writable": true
+    }
+  ]
+}
+```
+
+- `size_human` is `ls -h` style. Directories report size 0.
+- `mode` is `ls`'s mode string.
+- `attributes` lists the Windows file attributes (`readonly`, `hidden`, `system`, `archive`, `reparse_point`, ...). Windows has no owner or group in the `ls` sense, so the listing has none.
+- Times come as epoch seconds (`*_at`) and as UTC ISO 8601.
+- `readable` and `writable` say what this API allows, not what the file system does.
+- A symlink or junction also carries `link_target` and `link_outside_tree`. One that leads out of the tree is listed but can be neither read nor written.
+
+An upload answers `201` when it created the file and `200` when it replaced one, with the stored `size` and `sha256`.
 
 Uploads are capped at `max_upload_body_bytes` (25 MiB, the same as nginx's limit). Every write is atomic: the bytes land in a staging file beside the target and are renamed over it, so the terminal never reads half a file.
 
