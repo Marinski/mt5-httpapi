@@ -62,6 +62,62 @@ def test_set_upload_returns_parsed_inputs(client):
     assert {"name": "Lots", "value": "0.10"} in inputs
 
 
+def test_a_staged_set_can_be_deleted(client):
+    _upload_set(client)
+
+    r = client.delete("/sets/gold.set")
+
+    assert r.status_code == 200
+    assert r.get_json() == {"deleted": "gold.set"}
+    assert client.get("/sets").get_json()["sets"] == []
+    assert client.get("/sets/gold.set").status_code == 404
+
+
+def test_deleting_a_set_that_is_not_staged_is_404(client):
+    r = client.delete("/sets/gold.set")
+
+    assert r.status_code == 404
+    assert r.get_json()["code"] == "ARTIFACT_NOT_FOUND"
+
+
+def test_a_set_a_deployment_uses_cannot_be_deleted_until_the_deployment_goes(client):
+    _upload_expert(client)
+    _upload_set(client)
+    dep_id = client.post("/deployments", json={
+        "expert": "EA.ex5", "set": "gold.set",
+        "symbol": "EURUSD", "timeframe": "H1"}).get_json()["id"]
+    client.patch(f"/deployments/{dep_id}", json={"enabled": False})
+
+    refused = client.delete("/sets/gold.set")
+
+    assert refused.status_code == 409
+    assert refused.get_json()["code"] == "IN_USE"
+    assert client.get("/sets/gold.set").status_code == 200
+    client.delete(f"/deployments/{dep_id}")
+    assert client.delete("/sets/gold.set").status_code == 200
+
+
+def test_a_host_managed_set_cannot_be_deleted(client):
+    from mt5api.chartctl import paths
+    host_set = os.path.join(paths.HOST_SETS_DIR, "host.set")
+    with open(host_set, "w", encoding="utf-8") as handle:
+        handle.write("Lots=0.10\n")
+
+    r = client.delete("/sets/host.set")
+
+    assert r.status_code == 403
+    assert r.get_json()["code"] == "HOST_ASSET"
+    assert os.path.exists(host_set)
+
+
+@pytest.mark.parametrize("name", ["gold.txt", ".hidden.set", "a..b.set"])
+def test_deleting_a_set_with_a_bad_name_is_refused(client, name):
+    r = client.delete(f"/sets/{name}")
+
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "BAD_REQUEST"
+
+
 def test_expert_traversal_rejected(client):
     r = client.post("/experts", data={
         "expert": (io.BytesIO(b"x"), "../evil.ex5")},

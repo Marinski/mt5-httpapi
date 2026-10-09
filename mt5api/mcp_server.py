@@ -18,7 +18,7 @@ Tool families:
   - Backtest         — ``get_backtest`` (poll; new runs are multipart, submit via REST)
   - Chart Deployments, only when chartctl is enabled on this terminal:
       artifacts:   ``list_experts``, ``upload_expert``, ``delete_expert``,
-                   ``list_sets``, ``get_set``, ``upload_set``
+                   ``list_sets``, ``get_set``, ``upload_set``, ``delete_set``
       deployments: ``list_deployments``, ``get_deployment``,
                    ``create_deployment``, ``update_deployment``,
                    ``delete_deployment``, ``reconcile_deployments``
@@ -127,7 +127,7 @@ _INSTRUCTIONS = (
 _CHARTCTL_INSTRUCTIONS = (
     " Chart Deployments are enabled on this terminal: stage EA files "
     "(upload_expert, upload_set, list_experts, list_sets, get_set, "
-    "delete_expert), declare deployments that a loader EA attaches to "
+    "delete_expert, delete_set), declare deployments that a loader EA attaches to "
     "charts (create_deployment, list_deployments, get_deployment, "
     "update_deployment, delete_deployment, reconcile_deployments), inspect "
     "and capture charts (list_charts, get_loader, screenshot_chart, "
@@ -580,6 +580,14 @@ def _register_chartctl_tools(mcp: FastMCP) -> None:
         (``GET /sets/{name}``)."""
         segment = _path_segment("name", name)
         return await _call("GET", f"/sets/{segment}")
+
+    @mcp.tool()
+    async def delete_set(name: str) -> dict[str, Any]:
+        """Remove a staged ``.set`` file (``DELETE /sets/{name}``).
+        Refused with 409 while a deployment uses it, and with 403 for a
+        host-managed file."""
+        segment = _path_segment("name", name)
+        return await _call("DELETE", f"/sets/{segment}")
 
     @mcp.tool()
     async def upload_set(

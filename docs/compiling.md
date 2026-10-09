@@ -201,7 +201,7 @@ elsewhere, sync it into that directory as part of your deploy — a stale `.mqh`
 compiles clean and then misbehaves at runtime, which is the worst failure shape
 available.
 
-With the [file API](files.md) enabled you can do that over HTTP: `PUT /compile/files/Include/MyLib?extract` with a zip of the library unpacks it into that directory, and `DELETE /compile/files/Include/MyLib?recursive` removes it.
+With the [file API](files.md) enabled you can do that over HTTP: `PUT /compile/files/Include/MyLib?extract` with a zip of the library unpacks it into that directory, and `DELETE /compile/files/Include/MyLib?recursive` removes it. [An expert that uses a library](files.md#example-an-expert-that-uses-a-library) walks through the whole flow, `#import`ed `.ex5` libraries and DLLs included.
 
 Edits are picked up by a running server without a restart. With
 `COMPILE_LOCAL_CACHE` set the include tree is re-validated against the source at

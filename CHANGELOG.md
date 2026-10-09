@@ -6,6 +6,13 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.26.0]: 2026-10-09
+
+### Added
+
+- **`DELETE /sets/<name>` removes a staged `.set` file.** Sets could be uploaded but not removed, and the file API cannot remove them either, since it only reads the terminal's `chartctl/` folder. The route answers 409 `IN_USE` while any deployment names the set, paused ones included, 403 `HOST_ASSET` for a host-managed set, and 404 when nothing is staged under that name. Both MCP endpoints get a `delete_set` tool, and `make test-live` now removes the `livetest-` sets it stages. See [docs/chart-deployments.md](docs/chart-deployments.md).
+- **Example: an expert that uses a library.** [docs/files.md](docs/files.md#example-an-expert-that-uses-a-library) walks through uploading a library's headers to the compile tree, compiling an `#import`ed `.ex5` library (or bringing a DLL) and putting it in the terminal's `MQL5/Libraries`, compiling the expert against it and deploying it, and replacing a library a running expert has loaded.
+
 ## [v4.25.0]: 2026-10-09
 
 ### Added

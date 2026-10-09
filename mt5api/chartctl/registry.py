@@ -190,6 +190,13 @@ def expert_in_use(expert_file: str) -> bool:
                    for d in state["deployments"].values())
 
 
+def set_in_use(set_file: str) -> bool:
+    with _LOCK:
+        state = _load_locked()
+        return any(d.get("set_file") == set_file
+                   for d in state["deployments"].values())
+
+
 def current_revision() -> int:
     with _LOCK:
         return _load_locked()["revision"]

@@ -186,7 +186,7 @@ def purge_files(mcp: McpClient) -> None:
 
 
 def purge_artifacts(mcp: McpClient) -> None:
-    """Delete every deployment and expert the suite created."""
+    """Delete every deployment, expert and set the suite created."""
     for dep in mcp.call_json("list_deployments")["deployments"]:
         if dep["desired"].get("expert_file", "").startswith(ARTIFACT_PREFIX):
             mcp.call_json("delete_deployment", deployment_id=dep["id"])
@@ -199,6 +199,13 @@ def purge_artifacts(mcp: McpClient) -> None:
             # Still referenced while its deployment's chart closes; the purge
             # at the other end of the session gets it.
             warnings.warn(f"left {expert['name']} staged for the next purge: {err}", stacklevel=2)
+    for set_file in mcp.call_json("list_sets")["sets"]:
+        if set_file["source"] != "uploaded" or not set_file["name"].startswith(ARTIFACT_PREFIX):
+            continue
+        try:
+            mcp.call_json("delete_set", name=set_file["name"])
+        except LiveAPIError as err:
+            warnings.warn(f"left {set_file['name']} staged for the next purge: {err}", stacklevel=2)
 
 
 @pytest.fixture(scope="session")

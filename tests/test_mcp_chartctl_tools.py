@@ -39,7 +39,7 @@ LOADER_POLL_SECONDS = 0.02
 
 CHARTCTL_TOOLS = frozenset({
     "list_experts", "upload_expert", "delete_expert",
-    "list_sets", "get_set", "upload_set",
+    "list_sets", "get_set", "upload_set", "delete_set",
     "list_deployments", "get_deployment", "create_deployment",
     "update_deployment", "delete_deployment", "reconcile_deployments",
     "list_charts", "get_loader", "screenshot_chart", "close_chart",
@@ -271,6 +271,11 @@ def test_upload_set_accepts_text_and_mt5_utf16_bytes(server):
         listed = await server.ok("list_sets")
         assert sorted(s["name"] for s in listed["sets"]) == ["gold.set", "silver.set"]
 
+        deleted = await server.ok("delete_set", name="gold.set")
+        assert deleted == {"deleted": "gold.set"}
+        listed = await server.ok("list_sets")
+        assert [s["name"] for s in listed["sets"]] == ["silver.set"]
+
     _run(scenario())
 
 
@@ -457,6 +462,7 @@ def test_webrequest_tools_replace_edit_and_reapply(server, applied):
         ("delete_expert", {"name": "../deployments/dep_x"}, "single name"),
         ("delete_expert", {"name": ".."}, "single name"),
         ("get_set", {"name": ""}, "single name"),
+        ("delete_set", {"name": "../experts/EA.ex5"}, "single name"),
         ("get_deployment", {"deployment_id": "dep/x"}, "single name"),
         ("update_deployment", {"deployment_id": "a\\b", "enabled": False}, "single name"),
         ("delete_deployment", {"deployment_id": "."}, "single name"),

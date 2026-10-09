@@ -33,7 +33,7 @@ AI agents get the same thing as typed MCP tools, file uploads and chart screensh
 | Method                                           | Endpoint                              | Description                                              |
 | ------------------------------------------------ | ------------------------------------- | -------------------------------------------------------- |
 | `POST` / `GET` / `DELETE`                        | `/experts` `/experts/<name>`          | Stage, list, remove EA `.ex5` files                      |
-| `POST` / `GET`                                   | `/sets` `/sets/<name>`                | Stage, list, inspect `.set` parameter files (parsed)     |
+| `POST` / `GET` / `DELETE`                        | `/sets` `/sets/<name>`                | Stage, list, inspect (parsed), remove `.set` parameter files |
 | `POST` / `GET`                                   | `/deployments`                        | Create or list deployments                               |
 | `GET` / `PATCH` / `DELETE`                       | `/deployments/<id>`                   | Inspect, pause/resume/change set, tear down a deployment |
 | `POST`                                           | `/deployments/reconcile`              | Force an immediate reconcile cycle (otherwise periodic)  |
@@ -41,6 +41,8 @@ AI agents get the same thing as typed MCP tools, file uploads and chart screensh
 | `GET`                                            | `/loader`                             | Loader EA status (alive, version, chart open count)      |
 | `POST`                                           | `/charts/<chart_id>/screenshot`       | Capture a chart PNG from inside the terminal             |
 | `POST`                                           | `/charts/<chart_id>/close`            | Close a chart by id (any chart, including leaks)         |
+
+`DELETE /experts/<name>` and `DELETE /sets/<name>` answer 409 `IN_USE` while any deployment, paused ones included, names the file, because the API rebuilds a deployment's chart template from its expert and set on every change. Delete the deployment first. Host-managed files under `assets/` that were never copied into the terminal answer 403 `HOST_ASSET`. Staged sets live in the terminal's `chartctl/sets/`, which the [file API](files.md) only reads, so remove them here.
 
 **Opt-in.** `chartctl.enabled` defaults to `false`; set it to `true` in
 `config.yaml` to switch the feature on. Live-mode terminals only, and any single

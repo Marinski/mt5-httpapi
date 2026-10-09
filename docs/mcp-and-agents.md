@@ -29,7 +29,7 @@ Every terminal serves `/mcp` beside its REST API. The tools are dedicated and ty
 - **Orders** — `list_orders`, `get_order`, `create_order(symbol, type, volume, price?, sl?, tp?)`, `modify_order`, `cancel_order`
 - **History / terminal / backtest** — `get_history_orders`, `get_history_deals`, `get_terminal`, `terminal_control`, `get_backtest`, `ping`
 - **Chart Deployments**, only on terminals with [chartctl](chart-deployments.md) enabled:
-  - artifacts: `upload_expert(filename, content_base64, overwrite?)`, `list_experts`, `delete_expert`, `upload_set(filename, content? | content_base64?)`, `list_sets`, `get_set`
+  - artifacts: `upload_expert(filename, content_base64, overwrite?)`, `list_experts`, `delete_expert`, `upload_set(filename, content? | content_base64?)`, `list_sets`, `get_set`, `delete_set`
   - deployments: `create_deployment(expert, symbol, timeframe, set_file?, enabled?)`, `list_deployments`, `get_deployment`, `update_deployment(deployment_id, enabled?, set_file?)`, `delete_deployment`, `reconcile_deployments`
   - charts: `list_charts`, `get_loader`, `screenshot_chart(chart_id, width?, height?)`, `close_chart`
   - WebRequest allowlist: `get_webrequest`, `set_webrequest(urls? | add?, remove?, runas?)`, `apply_webrequest(runas?)`

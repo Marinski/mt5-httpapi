@@ -16,7 +16,7 @@ CORE_TOOLS = frozenset({
 })
 CHARTCTL_TOOLS = frozenset({
     "list_experts", "upload_expert", "delete_expert",
-    "list_sets", "get_set", "upload_set",
+    "list_sets", "get_set", "upload_set", "delete_set",
     "list_deployments", "get_deployment", "create_deployment",
     "update_deployment", "delete_deployment", "reconcile_deployments",
     "list_charts", "get_loader", "screenshot_chart", "close_chart",

@@ -113,6 +113,7 @@ _CHARTCTL_ROUTE_CATALOG: tuple[tuple[str, str], ...] = (
     ("POST", "/sets"),
     ("GET", "/sets"),
     ("GET", "/sets/<name>"),
+    ("DELETE", "/sets/<name>"),
     ("POST", "/deployments"),
     ("GET", "/deployments"),
     ("POST", "/deployments/reconcile"),
@@ -157,7 +158,7 @@ and the escape hatches `request` and `endpoints`.
 
 Chart Deployments, on terminals where `list_terminals` reports chartctl true:
 stage EA files (upload_expert, upload_set, list_experts, list_sets, get_set,
-delete_expert), declare deployments that a loader EA attaches to charts
+delete_expert, delete_set), declare deployments that a loader EA attaches to charts
 (create_deployment, list_deployments, get_deployment, update_deployment,
 delete_deployment, reconcile_deployments), inspect and capture charts
 (list_charts, get_loader, screenshot_chart, close_chart), and manage the
@@ -830,6 +831,25 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
             account,
             instance,
             "GET",
+            f"/sets/{segment}",
+        )
+
+    @mcp.tool()
+    async def delete_set(
+        broker: str,
+        account: str,
+        name: str,
+        instance: str = DEFAULT_INSTANCE,
+    ) -> dict[str, Any]:
+        """Remove a staged ``.set`` file from one terminal
+        (``DELETE /sets/{name}``). Refused with 409 while a deployment uses
+        it, and with 403 for a host-managed file."""
+        segment = _path_segment("name", name)
+        return await call_chartctl(
+            broker,
+            account,
+            instance,
+            "DELETE",
             f"/sets/{segment}",
         )
 

@@ -18,6 +18,7 @@ def register_chartctl_routes(app: Flask) -> None:
     app.post("/sets")(chartctl.upload_set)
     app.get("/sets")(chartctl.list_sets)
     app.get("/sets/<name>")(chartctl.get_set)
+    app.delete("/sets/<name>")(chartctl.delete_set)
 
     app.post("/deployments")(chartctl.create_deployment)
     app.get("/deployments")(chartctl.list_deployments)

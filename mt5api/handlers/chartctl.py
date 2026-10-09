@@ -206,6 +206,26 @@ def get_set(name):
     return jsonify({"name": name, "inputs": parse_set_bytes(data)})
 
 
+def delete_set(name):
+    try:
+        name = paths.safe_name(name, "set", ".set")
+    except ValueError as exc:
+        return _err(400, "BAD_REQUEST", str(exc))
+    target = os.path.join(paths.SETS_DIR, name)
+    if not os.path.isfile(target):
+        if os.path.isfile(os.path.join(paths.HOST_SETS_DIR, name)):
+            return _err(403, "HOST_ASSET", "host-managed assets are read-only")
+        return _err(404, "ARTIFACT_NOT_FOUND", f"{name} is not staged")
+    # A deployment rebuilds its chart template from the set on every create
+    # and update, so the file must outlive every deployment that names it.
+    if registry.set_in_use(name):
+        return _err(409, "IN_USE",
+                    f"{name} is referenced by an existing deployment")
+    os.remove(target)
+    log.info("chartctl set deleted: %s", name)
+    return jsonify({"deleted": name})
+
+
 def _resolve_set(name: str) -> str | None:
     for base in (paths.SETS_DIR, paths.HOST_SETS_DIR):
         candidate = os.path.join(base, name)

@@ -9,6 +9,7 @@ List, download, upload, unzip and delete files in a terminal's install directory
 - [Uploading a zip](#uploading-a-zip)
 - [What the API refuses](#what-the-api-refuses)
 - [The compile tree](#the-compile-tree)
+- [Example: an expert that uses a library](#example-an-expert-that-uses-a-library)
 - [MCP tools](#mcp-tools)
 - [Errors](#errors)
 
@@ -154,6 +155,77 @@ curl "${AUTH[@]}" -X PUT --data-binary @MyLib.zip \
 With `compile_local_cache` set, compiles read a mirror of this tree on the VM's own disk. A write or delete through `/compile/files` marks the mirror stale, and the next compile in any terminal's API process re-validates it before building, so it never builds against the old copy. A change made any other way, such as directly on the host, still waits up to 60 seconds, as described in [Compiling MQL5](compiling.md#custom-includes).
 
 The compiled `.ex5` carries the library inside it, so the terminal that runs the expert never needs the `.mqh` files. The exception is `#import` of an `.ex5` or DLL: those load at run time from the running terminal's own `MQL5/Libraries`, so upload them there through `/files`.
+
+## Example: an expert that uses a library
+
+A library usually comes in two parts: headers the expert `#include`s, which only the compiler needs, and code the expert `#import`s at run time (a compiled `.ex5` library or a DLL), which the terminal running the expert needs. Say the library is:
+
+```
+MyLib/Signals.mqh     the header your expert includes
+MyMath.mq5            a library (#property library) it imports
+```
+
+```mql5
+// MyLib/Signals.mqh
+#import "MyMath.ex5"
+double Scale(double x, double k);
+#import
+
+double Half(double x) { return Scale(x, 0.5); }
+```
+
+```mql5
+// MyMath.mq5
+#property library
+double Scale(double x, double k) export { return x * k; }
+```
+
+```mql5
+// MyBot.mq5
+#include <MyLib/Signals.mqh>
+
+int OnInit()
+{
+   Print("half of 42 is ", Half(42.0));
+   return INIT_SUCCEEDED;
+}
+
+void OnTick() {}
+```
+
+1. Put the headers in the compile tree, so `#include <MyLib/...>` resolves:
+
+   ```bash
+   (cd MyLib && zip -r ../MyLib.zip .)
+   curl "${AUTH[@]}" -X PUT --data-binary @MyLib.zip \
+     "$MT5_API_URL/compile/files/Include/MyLib?extract"
+   ```
+
+2. Compile the library and put the `.ex5` in the terminal's `MQL5/Libraries`, where `#import "MyMath.ex5"` looks for it at run time:
+
+   ```bash
+   jq -n --rawfile src MyMath.mq5 '{source: $src, filename: "MyMath.mq5"}' \
+     | curl "${AUTH[@]}" -H "Content-Type: application/json" -d @- "$MT5_API_URL/compile" \
+     | jq -r .ex5_base64 | base64 -d > MyMath.ex5
+   curl "${AUTH[@]}" -X PUT --data-binary @MyMath.ex5 \
+     "$MT5_API_URL/files/MQL5/Libraries/MyMath.ex5"
+   ```
+
+   A DLL goes to the same place: `PUT /files/MQL5/Libraries/mylib.dll`.
+
+3. Compile the expert. The compiler reads `MyLib/Signals.mqh` from the compile tree; the `.ex5` it returns does not need the header again:
+
+   ```bash
+   jq -n --rawfile src MyBot.mq5 '{source: $src, filename: "MyBot.mq5"}' \
+     | curl "${AUTH[@]}" -H "Content-Type: application/json" -d @- "$MT5_API_URL/compile" \
+     | jq -r .ex5_base64 | base64 -d > MyBot.ex5
+   ```
+
+4. Run it, for example with [Chart Deployments](chart-deployments.md#quick-start): `POST /experts` with `MyBot.ex5`, then `POST /deployments`. Its `Print` lands in the terminal's `MQL5/Logs`, which `GET /files/MQL5/Logs/<yyyymmdd>.log` downloads.
+
+The compile tree is shared by every terminal on the VM, so step 1 is done once. `MQL5/Libraries` belongs to one terminal, so step 2 is repeated for every terminal that runs the expert.
+
+An expert loads its libraries when it starts. To give a running expert a new version, upload it and then restart the expert, for a deployment by pausing and resuming it. If the terminal holds the old file open, as Windows does with a DLL a running expert has loaded, the upload answers 409 `FILE_LOCKED`. Pause the deployment, wait for its chart to close, upload, then resume.
 
 ## MCP tools
 
