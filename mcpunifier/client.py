@@ -14,6 +14,7 @@ from mcpunifier.config import Settings, Terminal
 from mcpunifier.constants import (
     BEARER_PREFIX,
     HEADER_AUTHORIZATION,
+    HEADER_CONTENT_TYPE,
     HEADER_REQUEST_ID,
 )
 from mcpunifier.errors import TerminalRejected, TerminalUnreachable
@@ -31,9 +32,16 @@ class TerminalClient:
     per-call target is the only thing that changes.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._settings = settings
-        self._http = httpx.AsyncClient(timeout=settings.request_timeout)
+        self._http = httpx.AsyncClient(
+            timeout=settings.request_timeout,
+            transport=transport,
+        )
 
     async def aclose(self) -> None:
         """Close the pooled connections. Called from the app lifespan."""
@@ -58,16 +66,69 @@ class TerminalClient:
         path: str,
         query: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes]] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Perform one REST call against ``terminal`` and return its JSON body.
+
+        ``files`` maps a form field to (filename, bytes) and sends a
+        multipart form instead of a JSON ``body``. ``timeout`` overrides the
+        configured request timeout for a call known to run longer.
 
         Raises TerminalUnreachable when the terminal does not answer and
         TerminalRejected when it answers non-2xx, so a single dead terminal
         surfaces as one failed tool call rather than a broken service.
         """
+        response = await self._send(
+            terminal,
+            method,
+            path,
+            query,
+            body,
+            files,
+            timeout,
+        )
+        try:
+            payload = response.json()
+        except ValueError as err:
+            raise TerminalRejected(
+                terminal.key,
+                response.status_code,
+                "response body is not JSON",
+            ) from err
+
+        # mt5api returns objects everywhere, but a bare list or scalar from a
+        # future route must not break the tool contract.
+        if isinstance(payload, dict):
+            return payload
+        return {"result": payload}
+
+    async def call_bytes(
+        self,
+        terminal: Terminal,
+        method: str,
+        path: str,
+        query: dict[str, Any] | None = None,
+    ) -> tuple[str, bytes]:
+        """Like ``call`` for a binary response: (content type, raw body)."""
+        response = await self._send(terminal, method, path, query, None, None, None)
+        return response.headers.get(HEADER_CONTENT_TYPE, ""), response.content
+
+    async def _send(
+        self,
+        terminal: Terminal,
+        method: str,
+        path: str,
+        query: dict[str, Any] | None,
+        body: dict[str, Any] | None,
+        files: dict[str, tuple[str, bytes]] | None,
+        timeout: float | None,
+    ) -> httpx.Response:
+        """Send one request and return its 2xx response, or raise."""
         url = f"{terminal.base_url(self._settings.mt5_host)}{path}"
 
-        # Route only — query and body can carry order parameters.
+        # Route only. Query, body and files can carry order parameters or EA
+        # binaries.
         logger.info(
             "dispatching to terminal",
             extra={"terminal": terminal.key, "http_method": method, "path": path},
@@ -78,8 +139,10 @@ class TerminalClient:
                 method,
                 url,
                 params=query,
-                json=body,
+                json=body if not files else None,
+                files=files,
                 headers=self._headers(),
+                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
             )
         except httpx.HTTPError as err:
             logger.warning(
@@ -117,18 +180,4 @@ class TerminalClient:
                 "status": response.status_code,
             },
         )
-
-        try:
-            payload = response.json()
-        except ValueError as err:
-            raise TerminalRejected(
-                terminal.key,
-                response.status_code,
-                "response body is not JSON",
-            ) from err
-
-        # mt5api returns objects everywhere, but a bare list or scalar from a
-        # future route must not break the tool contract.
-        if isinstance(payload, dict):
-            return payload
-        return {"result": payload}
+        return response

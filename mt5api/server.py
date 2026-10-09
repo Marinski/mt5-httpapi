@@ -175,37 +175,12 @@ app.get("/history/deals")(history.get_deals)
 app.post("/compile")(compile_handler.compile_source)
 
 # ── Chart Deployments (chartctl) ─────────────────────────────────
-# Lock-free EA deployment primitives. Gated: live mode + config enabled.
+# Lock-free EA deployment primitives plus the WebRequest allowlist. Gated:
+# live mode + config enabled.
 if CHARTCTL_ENABLED:
-    from mt5api.handlers import chartctl
+    from mt5api.handlers.chartctl_routes import register_chartctl_routes
 
-    app.post("/experts")(chartctl.upload_expert)
-    app.get("/experts")(chartctl.list_experts)
-    app.delete("/experts/<name>")(chartctl.delete_expert)
-
-    app.post("/sets")(chartctl.upload_set)
-    app.get("/sets")(chartctl.list_sets)
-    app.get("/sets/<name>")(chartctl.get_set)
-
-    app.post("/deployments")(chartctl.create_deployment)
-    app.get("/deployments")(chartctl.list_deployments)
-    app.post("/deployments/reconcile")(chartctl.reconcile)
-    app.get("/deployments/<dep_id>")(chartctl.get_deployment)
-    app.patch("/deployments/<dep_id>")(chartctl.patch_deployment)
-    app.delete("/deployments/<dep_id>")(chartctl.delete_deployment)
-
-    app.get("/charts")(chartctl.charts)
-    app.get("/loader")(chartctl.loader_status)
-    app.post("/charts/<chart_id>/screenshot")(chartctl.screenshot)
-    app.post("/charts/<chart_id>/close")(chartctl.close_chart)
-
-    # WebRequest allowlist — dedicated call. Applied via AutoIt (VM) or a
-    # common.ini rewrite + restart (bare metal). /apply re-applies on demand.
-    from mt5api.handlers import webrequest
-
-    app.get("/webrequest")(webrequest.get_webrequest)
-    app.put("/webrequest")(webrequest.put_webrequest)
-    app.post("/webrequest/apply")(webrequest.apply_webrequest)
+    register_chartctl_routes(app)
 
 # ── Backtest ─────────────────────────────────────────────────────
 app.post("/backtest/build-ini")(backtest_handler.build_ini_route)

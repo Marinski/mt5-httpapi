@@ -6,6 +6,21 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.19.0]: 2026-10-09
+
+### Added
+
+- **Chart Deployments over MCP.** Both MCP endpoints have typed tools for the chartctl and WebRequest routes: `upload_expert`, `list_experts`, `delete_expert`, `upload_set`, `list_sets`, `get_set`, `create_deployment`, `list_deployments`, `get_deployment`, `update_deployment`, `delete_deployment`, `reconcile_deployments`, `list_charts`, `get_loader`, `screenshot_chart`, `close_chart`, `get_webrequest`, `set_webrequest` and `apply_webrequest`. Before this an agent could reach those routes only through the generic `request` tool, which sends and reads JSON, so it could not upload an `.ex5` or `.set` file or get a screenshot back. The upload tools take the file as base64 (`upload_set` also takes plain text, and wrapped base64 is accepted) and send the multipart form the REST API expects. `screenshot_chart` returns the PNG as MCP image content. Name and id arguments are percent-encoded into the URL, and a value that would reach a different route, such as `../deployments/<id>`, is refused before any request.
+- On a per-terminal `/mcp` endpoint these tools are registered only when chartctl is enabled for that terminal. The unified `/mcp` endpoint always has them. Its `list_terminals` now reports `chartctl` per terminal, using the same rule as the API, and a chartctl tool called on a terminal without the routes says so, and why, instead of returning a bare 404. The unified endpoint gives the two WebRequest tools 290 seconds instead of the usual 120, since an apply can wait minutes for the GUI lock or a terminal restart.
+
+### Fixed
+
+- A terminal entry with `chartctl: false` still served every chartctl and WebRequest route when `chartctl.enabled` was on globally, because the API dropped that key when it read its own terminal entry. The loader was correctly left off that terminal, so the routes answered with nothing behind them. The override now turns the routes off too. The API also matches its own terminal entry when `config.yaml` gives the account as an unquoted number; before, it fell back to the first terminal's entry and its settings.
+- The unified MCP `endpoints` catalog listed none of the chartctl and WebRequest routes, so an agent on that endpoint could not discover them. They are listed now, each marked `"requires": "chartctl"`.
+- `docs/chart-deployments.md` and the skill had broken examples: the upload `curl` calls had no `Authorization` header, so they failed with 401 wherever a token is set, and the `PATCH /deployments/<id>` calls sent no `Content-Type: application/json`, so the API ignored the body and answered 400. The route was also listed as `/experts/<hash>`; it is `/experts/<name>`. The skill said Chart Deployments set themselves up, when they are off until `chartctl.enabled: true`, and linked the OpenClaw plugin on a branch that does not exist.
+- The docs said `PATCH /deployments/<id>` changes the set file in place. It updates the deployment, but the loader leaves a chart it already runs alone, so the new inputs apply only the next time it opens the chart. The docs and tool descriptions now say so and give the way to apply them right away: pause, wait until `GET /charts` no longer lists the chart, then resume.
+- The v4.18.0 notes said the WebRequest allowlist is re-applied after every terminal restart. It is re-applied once when the API process starts, which covers the periodic VM reboot but not a terminal restart inside a running API process, such as the health monitor's recovery restart. The docs now say so and point at `POST /webrequest/apply` for that case.
+
 ## [v4.18.0]: 2026-10-09
 
 Remote EA deployment: attach Expert Advisors to charts with set files over the HTTP API, with no RDP and no terminal restart. Chart Deployments and the WebRequest allowlist automation were contributed by @Marinski in #10.

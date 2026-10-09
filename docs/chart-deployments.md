@@ -27,9 +27,11 @@ state*; the loader reports *observed truth* back, so a deployment only reads
 Any client (a dashboard, a script, an AI agent) drives it over plain REST.
 Full protocol contract and file formats: [`docs/chart-control-protocol.md`](chart-control-protocol.md).
 
+AI agents get the same thing as typed MCP tools, file uploads and chart screenshots included. See [MCP and agent integrations](mcp-and-agents.md#mcp-interface).
+
 | Method                                           | Endpoint                              | Description                                              |
 | ------------------------------------------------ | ------------------------------------- | -------------------------------------------------------- |
-| `POST` / `GET` / `DELETE`                        | `/experts` `/experts/<hash>`          | Stage, list, remove EA `.ex5` files                      |
+| `POST` / `GET` / `DELETE`                        | `/experts` `/experts/<name>`          | Stage, list, remove EA `.ex5` files                      |
 | `POST` / `GET`                                   | `/sets` `/sets/<name>`                | Stage, list, inspect `.set` parameter files (parsed)     |
 | `POST` / `GET`                                   | `/deployments`                        | Create or list deployments                               |
 | `GET` / `PATCH` / `DELETE`                       | `/deployments/<id>`                   | Inspect, pause/resume/change set, tear down a deployment |
@@ -65,8 +67,10 @@ export MT5_API_URL=http://localhost:8888/yourbroker/yourlogin
 export MT5_API_TOKEN=$(grep api_token config/config.yaml | awk -F'"' '{print $2}')
 
 # 1. Stage an expert (.ex5) and a set file (.set)
-curl -F "expert=@HappyGoldScalp.ex5" "$MT5_API_URL/experts"
-curl -F "set=@gold-m5.set"          "$MT5_API_URL/sets"   # returns parsed inputs
+curl -H "Authorization: Bearer $MT5_API_TOKEN" \
+  -F "expert=@HappyGoldScalp.ex5" "$MT5_API_URL/experts"
+curl -H "Authorization: Bearer $MT5_API_TOKEN" \
+  -F "set=@gold-m5.set" "$MT5_API_URL/sets"   # returns parsed inputs
 
 # 2. Deploy: declare desired state
 curl -X POST "$MT5_API_URL/deployments" \
@@ -78,12 +82,18 @@ curl -X POST "$MT5_API_URL/deployments" \
 # 3. Verify: status flips to "running" once the loader confirms attach
 curl -H "Authorization: Bearer $MT5_API_TOKEN" "$MT5_API_URL/deployments"
 
-# 4. Change the set file in place (no restart), pause, or tear down
+# 4. Change the set file, pause, or tear down. A new set file reaches the
+#    expert the next time the loader opens its chart, not while it runs. To
+#    apply it now: pause, wait until GET /charts no longer lists the
+#    deployment's chart (its status says "paused" right away, before the
+#    loader acts), then resume.
 curl -X PATCH  "$MT5_API_URL/deployments/dep_a1b2c3" \
   -H "Authorization: Bearer $MT5_API_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{"set":"gold-m5-v2.set"}'
 curl -X PATCH  "$MT5_API_URL/deployments/dep_a1b2c3" \
   -H "Authorization: Bearer $MT5_API_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{"enabled":false}'
 curl -X DELETE "$MT5_API_URL/deployments/dep_a1b2c3" \
   -H "Authorization: Bearer $MT5_API_TOKEN"
@@ -209,11 +219,7 @@ lives in the machine-bound `MQL5\experts.dat` and MT5 drops it on every
 restart. So the list is applied the way a user would: a bundled AutoIt
 interpreter (`assets/autoit/`; unmodified official binary, redistributed
 with its EULA and notices, see `assets/autoit/NOTICE.txt`) drives
-Tools → Options → Expert Advisors and types the URLs in. This takes effect immediately in-session (no restart), and
-because MT5 forgets it on restart, the API re-applies the persisted list
-automatically ~25 s after each terminal (re)start, so it survives the periodic
-auto-reboot. On a bare-metal terminal where `common.ini` *is* the store, it
-falls back to writing `common.ini` + restarting.
+Tools → Options → Expert Advisors and types the URLs in. This takes effect immediately in-session (no restart). Because MT5 forgets the list on restart, the API re-applies the persisted list about 25 s after its own process starts, which covers the periodic auto-reboot. A terminal restart inside a running API process, such as the health monitor's recovery restart, is not re-applied automatically: call `POST /webrequest/apply` after one. On a bare-metal terminal where `common.ini` *is* the store, it falls back to writing `common.ini` + restarting.
 
 The desired list is persisted per terminal (`Config/webrequest.json`); the
 first call migrates whatever the terminal already has, so manually configured

@@ -373,8 +373,8 @@ def screenshot(chart_id):
     try:
         result = cmd.run_command("screenshot", {
             "chart_id": int(chart_id),
-            "width": int(request.args.get("width", 1280)),
-            "height": int(request.args.get("height", 720)),
+            "width": int(request.args.get("width", cmd.SCREENSHOT_DEFAULT_WIDTH)),
+            "height": int(request.args.get("height", cmd.SCREENSHOT_DEFAULT_HEIGHT)),
         })
     except ValueError:
         return _err(400, "BAD_REQUEST", "chart_id/width/height must be ints")

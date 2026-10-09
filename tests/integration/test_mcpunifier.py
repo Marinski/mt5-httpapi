@@ -39,8 +39,14 @@ LIVE_ACCOUNT = "tenkchallenge"
 DOWN_BROKER = "roboforex"
 DOWN_ACCOUNT = "procent"
 
-EXPECTED_TOOL_COUNT = 25
+EXPECTED_TOOL_COUNT = 44
 EXPECTED_TERMINAL_COUNT = 2
+
+# What the stub terminal does with the chartctl paths it stands in for: echo
+# what an upload put on the wire, answer a screenshot with PNG bytes, and give
+# /charts the HTML 404 a terminal without chartctl routes answers.
+EXPERT_UPLOAD_BYTES = b"MZ-integration-ex5"
+SCREENSHOT_BYTES = b"\x89PNG\r\n\x1a\nintegration"
 HTTP_OK = 200
 REQUEST_TIMEOUT_SECONDS = 10
 STARTUP_TIMEOUT_SECONDS = 60
@@ -61,13 +67,34 @@ PORT = {LIVE_TERMINAL_PORT}
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = json.dumps({{"ok": True, "port": PORT, "path": self.path}}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+    def _send(self, status, content_type, body):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/charts":
+            self._send(404, "text/html; charset=utf-8", b"<h1>Not Found</h1>")
+            return
+        body = json.dumps({{"ok": True, "port": PORT, "path": self.path}}).encode()
+        self._send(200, "application/json", body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        received = self.rfile.read(length)
+        if self.path.startswith("/charts/") and "/screenshot" in self.path:
+            self._send(200, "image/png", {SCREENSHOT_BYTES!r})
+            return
+        body = json.dumps({{
+            "path": self.path,
+            "content_type": self.headers.get("Content-Type", ""),
+            "has_filename": b'filename="EA.ex5"' in received,
+            "has_field": b'name="expert"' in received,
+            "has_bytes": {EXPERT_UPLOAD_BYTES!r} in received,
+        }}).encode()
+        self._send(200, "application/json", body)
 
     def log_message(self, *args):
         pass
@@ -89,6 +116,7 @@ os.execvp("python", ["python", "-m", "mcpunifier"])
 
 CONFIG = {
     "api_token": "",
+    "chartctl": {"enabled": True},
     "terminals": [
         {
             "broker": LIVE_BROKER,
@@ -224,6 +252,68 @@ def test_list_terminals_reports_both_configured_terminals(unifier):
     }
 
 
+def test_list_terminals_reports_chartctl_only_on_the_live_terminal(unifier):
+    """chartctl is enabled globally in CONFIG, and a backtest-mode process never
+    runs it, so only the live terminal reports it."""
+    payload = json.loads(_tool_text(_call_tool(unifier, "list_terminals", {})))
+
+    flags = {terminal["broker"]: terminal["chartctl"] for terminal in payload["terminals"]}
+    assert flags == {LIVE_BROKER: True, DOWN_BROKER: False}
+
+
+def test_upload_expert_sends_a_multipart_form_over_http(unifier):
+    """The upload crosses a real socket from the shipped image: the terminal
+    must see the form field, the filename and the exact decoded bytes."""
+    text = _tool_text(
+        _call_tool(
+            unifier,
+            "upload_expert",
+            {
+                "broker": LIVE_BROKER,
+                "account": LIVE_ACCOUNT,
+                "filename": "EA.ex5",
+                "content_base64": base64.b64encode(EXPERT_UPLOAD_BYTES).decode(),
+            },
+        )
+    )
+    received = json.loads(text)
+
+    assert received["path"] == "/experts"
+    assert received["content_type"].startswith("multipart/form-data; boundary=")
+    assert received["has_field"] is True
+    assert received["has_filename"] is True
+    assert received["has_bytes"] is True
+
+
+def test_screenshot_chart_returns_image_content_over_http(unifier):
+    result = _call_tool(
+        unifier,
+        "screenshot_chart",
+        {"broker": LIVE_BROKER, "account": LIVE_ACCOUNT, "chart_id": 7},
+    )
+    (content,) = result["result"]["content"]
+
+    assert content["type"] == "image"
+    assert content["mimeType"] == "image/png"
+    assert base64.b64decode(content["data"]) == SCREENSHOT_BYTES
+
+
+def test_a_terminal_without_chartctl_routes_is_reported_as_such(unifier):
+    """CONFIG enables chartctl for the live terminal, but the stub serves no
+    /charts route: the state of a terminal whose API started before chartctl
+    was turned on."""
+    result = _call_tool(
+        unifier,
+        "list_charts",
+        {"broker": LIVE_BROKER, "account": LIVE_ACCOUNT},
+    )
+
+    assert result["result"]["isError"] is True
+    text = _tool_text(result)
+    assert "does not serve the Chart Deployments routes" in text
+    assert "restart the stack" in text
+
+
 def test_the_live_terminal_routes_to_its_own_port(unifier):
     text = _tool_text(
         _call_tool(unifier, "ping", {"broker": LIVE_BROKER, "account": LIVE_ACCOUNT})
@@ -279,8 +369,32 @@ _NON_API_METHODS = frozenset({"HEAD", "OPTIONS"})
 _CONVERTER_PREFIX = re.compile(r"<[a-zA-Z_][a-zA-Z0-9_]*:")
 
 
+def _url_map_routes(app):
+    routes = set()
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == "static":
+            continue
+        path = _CONVERTER_PREFIX.sub("<", str(rule.rule))
+        for method in rule.methods - _NON_API_METHODS:
+            routes.add((method, path))
+    return routes
+
+
+def _chartctl_routes():
+    """(method, path) for the chartctl and WebRequest routes, from the same
+    register_chartctl_routes server.py calls when chartctl is enabled."""
+    from flask import Flask
+
+    from mt5api.handlers.chartctl_routes import register_chartctl_routes
+
+    app = Flask("chartctl_routes")
+    register_chartctl_routes(app)
+    return _url_map_routes(app)
+
+
 def _flask_routes():
-    """(method, path) for every route the real mt5api Flask app registers.
+    """(method, path) for every route the real mt5api Flask app serves with
+    chartctl enabled, the configuration the catalog documents.
 
     Imported here rather than at module scope so the MT5 stub tests/conftest.py
     installs is in place first — the SDK wheel is Windows-only.
@@ -292,14 +406,7 @@ def _flask_routes():
     """
     from mt5api.server import app
 
-    routes = set()
-    for rule in app.url_map.iter_rules():
-        if rule.endpoint == "static":
-            continue
-        path = _CONVERTER_PREFIX.sub("<", str(rule.rule))
-        for method in rule.methods - _NON_API_METHODS:
-            routes.add((method, path))
-    return routes
+    return _url_map_routes(app) | _chartctl_routes()
 
 
 def test_the_endpoints_tool_returns_exactly_the_real_flask_routes(unifier):
@@ -307,12 +414,10 @@ def test_the_endpoints_tool_returns_exactly_the_real_flask_routes(unifier):
     the Flask router every terminal actually serves.
 
     Equality, not containment, in both directions: a missing entry hides a real
-    route from agents, and a surplus entry sends them at a 404. Every route in
-    mt5api/server.py is registered unconditionally, so the two sides are
-    comparable exactly as they stand. If a route is ever registered behind a
-    config flag, this has to build the app under the configuration the catalog
-    documents rather than be relaxed to a subset check — a subset check would
-    pass the empty catalog.
+    route from agents, and a surplus entry sends them at a 404. The chartctl
+    routes are registered behind a config flag, so the expected side is the
+    app with chartctl enabled (see _flask_routes) rather than a subset check,
+    which would pass the empty catalog.
     """
     payload = json.loads(_tool_text(_call_tool(unifier, "endpoints", {})))
 
@@ -339,6 +444,19 @@ def test_the_endpoints_tool_lists_the_backtest_cache_priming_route(unifier):
     payload = json.loads(_tool_text(_call_tool(unifier, "endpoints", {})))
 
     assert {"method": "POST", "path": "/symbols/import"} in payload["endpoints"]
+
+
+def test_the_endpoints_tool_marks_exactly_the_chartctl_routes(unifier):
+    """A chartctl route answers 404 on a terminal without chartctl, so the
+    catalog has to say which routes need it, and only those."""
+    payload = json.loads(_tool_text(_call_tool(unifier, "endpoints", {})))
+
+    marked = {
+        (entry["method"], entry["path"])
+        for entry in payload["endpoints"]
+        if entry.get("requires") == "chartctl"
+    }
+    assert marked == _chartctl_routes()
 
 
 def test_the_endpoint_is_still_healthy_after_those_failures(unifier):

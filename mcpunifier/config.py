@@ -30,6 +30,7 @@ from mcpunifier.constants import (
     ENV_LOG_LEVEL,
     ENV_MT5_HOST,
     ENV_REQUEST_TIMEOUT,
+    MODE_BACKTEST,
 )
 from mcpunifier.errors import ConfigError
 
@@ -49,6 +50,7 @@ class Terminal:
     instance: str
     port: int
     mode: str
+    chartctl: bool = False
 
     @property
     def key(self) -> str:
@@ -94,7 +96,27 @@ def _load_yaml(path: str) -> dict[str, Any]:
         raise ConfigError(f"config at {path} is not valid YAML") from err
 
 
-def _build_terminals(raw: list[Any]) -> dict[str, Terminal]:
+def _chartctl_enabled(entry: dict[str, Any], globally_enabled: bool) -> bool:
+    """Whether this terminal serves the chartctl routes.
+
+    Mirrors mt5api.config.chartctl_enabled, which reads the same config.yaml:
+    the global ``chartctl.enabled`` flag, a live-mode process (any mode but
+    ``backtest``, as mt5api treats a missing or unknown mode as live), and no
+    per-terminal ``chartctl: false``. tests/test_mcpunifier_config.py checks
+    the two agree.
+    """
+    mode = str(entry.get("mode", "") or "").strip().lower()
+    return (
+        globally_enabled
+        and mode != MODE_BACKTEST
+        and entry.get("chartctl") is not False
+    )
+
+
+def _build_terminals(
+    raw: list[Any],
+    chartctl_globally_enabled: bool = False,
+) -> dict[str, Terminal]:
     terminals: dict[str, Terminal] = {}
     skipped = 0
 
@@ -120,6 +142,7 @@ def _build_terminals(raw: list[Any]) -> dict[str, Terminal]:
             instance=_normalize_instance(entry.get("instance")),
             port=int(port),
             mode=str(entry.get("mode", "") or "unknown"),
+            chartctl=_chartctl_enabled(entry, chartctl_globally_enabled),
         )
         terminals[terminal.key] = terminal
         logger.debug(
@@ -146,7 +169,15 @@ def load_settings(path: str = CONFIG_PATH) -> Settings:
     confusing tool call at a time.
     """
     raw = _load_yaml(path)
-    terminals = _build_terminals(raw.get("terminals") or [])
+    chartctl_block = raw.get("chartctl") or {}
+    if not isinstance(chartctl_block, dict):
+        raise ConfigError(
+            f"chartctl in {path} must be a mapping such as 'chartctl: {{enabled: true}}'"
+        )
+    terminals = _build_terminals(
+        raw.get("terminals") or [],
+        chartctl_globally_enabled=bool(chartctl_block.get("enabled", False)),
+    )
     if not terminals:
         raise ConfigError(f"no usable terminals defined in {path}")
 

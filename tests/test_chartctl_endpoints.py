@@ -1,9 +1,9 @@
 """End-to-end chartctl endpoint tests via Flask's test client, with the
 Python FakeLoader playing the terminal side of the protocol.
 
-Repoints every chartctl path at a tmp dir, registers the routes on a
-fresh Flask app (config gating is bypassed here — we wire handlers
-directly so the suite doesn't depend on CHARTCTL_ENABLED at import).
+The app comes from the shared ``chartctl_app`` fixture (tests/conftest.py):
+the shipped route table on a fresh Flask app with every chartctl path
+repointed at a tmp dir, so the suite does not depend on CHARTCTL_ENABLED.
 """
 from __future__ import annotations
 
@@ -12,71 +12,14 @@ import json
 import os
 
 import pytest
-from flask import Flask
 
 from tests.chartctl_fake_loader import FakeLoader
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    from mt5api.chartctl import paths, registry, command
-
-    experts = tmp_path / "experts"
-    sets_ = tmp_path / "sets"
-    proto = tmp_path / "proto"
-    tpls = tmp_path / "tpls"
-    host_e = tmp_path / "host_experts"
-    host_s = tmp_path / "host_sets"
-    for d in (experts, sets_, proto, tpls, host_e, host_s,
-              proto / "shots"):
-        d.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr(paths, "EXPERTS_DIR", str(experts))
-    monkeypatch.setattr(paths, "SETS_DIR", str(sets_))
-    monkeypatch.setattr(paths, "PROTOCOL_DIR", str(proto))
-    monkeypatch.setattr(paths, "TEMPLATES_DIR", str(tpls))
-    monkeypatch.setattr(paths, "SCREENSHOTS_DIR", str(proto / "shots"))
-    monkeypatch.setattr(paths, "HOST_EXPERTS_DIR", str(host_e))
-    monkeypatch.setattr(paths, "HOST_SETS_DIR", str(host_s))
-    monkeypatch.setattr(paths, "REGISTRY_PATH", str(tmp_path / "registry.json"))
-    monkeypatch.setattr(paths, "DESIRED_PATH", str(proto / "desired.json"))
-    monkeypatch.setattr(paths, "OBSERVED_PATH", str(proto / "observed.json"))
-    monkeypatch.setattr(paths, "COMMAND_PATH", str(proto / "command.json"))
-    monkeypatch.setattr(paths, "COMMAND_RESULT_PATH",
-                        str(proto / "command_result.json"))
-    # registry caches some path constants via import — repoint those too.
-    monkeypatch.setattr(registry.paths, "REGISTRY_PATH", str(tmp_path / "registry.json"))
-    monkeypatch.setattr(registry.paths, "DESIRED_PATH", str(proto / "desired.json"))
-    monkeypatch.setattr(registry.paths, "OBSERVED_PATH", str(proto / "observed.json"))
-    monkeypatch.setattr(registry.paths, "PROTOCOL_DIR", str(proto))
-    monkeypatch.setattr(registry, "_STATE", None)
-    # tpl_builder writes into TEMPLATES_DIR imported at module load
-    from mt5api.chartctl import tpl_builder
-    monkeypatch.setattr(tpl_builder, "TEMPLATES_DIR", str(tpls))
-    # shorten command timeout so the timeout test is fast
-    monkeypatch.setattr(command, "CHARTCTL_COMMAND_TIMEOUT_SECONDS", 1)
-
-    from mt5api.handlers import chartctl
-    app = Flask(__name__)
-    app.post("/experts")(chartctl.upload_expert)
-    app.get("/experts")(chartctl.list_experts)
-    app.delete("/experts/<name>")(chartctl.delete_expert)
-    app.post("/sets")(chartctl.upload_set)
-    app.get("/sets")(chartctl.list_sets)
-    app.get("/sets/<name>")(chartctl.get_set)
-    app.post("/deployments")(chartctl.create_deployment)
-    app.get("/deployments")(chartctl.list_deployments)
-    app.post("/deployments/reconcile")(chartctl.reconcile)
-    app.get("/deployments/<dep_id>")(chartctl.get_deployment)
-    app.patch("/deployments/<dep_id>")(chartctl.patch_deployment)
-    app.delete("/deployments/<dep_id>")(chartctl.delete_deployment)
-    app.get("/charts")(chartctl.charts)
-    app.get("/loader")(chartctl.loader_status)
-    app.post("/charts/<chart_id>/screenshot")(chartctl.screenshot)
-    app.post("/charts/<chart_id>/close")(chartctl.close_chart)
-
-    c = app.test_client()
-    c._proto_dir = str(proto)   # stash for the fake loader
+def client(chartctl_app):
+    c = chartctl_app.test_client()
+    c._proto_dir = chartctl_app.proto_dir   # stash for the fake loader
     return c
 
 

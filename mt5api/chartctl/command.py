@@ -19,6 +19,9 @@ import time
 from mt5api.chartctl import paths
 from mt5api.config import CHARTCTL_COMMAND_TIMEOUT_SECONDS
 
+SCREENSHOT_DEFAULT_WIDTH = 1280
+SCREENSHOT_DEFAULT_HEIGHT = 720
+
 _LOCK = threading.Lock()
 
 

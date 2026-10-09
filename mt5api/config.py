@@ -133,9 +133,11 @@ def normalize_instance(value):
 def match_terminal_config(terms, broker=None, account=None, instance=None):
     wanted_instance = normalize_instance(instance) if instance is not None else None
     for terminal in terms:
-        if broker is not None and terminal.get("broker") != broker:
+        # str() on both sides: an unquoted MT5 login in config.yaml is an int,
+        # while start.bat passes it on the command line as a string.
+        if broker is not None and str(terminal.get("broker")) != str(broker):
             continue
-        if account is not None and terminal.get("account", "") != account:
+        if account is not None and str(terminal.get("account", "")) != str(account):
             continue
         terminal_instance = normalize_instance(terminal.get("instance"))
         if wanted_instance is not None and terminal_instance != wanted_instance:
@@ -148,8 +150,31 @@ def match_terminal_config(terms, broker=None, account=None, instance=None):
             "utc_offset": terminal.get("utc_offset", "0"),
             "mode": (terminal.get("mode") or "live"),
             "symbol_suffix": terminal.get("symbol_suffix"),
+            "chartctl": terminal.get("chartctl"),
         }
     return None
+
+
+MODE_LIVE = "live"
+MODE_BACKTEST = "backtest"
+
+
+def normalize_mode(raw) -> str:
+    """The process mode: backtest, or live for anything else, including a
+    missing value."""
+    mode = str(raw or "").strip().lower()
+    return mode if mode == MODE_BACKTEST else MODE_LIVE
+
+
+def chartctl_enabled(mode: str, chartctl_block, terminal_override) -> bool:
+    """Whether a terminal serves Chart Deployments: a live-mode process, the
+    global ``chartctl.enabled`` flag, and no per-terminal ``chartctl: false``.
+    mcpunifier/config.py applies the same rule to the same config.yaml."""
+    return (
+        mode == MODE_LIVE
+        and bool((chartctl_block or {}).get("enabled", False))
+        and terminal_override is not False
+    )
 
 
 def terminal_dir_candidates(brokers_dir, broker, account="", instance=DEFAULT_INSTANCE):
@@ -328,9 +353,7 @@ BACKTEST_JOB_RETENTION_SECONDS = parse_duration_to_seconds(
     _JOB_RETENTION_ENV if _JOB_RETENTION_ENV not in (None, "") else "30d"
 )
 _MODE_RAW = (_args.mode or _terminal_config.get("mode") or os.environ.get("MT5_MODE") or "live")
-MODE = str(_MODE_RAW).strip().lower() or "live"
-if MODE not in ("live", "backtest"):
-    MODE = "live"
+MODE = normalize_mode(_MODE_RAW)
 def _setting_warning(msg, *args):
     # mt5api.logger imports this module, so it cannot be used here yet.
     # Nothing has configured logging this early, so logging's last-resort
@@ -525,15 +548,13 @@ INI_FILE = os.path.join(TERMINAL_DIR, "mt5start.ini")
 # overrides it. Backtest-mode terminals never enable it: there is no running
 # terminal64.exe to manage charts on.
 _chartctl_cfg = load_yaml_config().get("chartctl") or {}
-_chartctl_terminal_override = _terminal_config.get("chartctl")
 # Opt-IN. Defaulting this on would auto-attach the loader EA to every live
 # terminal of any install that upgraded without asking for it - a fleet-wide
 # behaviour change nobody opted into. Absent chartctl block = unchanged API.
-_chartctl_global_enabled = bool(_chartctl_cfg.get("enabled", False))
-CHARTCTL_ENABLED = (
-    MODE == "live"
-    and _chartctl_global_enabled
-    and (_chartctl_terminal_override is not False)
+CHARTCTL_ENABLED = chartctl_enabled(
+    MODE,
+    _chartctl_cfg,
+    _terminal_config.get("chartctl"),
 )
 def _chartctl_seconds(raw, default_text: str, floor: int) -> int:
     """A duration from the chartctl block, never below `floor`.

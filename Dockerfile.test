@@ -11,11 +11,16 @@ WORKDIR /app
 # MetaTrader5 is a Windows-only wheel — strip it and let tests/conftest.py
 # inject a stub at import time.
 #
+# requirements-mcpunifier.txt is installed beside it because
+# tests/test_mcp_chartctl_tools.py drives the unified MCP server in-process.
+# Both pin the same mcp SDK (tests/test_requirements_sync.py checks that).
+#
 # pytest runs the suite. requests is imported by tests/real/client.py at
 # collection time, so it must be present even when those tests don't execute.
-COPY requirements-api.txt /tmp/requirements-api.txt
+COPY requirements-api.txt requirements-mcpunifier.txt /tmp/
 RUN grep -v -i '^MetaTrader5' /tmp/requirements-api.txt > /tmp/req-test.txt && \
-    pip install --no-cache-dir -r /tmp/req-test.txt pytest requests pytest-cov==7.1.0
+    pip install --no-cache-dir -r /tmp/req-test.txt -r /tmp/requirements-mcpunifier.txt \
+        pytest requests pytest-cov==7.1.0
 
 COPY mt5api ./mt5api
 COPY mcpunifier ./mcpunifier
@@ -54,8 +59,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Everything under tests/ outside those dirs is offline-safe.
 #
 # --cov=mt5api scopes coverage to the API package only — scripts/ is
-# subprocess-driven (would misreport) and mcpunifier is covered by
-# test-integration, not here. Measured TOTAL on 2026-08-06 was 64%; floor is
+# subprocess-driven (would misreport). mcpunifier has unit tests here too, but
+# its coverage is not measured against this floor. Measured TOTAL on 2026-08-06 was 64%; floor is
 # set 2 points below that (rounded down) as a regression gate, not a target.
 # Raise this floor as coverage grows — never lower it to make a red build pass.
 CMD ["pytest", "-v", "--tb=short", "--ignore=tests/real", "--ignore=tests/real_compile", "--ignore=tests/integration", "--cov=mt5api", "--cov-report=term-missing:skip-covered", "--cov-fail-under=62", "tests/"]

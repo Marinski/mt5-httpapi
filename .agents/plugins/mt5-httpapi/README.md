@@ -26,12 +26,23 @@ history/terminal/backtest (`get_history_orders`, `get_history_deals`,
 `request` + `endpoints` catalog cover JSON-compatible routes without a
 dedicated tool; multipart `POST /backtest` submission still uses REST directly.
 When `MT5_API_URL` is the server root, `list_terminals` discovers the valid
-broker/account/instance combinations and their `live`/`backtest` process mode;
-when it is a terminal path, the session is pinned to that terminal.
+broker/account/instance combinations, their `live`/`backtest` process mode, and
+whether Chart Deployments are enabled for each; when it is a terminal path, the
+session is pinned to that terminal.
+
+On terminals with Chart Deployments enabled the agent can also stage and run
+EAs on charts: `upload_expert` and `upload_set` (file content as base64),
+`create_deployment`, `update_deployment`, `delete_deployment`,
+`list_deployments`, `list_charts`, `screenshot_chart` (returns the PNG as an
+image), `close_chart`, and the WebRequest allowlist tools `get_webrequest`,
+`set_webrequest`, `apply_webrequest`. See the
+[full list](https://github.com/psyb0t/mt5-httpapi/blob/master/docs/mcp-and-agents.md#mcp-interface).
 
 The order/position tools (`create_order`, `modify_order`, `cancel_order`,
 `modify_position`, `close_position`) are real, irreversible actions on a live
-trading account — confirm the parameters before calling them.
+trading account. Confirm the parameters before calling them. The same goes for
+creating, changing or deleting a deployment and for `close_chart`, because a
+running deployment is a live EA that trades.
 
 ## Configuration
 
