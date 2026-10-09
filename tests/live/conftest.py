@@ -20,6 +20,8 @@ Optional:
     MT5_LIVE_COMPILE_WORK_DEPTH, MT5_LIVE_COMPILE_INCLUDE_DEPTH
                           see test_compile_reach.py
 
+The Chart Deployments and file API tests skip unless the target serves them.
+
 Values may also live in tests/live/.env (gitignored); real environment
 variables win. Every artifact the suite creates is named with ARTIFACT_PREFIX,
 every order carries MT5_LIVE_MAGIC, and both are removed before and after the
@@ -145,6 +147,39 @@ def chartctl(chartctl_enabled: bool, state_changes_allowed: None, mcp_unified: M
     purge_artifacts(mcp_unified)
     yield mcp_unified
     purge_artifacts(mcp_unified)
+
+
+@pytest.fixture(scope="session")
+def target_features(mcp_unified: McpClient, target: Target) -> dict:
+    """The target's entry in list_terminals: which optional features its
+    config enables."""
+    terminals = mcp_unified.call_json("list_terminals", routed=False)["terminals"]
+    return next(t for t in terminals if t["key"] == target.terminal_key)
+
+
+@pytest.fixture(scope="session")
+def files_enabled_target(target_features: dict) -> None:
+    """Skip unless the target terminal serves the file API."""
+    if not target_features.get("files"):
+        pytest.skip("the file API is not enabled on the target terminal")
+
+
+@pytest.fixture(scope="session")
+def files_api(files_enabled_target: None, state_changes_allowed: None, mcp_unified: McpClient):
+    """The unified MCP client for file API tests that write, with livetest-
+    files purged from both trees before and after the session."""
+    purge_files(mcp_unified)
+    yield mcp_unified
+    purge_files(mcp_unified)
+
+
+def purge_files(mcp: McpClient) -> None:
+    """Delete every livetest- entry the file tests create."""
+    for tree, parent in (("terminal", "MQL5/Files"), ("compile", "Include")):
+        for entry in mcp.call_json("list_files", path=parent, tree=tree)["entries"]:
+            if not entry["name"].startswith(ARTIFACT_PREFIX):
+                continue
+            mcp.call_json("delete_file", path=entry["path"], recursive=True, tree=tree)
 
 
 def purge_artifacts(mcp: McpClient) -> None:

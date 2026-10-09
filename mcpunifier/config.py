@@ -51,6 +51,7 @@ class Terminal:
     port: int
     mode: str
     chartctl: bool = False
+    files: bool = False
 
     @property
     def key(self) -> str:
@@ -113,9 +114,33 @@ def _chartctl_enabled(entry: dict[str, Any], globally_enabled: bool) -> bool:
     )
 
 
+def _files_enabled(entry: dict[str, Any], globally_enabled: bool) -> bool:
+    """Whether this terminal serves the file API routes.
+
+    Mirrors mt5api.config.files_enabled: the global ``files.enabled`` flag
+    and no per-terminal ``files: false``, in any process mode.
+    """
+    return globally_enabled and entry.get("files") is not False
+
+
+def _feature_block(raw: Any, name: str, path: str) -> dict[str, Any]:
+    """An opt-in feature block as a mapping; ``true``/``false`` are shorthand
+    for ``{enabled: ...}``, as in mt5api.config.feature_block."""
+    if raw is None:
+        return {}
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    if isinstance(raw, dict):
+        return raw
+    raise ConfigError(
+        f"{name} in {path} must be true, false or a mapping such as '{name}: {{enabled: true}}'"
+    )
+
+
 def _build_terminals(
     raw: list[Any],
     chartctl_globally_enabled: bool = False,
+    files_globally_enabled: bool = False,
 ) -> dict[str, Terminal]:
     terminals: dict[str, Terminal] = {}
     skipped = 0
@@ -143,6 +168,7 @@ def _build_terminals(
             port=int(port),
             mode=str(entry.get("mode", "") or "unknown"),
             chartctl=_chartctl_enabled(entry, chartctl_globally_enabled),
+            files=_files_enabled(entry, files_globally_enabled),
         )
         terminals[terminal.key] = terminal
         logger.debug(
@@ -169,14 +195,12 @@ def load_settings(path: str = CONFIG_PATH) -> Settings:
     confusing tool call at a time.
     """
     raw = _load_yaml(path)
-    chartctl_block = raw.get("chartctl") or {}
-    if not isinstance(chartctl_block, dict):
-        raise ConfigError(
-            f"chartctl in {path} must be a mapping such as 'chartctl: {{enabled: true}}'"
-        )
+    chartctl_block = _feature_block(raw.get("chartctl"), "chartctl", path)
+    files_block = _feature_block(raw.get("files"), "files", path)
     terminals = _build_terminals(
         raw.get("terminals") or [],
         chartctl_globally_enabled=bool(chartctl_block.get("enabled", False)),
+        files_globally_enabled=bool(files_block.get("enabled", False)),
     )
     if not terminals:
         raise ConfigError(f"no usable terminals defined in {path}")

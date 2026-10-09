@@ -27,7 +27,7 @@ history/terminal/backtest (`get_history_orders`, `get_history_deals`,
 dedicated tool; multipart `POST /backtest` submission still uses REST directly.
 When `MT5_API_URL` is the server root, `list_terminals` discovers the valid
 broker/account/instance combinations, their `live`/`backtest` process mode, and
-whether Chart Deployments are enabled for each; when it is a terminal path, the
+whether Chart Deployments and the file API are enabled for each; when it is a terminal path, the
 session is pinned to that terminal.
 
 On terminals with Chart Deployments enabled the agent can also stage and run
@@ -35,7 +35,10 @@ EAs on charts: `upload_expert` and `upload_set` (file content as base64),
 `create_deployment`, `update_deployment`, `delete_deployment`,
 `list_deployments`, `list_charts`, `screenshot_chart` (returns the PNG as an
 image), `close_chart`, and the WebRequest allowlist tools `get_webrequest`,
-`set_webrequest`, `apply_webrequest`. See the
+`set_webrequest`, `apply_webrequest`. On terminals with the file API enabled
+it can read and write the terminal's files, libraries and logs with
+`list_files`, `get_file`, `put_file` (which can unpack a zip) and
+`delete_file`. See the
 [full list](https://github.com/psyb0t/mt5-httpapi/blob/master/docs/mcp-and-agents.md#mcp-interface).
 
 The order/position tools (`create_order`, `modify_order`, `cancel_order`,

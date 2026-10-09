@@ -131,6 +131,7 @@ The old README became a massive wall of API shit, so the details now live in sep
 | Operate the bastard: Make targets, ports, remote access, concurrency, and logs | [Operations](docs/operations.md) |
 | Split terminals across several Windows VMs or NUMA nodes | [Multi-VM setup](docs/multi-vm-setup.md) |
 | Deploy EAs onto charts over HTTP instead of clicking through the Navigator | [Chart Deployments](docs/chart-deployments.md) |
+| Push libraries, DLLs and data into a terminal, zipped or not, and read its files and logs back | [File API](docs/files.md) |
 
 ## API at a glance
 

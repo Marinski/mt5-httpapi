@@ -112,17 +112,26 @@ def get_deployment(dep_id: str) -> dict | None:
         return dict(dep) if dep else None
 
 
+def _check_no_duplicate_chart(state: dict, symbol: str, timeframe: str,
+                               exclude_id: str | None = None) -> None:
+    """Refuse a second ENABLED deployment on the same symbol/timeframe: the
+    loader would open two charts that each claim the pair."""
+    for other in state["deployments"].values():
+        if other["id"] == exclude_id or not other.get("enabled", True):
+            continue
+        if (other["symbol"].upper() == symbol.upper()
+                and other["timeframe"].upper() == timeframe.upper()):
+            raise DuplicateChart(
+                f"enabled deployment {other['id']} already targets "
+                f"{symbol} {timeframe}")
+
+
 def add_deployment(*, expert_file: str, expert_name: str, set_file: str | None,
                    symbol: str, timeframe: str, enabled: bool = True) -> dict:
     with _LOCK:
         state = _load_locked()
-        for other in state["deployments"].values():
-            if (other.get("enabled", True) and enabled
-                    and other["symbol"].upper() == symbol.upper()
-                    and other["timeframe"].upper() == timeframe.upper()):
-                raise DuplicateChart(
-                    f"enabled deployment {other['id']} already targets "
-                    f"{symbol} {timeframe}")
+        if enabled:
+            _check_no_duplicate_chart(state, symbol, timeframe)
         dep = {
             "id": new_id(),
             "expert_file": expert_file,
@@ -148,6 +157,10 @@ def update_deployment(dep_id: str, **changes) -> dict:
         dep = state["deployments"].get(dep_id)
         if dep is None:
             raise KeyError(dep_id)
+        resuming = changes.get("enabled") is True and not dep.get("enabled", True)
+        if resuming:
+            _check_no_duplicate_chart(
+                state, dep["symbol"], dep["timeframe"], exclude_id=dep_id)
         dep.update(changes)
         dep["updated_at"] = _now_iso()
         state["revision"] += 1

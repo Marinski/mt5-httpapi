@@ -55,6 +55,17 @@ chartctl:
   command_timeout: "30s"        # wait for screenshot/one-shot loader replies
   max_upload_bytes: 16777216    # 16 MB cap on .ex5/.set uploads
 
+# File API: list, download, upload (single files or a zip with ?extract) and
+# delete files in each terminal's install directory (/files) and in the MQL5
+# tree /compile builds against (/compile/files). OPT-IN: it reaches everything
+# an expert can, including DLLs in MQL5/Libraries. The broker credentials
+# (mt5start.ini, Config/accounts.dat) are never served. A terminal entry can
+# opt out with `files: false`. See docs/files.md.
+files:
+  enabled: false
+  max_extract_bytes: 209715200  # 200 MB unpacked per ?extract
+  max_extract_files: 10000      # files per ?extract
+
 # Extra pip packages installed in the VM on every boot.
 # MetaTrader5, flask, waitress, and flask-compress are always installed.
 requirements: []

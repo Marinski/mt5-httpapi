@@ -87,7 +87,8 @@ curl -H "Authorization: Bearer $MT5_API_TOKEN" "$MT5_API_URL/deployments"
 #    expert the next time the loader opens its chart, not while it runs. To
 #    apply it now: pause, wait until GET /charts no longer lists the
 #    deployment's chart (its status says "paused" right away, before the
-#    loader acts), then resume.
+#    loader acts), then resume. Resuming is refused with 409 DUPLICATE_CHART
+#    while another enabled deployment runs on the same symbol and timeframe.
 curl -X PATCH  "$MT5_API_URL/deployments/dep_a1b2c3" \
   -H "Authorization: Bearer $MT5_API_TOKEN" \
   -H "Content-Type: application/json" \
@@ -232,7 +233,7 @@ lives in the machine-bound `MQL5\experts.dat` and MT5 drops it on every
 restart. So the list is applied the way a user would: a bundled AutoIt
 interpreter (`assets/autoit/`; unmodified official binary, redistributed
 with its EULA and notices, see `assets/autoit/NOTICE.txt`) drives
-Tools → Options → Expert Advisors and types the URLs in. This takes effect immediately in-session (no restart). Because MT5 forgets the list on restart, the API re-applies the persisted list about 25 s after its own process starts, which covers the periodic auto-reboot. A terminal restart inside a running API process, such as the health monitor's recovery restart, is not re-applied automatically: call `POST /webrequest/apply` after one. On a bare-metal terminal where `common.ini` *is* the store, it falls back to writing `common.ini` + restarting.
+Tools → Options → Expert Advisors and types the URLs in. This takes effect immediately in-session (no restart). Because MT5 forgets the list on restart, the API re-applies the persisted list about 25 s after its own process starts, which covers the periodic auto-reboot, and the same delay after every terminal restart it performs itself (the health monitor's recovery restart, `POST /terminal/restart`). Call `POST /webrequest/apply` only after a restart made from outside the API. On a bare-metal terminal where `common.ini` *is* the store, it falls back to writing `common.ini` + restarting.
 
 The desired list is persisted per terminal (`Config/webrequest.json`); the
 first call migrates whatever the terminal already has, so manually configured

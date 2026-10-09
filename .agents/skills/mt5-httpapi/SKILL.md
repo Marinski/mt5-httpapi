@@ -69,7 +69,7 @@ Auth is optional server-side — if no token is configured on the server, all re
 
 Each terminal also speaks [Model Context Protocol](https://modelcontextprotocol.io) (streamable-HTTP) at `/mcp`, exposing the REST surface as **dedicated typed tools** whose names + params + descriptions are the agent's documentation. Families: market data (`list_symbols`, `get_symbol`, `get_tick`, `get_rates`, `get_ticks`, `get_rates_ta`), account/positions (`get_account`, `list_positions`, `get_position`, `modify_position`, `close_position`), orders (`list_orders`, `get_order`, `create_order`, `modify_order`, `cancel_order`), history/terminal (`get_history_orders`, `get_history_deals`, `get_terminal`, `terminal_control`), backtest (`get_backtest`), and `ping`. A generic `request` + `endpoints` catalog remain as a fallback for JSON-compatible routes without a dedicated tool; multipart submission at `POST /backtest` still uses REST directly. Every tool runs the exact same handler, auth, and MT5 locking as a real HTTP call.
 
-On terminals with [Chart Deployments](#chart-deployments) enabled, MCP also has the chartctl tools: `upload_expert`, `list_experts`, `delete_expert`, `upload_set`, `list_sets`, `get_set`, `create_deployment`, `list_deployments`, `get_deployment`, `update_deployment`, `delete_deployment`, `reconcile_deployments`, `list_charts`, `get_loader`, `screenshot_chart`, `close_chart`, `get_webrequest`, `set_webrequest`, `apply_webrequest`. The upload tools take the file as base64 (`upload_set` also takes plain text) and send the multipart form for you. `screenshot_chart` returns the PNG as image content you can look at.
+On terminals with [Chart Deployments](#chart-deployments) enabled, MCP also has the chartctl tools: `upload_expert`, `list_experts`, `delete_expert`, `upload_set`, `list_sets`, `get_set`, `create_deployment`, `list_deployments`, `get_deployment`, `update_deployment`, `delete_deployment`, `reconcile_deployments`, `list_charts`, `get_loader`, `screenshot_chart`, `close_chart`, `get_webrequest`, `set_webrequest`, `apply_webrequest`. The upload tools take the file as base64 (`upload_set` also takes plain text) and send the multipart form for you. `screenshot_chart` returns the PNG as image content you can look at. On terminals with the [file API](#files) enabled, `list_files`, `get_file`, `put_file` and `delete_file` read and write files in the terminal's install directory or the compile tree.
 
 Same bearer token as the REST API (`MT5_API_TOKEN`, empty = auth disabled). Connect either directly at `$MT5_API_URL/mcp/`, or via the [`@psyb0t/mt5-httpapi`](https://github.com/psyb0t/mt5-httpapi/tree/master/.agents/plugins/mt5-httpapi) OpenClaw plugin for stdio-only MCP clients. The order/position tools (`create_order`, `cancel_order`, `close_position`, …) are irreversible on a live account; see Security & safety above.
 
@@ -375,7 +375,8 @@ curl -H "Authorization: Bearer $MT5_API_TOKEN" "$MT5_API_URL/deployments/dep_a1b
 # reach an expert that is already running: it applies the next time the loader
 # opens the chart. To apply it now: pause, wait until GET /charts no longer
 # lists the deployment's chart (the deployment says "paused" right away, before
-# the loader acts), then resume.
+# the loader acts), then resume. Resuming is refused with 409 DUPLICATE_CHART
+# while another enabled deployment runs on the same symbol and timeframe.
 curl -X PATCH "$MT5_API_URL/deployments/dep_a1b2c3" \
   -H "Authorization: Bearer $MT5_API_TOKEN" \
   -H "Content-Type: application/json" \
@@ -388,7 +389,7 @@ curl -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
   "$MT5_API_URL/charts/133039100/screenshot?width=1280&height=720" -o chart.png
 ```
 
-**WebRequest allowlist.** An EA that calls `WebRequest()` only reaches URLs on the terminal's allowlist. `GET /webrequest` returns the list. `PUT /webrequest` replaces it with `{"urls": [...]}` or edits it with `{"add": [...], "remove": [...]}` and applies it right away; only `http(s)` URLs are kept. Inside the Windows VM the API types the list into the terminal's Options dialog; on bare metal it rewrites `common.ini` and restarts the terminal. The VM terminal forgets the list when it restarts. The API re-applies it once when its own process starts, so after any other terminal restart call `POST /webrequest/apply`. Add `?runas=1` to either call when MT5 runs elevated.
+**WebRequest allowlist.** An EA that calls `WebRequest()` only reaches URLs on the terminal's allowlist. `GET /webrequest` returns the list. `PUT /webrequest` replaces it with `{"urls": [...]}` or edits it with `{"add": [...], "remove": [...]}` and applies it right away; only `http(s)` URLs are kept. Inside the Windows VM the API types the list into the terminal's Options dialog; on bare metal it rewrites `common.ini` and restarts the terminal. The VM terminal forgets the list when it restarts. The API re-applies it when its own process starts and after every terminal restart it performs itself (`POST /terminal/restart`, the health monitor), so call `POST /webrequest/apply` only after a restart from outside the API, or when an expert's `WebRequest()` is still refused. Add `?runas=1` to either call when MT5 runs elevated.
 
 ```bash
 curl -X PUT "$MT5_API_URL/webrequest" \
@@ -398,6 +399,21 @@ curl -X PUT "$MT5_API_URL/webrequest" \
 ```
 
 Full protocol: [`docs/chart-control-protocol.md`](https://github.com/psyb0t/mt5-httpapi/blob/master/docs/chart-control-protocol.md). Operator guide: [`docs/chart-deployments.md`](https://github.com/psyb0t/mt5-httpapi/blob/master/docs/chart-deployments.md).
+
+### Files
+
+**Off by default.** The operator turns it on with `files.enabled: true` in `config.yaml`; a terminal can opt out with `files: false`. Without it these routes answer `404`. `GET /files/<path>` lists a directory or downloads a file in the terminal's install directory (the folder with `terminal64.exe`), `PUT /files/<path>` uploads one (raw body or a multipart `file` field), `PUT /files/<dir>?extract` unpacks a zip into that directory, and `DELETE /files/<path>` (`?recursive` for a non-empty directory) removes it. `/compile/files/...` does the same on the MQL5 tree `POST /compile` builds against, which is where a shared `.mqh` library goes. The MCP tools are `list_files`, `get_file`, `put_file` and `delete_file`, with `tree` set to `terminal` or `compile`.
+
+The broker credentials (`mt5start.ini`, `Config/accounts.dat`) are never served, and the terminal's executables and Chart Deployments' own files are read-only here. **Writing into `MQL5/Experts`, `MQL5/Libraries` or `MQL5/Include` changes what experts on that account run, and a DLL in `MQL5/Libraries` runs inside the terminal: do it only when the user asked for that exact change, and confirm the terminal first.** Reading files and logs needs no confirmation.
+
+```bash
+# Unpack a library into the compile tree, then compile against it
+curl -X PUT -H "Authorization: Bearer $MT5_API_TOKEN" --data-binary @MyLib.zip \
+  "$MT5_API_URL/compile/files/Include/MyLib?extract"
+# source: #include <MyLib/Signals.mqh>
+```
+
+Operator guide: [`docs/files.md`](https://github.com/psyb0t/mt5-httpapi/blob/master/docs/files.md).
 
 ### Backtest
 

@@ -47,8 +47,19 @@ SKIP_HTTP_METHODS = frozenset({"HEAD", "OPTIONS"})
 # mode, including a missing one, as live.
 MODE_BACKTEST = "backtest"
 
-# Feature tag on route-catalog entries that exist only when chartctl is on.
+# Feature tags on route-catalog entries that exist only when chartctl or the
+# file API is on.
 FEATURE_CHARTCTL = "chartctl"
+FEATURE_FILES = "files"
+
+# File API calls write and unzip on the VM's shared folder, which is slow; the
+# same headroom as the WebRequest calls, under nginx's 300s on /mcp/.
+FILES_TIMEOUT_SECONDS = 290.0
+
+# get_file returns content inline in the JSON response; larger files are
+# downloaded through REST instead.
+FILES_MAX_INLINE_BYTES = 16 * 1024 * 1024
+CONTENT_TYPE_JSON = "application/json"
 
 CONTENT_TYPE_PNG = "image/png"
 IMAGE_FORMAT_PNG = "png"

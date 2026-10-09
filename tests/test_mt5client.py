@@ -1011,6 +1011,40 @@ def test_restart_terminal_seeks_past_pre_existing_journal_content(monkeypatch, t
     assert captured_offset["offset"] == len(old_content)
 
 
+def _restart_harness(monkeypatch, reconnects: bool):
+    from mt5api.chartctl import autoit_webrequest
+
+    monkeypatch.setattr(mc, "m", lambda fn, *a, **kw: True)
+    monkeypatch.setattr(mc, "_kill_terminal", lambda: True)
+    monkeypatch.setattr(mc.subprocess, "Popen", MagicMock())
+    monkeypatch.setattr(mc, "_wait_for_journal", lambda *a, **kw: True)
+    monkeypatch.setattr(mc, "get_first_account", lambda: None)
+    monkeypatch.setattr(mc, "init_mt5", lambda *a, **kw: reconnects)
+    reapplied = []
+    monkeypatch.setattr(
+        autoit_webrequest, "reapply_in_background",
+        lambda delay, reason: reapplied.append(reason),
+    )
+    return reapplied
+
+
+def test_a_successful_restart_re_applies_the_webrequest_allowlist(monkeypatch):
+    """The terminal in the VM forgets its WebRequest list on every restart, and
+    the API's start-up re-apply has long since run by the time the health
+    monitor or POST /terminal/restart restarts it."""
+    reapplied = _restart_harness(monkeypatch, reconnects=True)
+
+    assert mc.restart_terminal() is True
+    assert reapplied == ["terminal restart"]
+
+
+def test_a_failed_restart_does_not_re_apply(monkeypatch):
+    reapplied = _restart_harness(monkeypatch, reconnects=False)
+
+    assert mc.restart_terminal() is False
+    assert reapplied == []
+
+
 def test_restart_terminal_relaunches_without_a_configured_account(monkeypatch):
     monkeypatch.setattr(mc, "m", lambda fn, *a, **kw: True)
     monkeypatch.setattr(mc, "_kill_terminal", lambda: False)  # no process found — still proceeds

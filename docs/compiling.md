@@ -201,13 +201,17 @@ elsewhere, sync it into that directory as part of your deploy — a stale `.mqh`
 compiles clean and then misbehaves at runtime, which is the worst failure shape
 available.
 
+With the [file API](files.md) enabled you can do that over HTTP: `PUT /compile/files/Include/MyLib?extract` with a zip of the library unpacks it into that directory, and `DELETE /compile/files/Include/MyLib?recursive` removes it.
+
 Edits are picked up by a running server without a restart. With
 `COMPILE_LOCAL_CACHE` set the include tree is re-validated against the source at
 most once every `INCLUDE_REFRESH_SECONDS` (60s), so an updated header reaches
 builds within that window rather than at the next restart. If you have just
-changed a shared library and are about to rebuild everything that depends on
-it, let that window pass first — otherwise the first builds of the batch can
-still use the previous copy, and they will report success while doing it.
+changed a shared library on the host and are about to rebuild everything that
+depends on it, let that window pass first, otherwise the first builds of the
+batch can still use the previous copy, and they will report success while doing
+it. A change made through `/compile/files` does not wait: it marks the mirror
+stale, and the next compile in any API process re-validates it first.
 
 ## Performance
 

@@ -6,6 +6,19 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.22.0]: 2026-10-09
+
+### Added
+
+- **File API.** `GET`, `PUT` and `DELETE` on `/files/<path>` list, download, upload and delete files in a terminal's install directory, the folder holding `terminal64.exe`: libraries in `MQL5/Include`, DLLs and `.ex5` imports in `MQL5/Libraries`, an expert's data in `MQL5/Files`, the logs. `PUT /files/<dir>?extract` unpacks a zip into that directory, merging with what is there, and never stores the zip. `/compile/files/...` does the same on the MQL5 tree `POST /compile` builds against, so a library uploaded there is what the next compile includes, in every API process at once. Both MCP endpoints get `list_files`, `get_file`, `put_file` and `delete_file`, and `list_terminals` reports `files` per terminal. Opt-in with `files.enabled: true` (`files: false` on a terminal opts it out). The broker credentials (`mt5start.ini`, `Config/accounts.dat`) are never served, the terminal's executables and Chart Deployments' own files are read-only, and every path is checked against `..`, absolute and drive paths, Windows device names and symlinks out of the tree. Archives are checked entry by entry before anything is written, and capped by `files.max_extract_bytes` (200 MiB unpacked) and `files.max_extract_files` (10000). See [docs/files.md](docs/files.md).
+
+### Fixed
+
+- **The WebRequest allowlist is re-applied after every terminal restart the API makes.** It used to be re-applied only when the API process started, so after the health monitor's recovery restart or `POST /terminal/restart` an expert's `WebRequest()` was refused until someone called `POST /webrequest/apply`.
+- **Resuming a paused deployment could put two deployments on one chart.** `PATCH /deployments/<id>` with `"enabled": true` skipped the duplicate check `POST /deployments` makes, so a deployment paused while another took its symbol and timeframe could be resumed beside it. It is now refused with 409 `DUPLICATE_CHART`.
+- **nginx cut long calls off after 60 seconds.** `PUT /webrequest` and `/webrequest/apply` can wait minutes for the GUI lock, and a terminal's own `/mcp` proxies them, so callers got nginx's HTML 504 while the work carried on. Those routes and the file API now get 300 seconds, like the unified `/mcp/`.
+- **`chartctl: true` crashed the API and the boot provisioning.** A bare `true` (or `false`) is now shorthand for `{enabled: true}`, in config.yaml's `chartctl` and `files` blocks alike. Any other non-mapping value still stops the MCP unifier with a config error, and the API treats it as off.
+
 ## [v4.21.1]: 2026-10-09
 
 ### Fixed

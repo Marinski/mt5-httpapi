@@ -151,6 +151,7 @@ def match_terminal_config(terms, broker=None, account=None, instance=None):
             "mode": (terminal.get("mode") or "live"),
             "symbol_suffix": terminal.get("symbol_suffix"),
             "chartctl": terminal.get("chartctl"),
+            "files": terminal.get("files"),
         }
     return None
 
@@ -166,13 +167,38 @@ def normalize_mode(raw) -> str:
     return mode if mode == MODE_BACKTEST else MODE_LIVE
 
 
+def feature_block(raw) -> dict:
+    """An opt-in feature block from config.yaml as a mapping.
+
+    ``chartctl: true`` and ``files: true`` are accepted as shorthand for
+    ``{enabled: true}``. Anything that is neither a bool nor a mapping counts
+    as disabled: this module is imported by the whole API, so a malformed
+    optional block must not stop trading.
+    """
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
 def chartctl_enabled(mode: str, chartctl_block, terminal_override) -> bool:
     """Whether a terminal serves Chart Deployments: a live-mode process, the
     global ``chartctl.enabled`` flag, and no per-terminal ``chartctl: false``.
     mcpunifier/config.py applies the same rule to the same config.yaml."""
     return (
         mode == MODE_LIVE
-        and bool((chartctl_block or {}).get("enabled", False))
+        and bool(feature_block(chartctl_block).get("enabled", False))
+        and terminal_override is not False
+    )
+
+
+def files_enabled(files_block, terminal_override) -> bool:
+    """Whether a terminal serves the file API (/files, /compile/files): the
+    global ``files.enabled`` flag and no per-terminal ``files: false``. Any
+    process mode. mcpunifier/config.py applies the same rule."""
+    return (
+        bool(feature_block(files_block).get("enabled", False))
         and terminal_override is not False
     )
 
@@ -547,7 +573,7 @@ INI_FILE = os.path.join(TERMINAL_DIR, "mt5start.ini")
 # config.yaml `chartctl:` block; per-terminal `chartctl: false` in terminals[]
 # overrides it. Backtest-mode terminals never enable it: there is no running
 # terminal64.exe to manage charts on.
-_chartctl_cfg = load_yaml_config().get("chartctl") or {}
+_chartctl_cfg = feature_block(load_yaml_config().get("chartctl"))
 # Opt-IN. Defaulting this on would auto-attach the loader EA to every live
 # terminal of any install that upgraded without asking for it - a fleet-wide
 # behaviour change nobody opted into. Absent chartctl block = unchanged API.
@@ -598,6 +624,21 @@ CHARTCTL_COMMAND_TIMEOUT_SECONDS = _chartctl_seconds(
 CHARTCTL_MAX_UPLOAD_BYTES = _chartctl_bytes(
     _chartctl_cfg.get("max_upload_bytes"), 16 * 1024 * 1024, 1024
 )
+# File API: read, write and delete files under this terminal's install
+# directory (/files) and the compile tree (/compile/files). Opt-in, like
+# chartctl: it reaches everything an expert can, including DLLs in
+# MQL5/Libraries. See docs/files.md.
+_files_cfg = feature_block(load_yaml_config().get("files"))
+FILES_ENABLED = files_enabled(_files_cfg, _terminal_config.get("files"))
+# Caps on one PUT ?extract: total unpacked bytes and number of files. Floors
+# keep a typo from refusing every archive.
+FILES_MAX_EXTRACT_BYTES = _chartctl_bytes(
+    _files_cfg.get("max_extract_bytes"), 200 * 1024 * 1024, 1024 * 1024
+)
+FILES_MAX_EXTRACT_FILES = _chartctl_bytes(
+    _files_cfg.get("max_extract_files"), 10000, 1
+)
+
 IDENTITY = make_identity(BROKER, ACCOUNT, INSTANCE)
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 FULL_LOG = os.path.join(LOG_DIR, "full.log")

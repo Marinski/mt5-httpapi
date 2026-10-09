@@ -13,6 +13,8 @@ and every response echoes which terminal answered.
 
 import base64
 import binascii
+import codecs
+import hashlib
 import json
 import logging
 from typing import Any
@@ -24,9 +26,13 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcpunifier.client import TerminalClient
 from mcpunifier.config import Settings, Terminal, resolve
 from mcpunifier.constants import (
+    CONTENT_TYPE_JSON,
     CONTENT_TYPE_PNG,
     DEFAULT_INSTANCE,
     FEATURE_CHARTCTL,
+    FEATURE_FILES,
+    FILES_MAX_INLINE_BYTES,
+    FILES_TIMEOUT_SECONDS,
     IMAGE_FORMAT_PNG,
     MCP_STREAMABLE_HTTP_PATH,
     SCREENSHOT_DEFAULT_HEIGHT,
@@ -36,6 +42,7 @@ from mcpunifier.constants import (
 )
 from mcpunifier.errors import (
     ChartctlDisabled,
+    FilesDisabled,
     TerminalRejected,
     ToolArgumentError,
     UnexpectedContent,
@@ -51,6 +58,12 @@ _RUNAS_QUERY = {"runas": "1"}
 # Path-segment values that would address a different route than the one named.
 _RELATIVE_PATH_SEGMENTS = frozenset({"", ".", ".."})
 _PATH_SEPARATORS = ("/", "\\")
+# File API: the route prefix of each tree and the multipart field it reads.
+_FILE_TREE_PREFIXES = {"terminal": "/files", "compile": "/compile/files"}
+_FILE_FORM_FIELD = "file"
+_DOT_SEGMENTS = frozenset({".", ".."})
+_UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+_FLAG_ON = "1"
 
 # The REST surface of one mt5api process, mirrored from its route table. The
 # unifier is out-of-process so it cannot read Flask's url_map the way the
@@ -115,6 +128,19 @@ _CHARTCTL_ROUTE_CATALOG: tuple[tuple[str, str], ...] = (
     ("POST", "/webrequest/apply"),
 )
 
+# Routes a terminal registers only when the file API is enabled for it
+# (mt5api/handlers/files.py).
+_FILES_ROUTE_CATALOG: tuple[tuple[str, str], ...] = (
+    ("GET", "/files"),
+    ("GET", "/files/<rel>"),
+    ("PUT", "/files/<rel>"),
+    ("DELETE", "/files/<rel>"),
+    ("GET", "/compile/files"),
+    ("GET", "/compile/files/<rel>"),
+    ("PUT", "/compile/files/<rel>"),
+    ("DELETE", "/compile/files/<rel>"),
+)
+
 _INSTRUCTIONS = """\
 HTTP interface to EVERY configured MetaTrader 5 terminal, exposed over MCP as
 dedicated typed tools. Each tool takes `broker` and `account` (plus optional
@@ -137,6 +163,13 @@ delete_deployment, reconcile_deployments), inspect and capture charts
 (list_charts, get_loader, screenshot_chart, close_chart), and manage the
 WebRequest URL allowlist (get_webrequest, set_webrequest, apply_webrequest).
 Uploads take the file as base64; screenshot_chart returns a PNG image.
+
+File API, on terminals where `list_terminals` reports files true: list_files,
+get_file, put_file (with extract it unpacks a zip into a directory) and
+delete_file, on the terminal's install directory (tree "terminal": MQL5/Include,
+MQL5/Libraries, MQL5/Files, logs, ...) or on the MQL5 tree compile builds
+against (tree "compile"). Writing into MQL5/Experts, MQL5/Libraries or
+MQL5/Include changes what experts on that account run, so only on request.
 
 Terminals are separate accounts with separate balances. Placing, modifying or
 cancelling orders and modifying or closing positions are real, irreversible
@@ -205,13 +238,53 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
             raise _chartctl_error(terminal, err) from err
         return {"terminal": terminal.key, **result}
 
+    async def call_files(
+        broker: str,
+        account: str,
+        instance: str,
+        method: str,
+        path: str,
+        query: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes]] | None = None,
+    ) -> dict[str, Any]:
+        """``call`` for a file API route, reporting a terminal without the
+        routes as FilesDisabled instead of a bare 404."""
+        terminal = resolve(settings, broker, account, instance)
+        try:
+            result = await client.call(
+                terminal,
+                method,
+                path,
+                query=query,
+                files=files,
+                timeout=FILES_TIMEOUT_SECONDS,
+            )
+        except TerminalRejected as err:
+            raise _files_error(terminal, err) from err
+        return {"terminal": terminal.key, **result}
+
+    async def fetch_file(
+        broker: str,
+        account: str,
+        instance: str,
+        path: str,
+    ) -> tuple[Terminal, str, bytes]:
+        """GET a file API path: (terminal, content type, body)."""
+        terminal = resolve(settings, broker, account, instance)
+        try:
+            content_type, data = await client.call_bytes(terminal, "GET", path)
+        except TerminalRejected as err:
+            raise _files_error(terminal, err) from err
+        return terminal, content_type, data
+
     @mcp.tool()
     async def list_terminals() -> dict[str, Any]:
         """List every configured terminal: broker, account, instance, process
-        mode (live or backtest) and whether Chart Deployments (chartctl) are
-        enabled for it in config.yaml. Call this before any other tool to
-        learn which broker/account values are valid; the other tools reject
-        anything not listed here rather than guessing."""
+        mode (live or backtest) and whether Chart Deployments (chartctl) and
+        the file API (files) are enabled for it in config.yaml. Call this
+        before any other tool to learn which broker/account values are
+        valid; the other tools reject anything not listed here rather than
+        guessing."""
         return {
             "terminals": [
                 {
@@ -221,6 +294,7 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
                     "key": terminal.key,
                     "mode": terminal.mode,
                     "chartctl": terminal.chartctl,
+                    "files": terminal.files,
                 }
                 for _, terminal in sorted(settings.terminals.items())
             ]
@@ -880,8 +954,10 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
         (``PATCH /deployments/{deployment_id}``).
 
         ``enabled``: false pauses it (the loader closes its chart), true
-        resumes it. ``set_file``: a staged ``.set`` name to switch to, or
-        ``""`` to run on the expert's default inputs. Pass at least one.
+        resumes it; resuming is refused with 409 ``DUPLICATE_CHART`` while
+        another enabled deployment targets the same symbol/timeframe.
+        ``set_file``: a staged ``.set`` name to switch to, or ``""`` to run
+        on the expert's default inputs. Pass at least one.
 
         A new ``set_file`` does NOT reach an expert that is already running:
         the loader leaves a chart it owns alone, so the new inputs apply the
@@ -1057,7 +1133,8 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
         terminal. Only call on explicit user request.
 
         The new list is stored before it is applied, so it is kept even when
-        the apply fails, and applied again on the next API start. Applying
+        the apply fails, and applied again whenever the API starts or
+        restarts the terminal. Applying
         can take minutes while other terminals finish theirs. If the call
         times out, the apply may still be running. ``get_webrequest`` shows
         the stored list either way, so it does not prove the apply worked;
@@ -1086,11 +1163,11 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
     ) -> dict[str, Any]:
         """Re-apply one terminal's stored ``WebRequest()`` allowlist
         (``POST /webrequest/apply``). Inside the Windows VM the terminal
-        forgets the list whenever it restarts. The API re-applies it once
-        when the API process starts, so call this after any other terminal
-        restart, or when ``get_webrequest`` shows the list but an expert's
-        ``WebRequest()`` is still refused. ``runas``: as in
-        ``set_webrequest``.
+        forgets the list whenever it restarts. The API re-applies it when
+        its process starts and after every terminal restart it performs
+        itself, so call this after a restart from outside the API, or when
+        ``get_webrequest`` shows the list but an expert's ``WebRequest()``
+        is still refused. ``runas``: as in ``set_webrequest``.
 
         On a bare-metal terminal this RESTARTS the terminal. Like
         ``set_webrequest`` it can take minutes; after a timeout, wait about
@@ -1107,13 +1184,133 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
             timeout=WEBREQUEST_TIMEOUT_SECONDS,
         )
 
+    # ── File API ─────────────────────────────────────────────────────
+
+    @mcp.tool()
+    async def list_files(
+        broker: str,
+        account: str,
+        path: str = "",
+        tree: str = "terminal",
+        instance: str = DEFAULT_INSTANCE,
+    ) -> dict[str, Any]:
+        """List one directory of one terminal's files (``GET /files/{path}``).
+
+        ``tree``: ``terminal`` (default) is the terminal's install directory,
+        the folder holding ``terminal64.exe``: ``MQL5/Include``,
+        ``MQL5/Libraries``, ``MQL5/Files``, ``MQL5/Logs``, ``logs`` and so
+        on. ``compile`` is the MQL5 directory ``POST /compile`` builds
+        against, where shared ``.mqh`` libraries go. ``path``: relative to
+        the tree root, ``/``-separated; empty lists the root.
+
+        Each entry has ``name``, ``path``, ``type`` (``file`` or ``dir``),
+        ``size``, ``modified_at`` and whether it is ``readable`` and
+        ``writable`` through this API.
+        """
+        url = _file_url(tree, path)
+        terminal, content_type, data = await fetch_file(broker, account, instance, url)
+        if not content_type.startswith(CONTENT_TYPE_JSON):
+            raise ToolArgumentError(f"{path} is a file; use get_file to read it")
+        return {"terminal": terminal.key, **json.loads(data.decode("utf-8"))}
+
+    @mcp.tool()
+    async def get_file(
+        broker: str,
+        account: str,
+        path: str,
+        tree: str = "terminal",
+        instance: str = DEFAULT_INSTANCE,
+    ) -> dict[str, Any]:
+        """Read one file of one terminal (``GET /files/{path}``).
+
+        ``tree`` and ``path`` as in ``list_files``. Returns ``size``,
+        ``sha256`` and the content: ``text`` for UTF-8 or UTF-16 text (MT5
+        writes its logs as UTF-16), otherwise ``content_base64``. Files over
+        16 MiB are refused; download those through the REST API.
+        ``mt5start.ini`` and ``Config/accounts.dat`` hold the broker
+        credentials and are never returned.
+        """
+        url = _file_url(tree, path)
+        terminal, content_type, data = await fetch_file(broker, account, instance, url)
+        if content_type.startswith(CONTENT_TYPE_JSON):
+            raise ToolArgumentError(f"{path} is a directory; use list_files")
+        return {"terminal": terminal.key, **_file_payload(path, data)}
+
+    @mcp.tool()
+    async def put_file(
+        broker: str,
+        account: str,
+        path: str,
+        content: str = "",
+        content_base64: str = "",
+        extract: bool = False,
+        tree: str = "terminal",
+        instance: str = DEFAULT_INSTANCE,
+    ) -> dict[str, Any]:
+        """Create or replace one file on one terminal, creating its
+        directories (``PUT /files/{path}``).
+
+        Pass exactly one of ``content`` (text, written as UTF-8) or
+        ``content_base64`` (raw bytes). With ``extract`` true the bytes must
+        be a zip, and ``path`` names the directory it unpacks into: the
+        archive's tree is merged in, replacing files of the same name and
+        leaving the rest, and the zip itself is never stored. ``tree`` as in
+        ``list_files``.
+
+        Refused: paths outside the tree, ``mt5start.ini`` and
+        ``Config/accounts.dat``, the terminal's executables, and Chart
+        Deployments' own files (``MQL5/Experts/Uploaded``,
+        ``MQL5/Files/chartctl``, ``chartctl``). The ``/mcp`` request is
+        capped at 25 MiB, about 18 MiB of file after base64.
+
+        Writing into ``MQL5/Experts``, ``MQL5/Libraries`` or
+        ``MQL5/Include`` changes what experts on that account run. Only do
+        it on explicit user request, and confirm which terminal first.
+        """
+        data = _file_bytes(content, content_base64)
+        url = _file_url(tree, path, allow_root=False)
+        query = {"extract": _FLAG_ON} if extract else None
+        filename = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        files = {_FILE_FORM_FIELD: (filename, data)}
+        return await call_files(
+            broker,
+            account,
+            instance,
+            "PUT",
+            url,
+            query=query,
+            files=files,
+        )
+
+    @mcp.tool()
+    async def delete_file(
+        broker: str,
+        account: str,
+        path: str,
+        recursive: bool = False,
+        tree: str = "terminal",
+        instance: str = DEFAULT_INSTANCE,
+    ) -> dict[str, Any]:
+        """Delete a file, or a directory, on one terminal
+        (``DELETE /files/{path}``).
+
+        A non-empty directory needs ``recursive`` true. The same paths
+        ``put_file`` refuses cannot be deleted, nor a directory holding any
+        of them. ``tree`` as in ``list_files``. Only on explicit user
+        request, and confirm which terminal first.
+        """
+        url = _file_url(tree, path, allow_root=False)
+        query = {"recursive": _FLAG_ON} if recursive else None
+        return await call_files(broker, account, instance, "DELETE", url, query=query)
+
     @mcp.tool()
     async def endpoints() -> dict[str, Any]:
         """List every REST endpoint (method, path) one terminal exposes — the
         catalog of routes ``request`` can call. Paths are the same on every
         terminal; ``request`` picks which terminal via broker/account.
-        Entries with ``"requires": "chartctl"`` exist only on terminals where
-        ``list_terminals`` reports chartctl true; elsewhere they answer 404."""
+        Entries with ``"requires": "chartctl"`` or ``"requires": "files"``
+        exist only on terminals where ``list_terminals`` reports that
+        feature true; elsewhere they answer 404."""
         found = [
             {"method": method, "path": path}
             for method, path in _ROUTE_CATALOG
@@ -1122,6 +1319,11 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
         found.extend(
             {"method": method, "path": path, "requires": FEATURE_CHARTCTL}
             for method, path in _CHARTCTL_ROUTE_CATALOG
+            if method not in SKIP_HTTP_METHODS
+        )
+        found.extend(
+            {"method": method, "path": path, "requires": FEATURE_FILES}
+            for method, path in _FILES_ROUTE_CATALOG
             if method not in SKIP_HTTP_METHODS
         )
         found.sort(key=lambda entry: (entry["path"], entry["method"]))
@@ -1185,6 +1387,89 @@ def _chartctl_error(terminal: Terminal, err: TerminalRejected) -> Exception:
         extra={"terminal": terminal.key, "reason": "chartctl_disabled"},
     )
     return ChartctlDisabled(terminal.key, configured=terminal.chartctl)
+
+
+def _files_error(terminal: Terminal, err: TerminalRejected) -> Exception:
+    """Turn a file API call's rejection into the error to raise: Flask's
+    HTML 404 means the routes are missing, while the handlers' own errors
+    are JSON with a ``code`` and pass through unchanged."""
+    if err.status != _HTTP_NOT_FOUND or _is_json_object(err.body):
+        return err
+    logger.info(
+        "file API route missing on terminal",
+        extra={"terminal": terminal.key, "reason": "files_disabled"},
+    )
+    return FilesDisabled(terminal.key, configured=terminal.files)
+
+
+def _file_url(tree: str, path: str, allow_root: bool = True) -> str:
+    """The file API URL for ``path`` in ``tree``, each segment encoded.
+
+    Dot segments are refused here because httpx resolves them before the
+    terminal could refuse them.
+    """
+    prefix = _FILE_TREE_PREFIXES.get(tree)
+    if prefix is None:
+        raise ToolArgumentError(
+            f"tree must be one of {sorted(_FILE_TREE_PREFIXES)}, got {tree!r}"
+        )
+    text = path.replace("\\", "/")
+    if text.startswith("/"):
+        raise ToolArgumentError(f"path {path!r} must be relative to the tree root")
+    segments = [segment for segment in text.rstrip("/").split("/") if segment]
+    if any(segment in _DOT_SEGMENTS for segment in segments):
+        raise ToolArgumentError(f"path {path!r} must not contain '.' or '..' segments")
+    if not segments:
+        if not allow_root:
+            raise ToolArgumentError("path is empty; name a file or directory")
+        return prefix
+    return prefix + "/" + "/".join(quote(segment, safe="") for segment in segments)
+
+
+def _file_bytes(content: str, content_base64: str) -> bytes:
+    """A file's bytes from exactly one of text or base64 content. Empty
+    text is a valid (empty) file."""
+    if content and content_base64:
+        raise ToolArgumentError("pass either content or content_base64, not both")
+    if content_base64:
+        return _decode_base64("content_base64", content_base64)
+    return content.encode("utf-8")
+
+
+def _file_payload(path: str, data: bytes) -> dict[str, Any]:
+    """The get_file result: metadata plus the content as text when it is
+    text, base64 otherwise."""
+    if len(data) > FILES_MAX_INLINE_BYTES:
+        raise ToolArgumentError(
+            f"{path} is {len(data)} bytes; get_file returns at most "
+            f"{FILES_MAX_INLINE_BYTES}, download it through the REST API"
+        )
+    payload: dict[str, Any] = {
+        "path": path,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    text = _as_text(data)
+    if text is None:
+        payload["content_base64"] = base64.b64encode(data).decode("ascii")
+        return payload
+    payload["text"] = text
+    return payload
+
+
+def _as_text(data: bytes) -> str | None:
+    """The bytes as text if they are UTF-16 with a BOM or clean UTF-8."""
+    if data.startswith(_UTF16_BOMS):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
 
 
 def _is_json_object(text: str) -> bool:

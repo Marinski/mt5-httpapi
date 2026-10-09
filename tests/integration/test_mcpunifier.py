@@ -39,7 +39,7 @@ LIVE_ACCOUNT = "tenkchallenge"
 DOWN_BROKER = "roboforex"
 DOWN_ACCOUNT = "procent"
 
-EXPECTED_TOOL_COUNT = 44
+EXPECTED_TOOL_COUNT = 48
 EXPECTED_TERMINAL_COUNT = 2
 
 # What the stub terminal does with the chartctl paths it stands in for: echo
@@ -392,9 +392,22 @@ def _chartctl_routes():
     return _url_map_routes(app)
 
 
+def _files_routes():
+    """(method, path) for the file API routes, from the same
+    register_files_routes server.py calls when the file API is enabled."""
+    from flask import Flask
+
+    from mt5api.handlers.files import register_files_routes
+
+    app = Flask("files_routes")
+    register_files_routes(app)
+    return _url_map_routes(app)
+
+
 def _flask_routes():
     """(method, path) for every route the real mt5api Flask app serves with
-    chartctl enabled, the configuration the catalog documents.
+    chartctl and the file API enabled, the configuration the catalog
+    documents.
 
     Imported here rather than at module scope so the MT5 stub tests/conftest.py
     installs is in place first — the SDK wheel is Windows-only.
@@ -406,7 +419,7 @@ def _flask_routes():
     """
     from mt5api.server import app
 
-    return _url_map_routes(app) | _chartctl_routes()
+    return _url_map_routes(app) | _chartctl_routes() | _files_routes()
 
 
 def test_the_endpoints_tool_returns_exactly_the_real_flask_routes(unifier):
@@ -457,6 +470,18 @@ def test_the_endpoints_tool_marks_exactly_the_chartctl_routes(unifier):
         if entry.get("requires") == "chartctl"
     }
     assert marked == _chartctl_routes()
+
+
+def test_the_endpoints_tool_marks_exactly_the_file_routes(unifier):
+    """Likewise for the file API: its routes 404 unless files.enabled."""
+    payload = json.loads(_tool_text(_call_tool(unifier, "endpoints", {})))
+
+    marked = {
+        (entry["method"], entry["path"])
+        for entry in payload["endpoints"]
+        if entry.get("requires") == "files"
+    }
+    assert marked == _files_routes()
 
 
 def test_the_endpoint_is_still_healthy_after_those_failures(unifier):

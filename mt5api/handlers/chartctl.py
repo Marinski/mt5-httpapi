@@ -346,6 +346,8 @@ def patch_deployment(dep_id):
         dep = registry.update_deployment(dep_id, **changes)
     except KeyError:
         return _err(404, "NOT_FOUND", f"deployment {dep_id} does not exist")
+    except registry.DuplicateChart as exc:
+        return _err(409, "DUPLICATE_CHART", str(exc))
     if "set_file" in changes:
         try:
             _materialize_tpl(dep)

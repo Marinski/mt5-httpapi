@@ -624,7 +624,19 @@ def restart_terminal():
     if abandoned:
         log.warning("Dropped %d SDK call(s) stuck on the killed terminal from the wedge guard.", abandoned)
     log.info("Terminal restarted successfully.")
+    _reapply_webrequest_after_restart()
     return True
+
+
+def _reapply_webrequest_after_restart():
+    """The terminal in the VM forgets its WebRequest allowlist on every
+    restart, and the API's own start-up re-apply has long since run."""
+    try:
+        from mt5api.chartctl import autoit_webrequest as autoit
+
+        autoit.reapply_in_background(autoit.gui_settle_seconds(), "terminal restart")
+    except Exception:  # noqa: BLE001 - the restart itself succeeded; never fail it here
+        log.exception("WebRequest re-apply after restart could not start")
 
 
 def to_dict(named_tuple):

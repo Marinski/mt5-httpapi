@@ -349,3 +349,63 @@ def test_config_helper_write_ini_no_desired_no_common_ini(tmp_path, monkeypatch)
     ch.main()
     # no desired file -> boot-seed is a no-op, common.ini left absent
     assert not os.path.exists(wr.common_ini_path(str(term / "Config")))
+
+
+# ── background re-apply (API start, terminal restart) ────────────────
+
+class _SyncThread:
+    """threading.Thread stand-in that runs the target when started."""
+
+    def __init__(self, target, **_kwargs):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+def _reapply_harness(monkeypatch, available, urls, statuses):
+    from mt5api.chartctl import autoit_webrequest as autoit
+
+    calls = []
+    remaining = list(statuses)
+    monkeypatch.setattr(autoit, "available", lambda: available)
+    monkeypatch.setattr(autoit.wr, "effective_urls", lambda _cfg: urls)
+    monkeypatch.setattr(autoit.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(autoit.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        autoit, "apply_urls",
+        lambda applied: (calls.append(list(applied)), (remaining.pop(0), ""))[1],
+    )
+    return autoit, calls
+
+
+def test_reapply_retries_until_the_gui_apply_succeeds(monkeypatch):
+    autoit, calls = _reapply_harness(
+        monkeypatch, True, ["https://a.example"], ["FAIL:busy", "OK"],
+    )
+
+    autoit.reapply_in_background(0, "terminal restart")
+
+    assert calls == [["https://a.example"], ["https://a.example"]]
+
+
+def test_reapply_gives_up_after_three_attempts(monkeypatch):
+    autoit, calls = _reapply_harness(
+        monkeypatch, True, ["https://a.example"], ["FAIL"] * 5,
+    )
+
+    autoit.reapply_in_background(0, "terminal restart")
+
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    ("available", "urls"),
+    [(False, ["https://a.example"]), (True, [])],
+)
+def test_reapply_is_a_no_op_without_autoit_or_a_stored_list(monkeypatch, available, urls):
+    autoit, calls = _reapply_harness(monkeypatch, available, urls, ["OK"])
+
+    autoit.reapply_in_background(0, "api start")
+
+    assert calls == []

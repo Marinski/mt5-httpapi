@@ -102,47 +102,23 @@ def _mcp_auth_gate(mcp_wsgi_app):
 
 _WSGI_APP = DispatcherMiddleware(app, {"/mcp": _mcp_auth_gate(_MCP_BRIDGE)})
 
-# Seconds to let the terminal GUI settle before re-applying the WebRequest
-# allowlist via AutoIt on boot (see _reapply_webrequest_once).
-WEBREQUEST_BOOT_DELAY = 25
 _webrequest_reapplied = threading.Event()
 
 
 def _reapply_webrequest_once():
-    """Re-apply this terminal's desired WebRequest allowlist via AutoIt after a
-    (re)start. MT5 on the VM drops the list every restart, so the API re-sets it
-    once the terminal GUI is up. No-op unless AutoIt is present (the VM) AND a
-    desired allowlist has been configured. Runs in a daemon thread so it never
-    blocks startup; guarded to run only once per process."""
+    """Re-apply this terminal's desired WebRequest allowlist via AutoIt after
+    the API starts. MT5 on the VM drops the list every restart, so the API
+    re-sets it once the terminal GUI is up. Guarded to run once per process;
+    mt5client.restart_terminal re-applies after its own restarts."""
     if _webrequest_reapplied.is_set():
         return
     _webrequest_reapplied.set()
+    try:
+        from mt5api.chartctl import autoit_webrequest as autoit
 
-    def _work():
-        try:
-            from mt5api.chartctl import autoit_webrequest as autoit
-            from mt5api.chartctl import webrequest as wr
-            from mt5api.config import TERMINAL_DIR
-
-            if not autoit.available():
-                return
-            urls = wr.effective_urls(wr.config_dir(TERMINAL_DIR))
-            if not urls:
-                return
-            time.sleep(WEBREQUEST_BOOT_DELAY + (PORT % 10) * 3)
-            for attempt in range(1, 4):
-                status, _log = autoit.apply_urls(urls)
-                log.info(
-                    "Boot WebRequest re-apply attempt %d: %d url(s) -> %s",
-                    attempt, len(urls), status,
-                )
-                if status == "OK":
-                    break
-                time.sleep(15)
-        except Exception:
-            log.exception("Boot WebRequest re-apply failed")
-
-    threading.Thread(target=_work, daemon=True).start()
+        autoit.reapply_in_background(autoit.gui_settle_seconds(), "api start")
+    except Exception:  # noqa: BLE001 - never block startup on an optional feature
+        log.exception("Boot WebRequest re-apply could not start")
 
 
 def _background_init():

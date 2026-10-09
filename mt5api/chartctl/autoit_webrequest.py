@@ -27,9 +27,19 @@ import contextlib
 import os
 import re
 import subprocess
+import threading
 import time
 
-from mt5api.config import ACCOUNT, ASSETS_DIR, BROKER, INI_FILE, INSTANCE, TERMINAL_DIR
+from mt5api.chartctl import webrequest as wr
+from mt5api.config import (
+    ACCOUNT,
+    ASSETS_DIR,
+    BROKER,
+    INI_FILE,
+    INSTANCE,
+    PORT,
+    TERMINAL_DIR,
+)
 from mt5api.logger import log
 
 AUTOIT_DIR = os.path.join(ASSETS_DIR, "autoit")
@@ -237,6 +247,60 @@ def apply_urls(urls: list[str], timeout: float = 120, use_runas: bool = False) -
     with open(urlfile, "w", encoding="utf-8") as f:
         f.write("\n".join(urls))
     return _run_script("set_webrequest.au3", [urlfile], timeout, use_runas)
+
+
+_REAPPLY_ATTEMPTS = 3
+_REAPPLY_RETRY_SECONDS = 15
+_AUTOIT_OK = "OK"
+# Seconds to let a freshly started terminal's GUI settle before driving it,
+# plus a per-port stagger so one VM's terminals do not all queue on the GUI
+# lock at once.
+_GUI_SETTLE_SECONDS = 25
+_GUI_SETTLE_STAGGER_SECONDS = 3
+_GUI_SETTLE_STAGGER_SLOTS = 10
+
+
+def gui_settle_seconds() -> int:
+    """How long to wait after a terminal starts before driving its GUI."""
+    stagger = (PORT % _GUI_SETTLE_STAGGER_SLOTS) * _GUI_SETTLE_STAGGER_SECONDS
+    return _GUI_SETTLE_SECONDS + stagger
+
+
+def reapply_in_background(delay_seconds: float, reason: str) -> None:
+    """Re-apply the stored allowlist to the running terminal on a daemon
+    thread, after `delay_seconds` for its GUI to settle.
+
+    MT5 in the VM forgets the list whenever terminal64.exe restarts, so this
+    runs after the API starts and after every restart the API itself
+    performs. No-op without AutoIt (bare metal, where the list lives in
+    common.ini) or without a stored list.
+    """
+    if not available():
+        return
+    urls = wr.effective_urls(wr.config_dir(TERMINAL_DIR))
+    if not urls:
+        return
+
+    def _work():
+        try:
+            time.sleep(delay_seconds)
+            for attempt in range(1, _REAPPLY_ATTEMPTS + 1):
+                status, _autoit_log = apply_urls(urls)
+                log.info(
+                    "WebRequest re-apply (%s) attempt %d: %d url(s) -> %s",
+                    reason, attempt, len(urls), status,
+                )
+                if status == _AUTOIT_OK:
+                    return
+                time.sleep(_REAPPLY_RETRY_SECONDS)
+            log.warning(
+                "WebRequest re-apply (%s) gave up after %d attempts; "
+                "POST /webrequest/apply retries it", reason, _REAPPLY_ATTEMPTS,
+            )
+        except Exception:  # noqa: BLE001 - a daemon thread must log, not die silently
+            log.exception("WebRequest re-apply (%s) failed", reason)
+
+    threading.Thread(target=_work, name="webrequest-reapply", daemon=True).start()
 
 
 def refresh_navigator(timeout: float = 60) -> tuple[str, str]:

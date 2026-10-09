@@ -144,6 +144,61 @@ def api_client():
     return app.test_client()
 
 
+FILE_TREE_SECRET = b"[Common]\nLogin=1\nPassword=hunter2\n"
+
+
+@pytest.fixture
+def file_trees(tmp_path, monkeypatch):
+    """A terminal install directory and a compile MQL5 tree in tmp dirs, laid
+    out like the real ones (terminal64.exe, mt5start.ini with credentials,
+    Config/accounts.dat, Chart Deployments' own directories), with the file
+    API's config repointed at them. ``changed`` records each call to
+    mark_includes_changed."""
+    from mt5api import config
+    from mt5api.handlers import compile as compile_handler
+
+    terminal = tmp_path / "terminal"
+    compile_root = tmp_path / "compile" / "MQL5"
+    for directory in (
+        terminal / "Config",
+        terminal / "MQL5" / "Include",
+        terminal / "MQL5" / "Experts" / "Uploaded",
+        terminal / "MQL5" / "Files" / "chartctl",
+        terminal / "chartctl",
+        terminal / "logs",
+        compile_root / "Include",
+        compile_root / "Experts" / "Uploaded",
+    ):
+        directory.mkdir(parents=True)
+    (terminal / "terminal64.exe").write_bytes(b"MZ")
+    (terminal / "mt5start.ini").write_bytes(FILE_TREE_SECRET)
+    (terminal / "Config" / "accounts.dat").write_bytes(b"accounts")
+    (terminal / "Config" / "common.ini").write_bytes(b"[Experts]\n")
+    (terminal / "MQL5" / "Files" / "chartctl" / "desired.json").write_bytes(b"{}")
+    (terminal / "logs" / "20261009.log").write_bytes("journal".encode("utf-16"))
+
+    monkeypatch.setattr(config, "TERMINAL_DIR", str(terminal))
+    monkeypatch.setattr(config, "COMPILE_INCLUDE_DIR", str(compile_root))
+    monkeypatch.setattr(config, "FILES_MAX_EXTRACT_BYTES", 1024 * 1024)
+    monkeypatch.setattr(config, "FILES_MAX_EXTRACT_FILES", 50)
+    changed = []
+    monkeypatch.setattr(compile_handler, "mark_includes_changed", lambda: changed.append(True))
+    return {"terminal": terminal, "compile": compile_root, "changed": changed}
+
+
+@pytest.fixture
+def files_app(file_trees):
+    """A fresh Flask app serving the shipped file API route table over
+    ``file_trees``, so the suite does not depend on FILES_ENABLED."""
+    from flask import Flask
+
+    from mt5api.handlers.files import register_files_routes
+
+    app = Flask("files_test")
+    register_files_routes(app)
+    return app
+
+
 @pytest.fixture
 def chartctl_app(monkeypatch, tmp_path):
     """A fresh Flask app serving the shipped chartctl route table, with every

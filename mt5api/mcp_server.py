@@ -26,6 +26,8 @@ Tool families:
                    ``close_chart``
       WebRequest:  ``get_webrequest``, ``set_webrequest``,
                    ``apply_webrequest``
+  - Files, only when the file API is enabled on this terminal:
+                   ``list_files``, ``get_file``, ``put_file``, ``delete_file``
   - Escape hatches   — ``request`` (JSON routes) and ``endpoints`` (route catalog)
 
 File uploads (``upload_expert``, ``upload_set``) take the file content as
@@ -52,7 +54,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import codecs
+import hashlib
 import io
+import json
 import logging
 from typing import Any
 from urllib.parse import quote
@@ -61,7 +66,7 @@ from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from mt5api.config import API_TOKEN, CHARTCTL_ENABLED
+from mt5api.config import API_TOKEN, CHARTCTL_ENABLED, FILES_ENABLED
 from mt5api.chartctl.command import (
     SCREENSHOT_DEFAULT_HEIGHT,
     SCREENSHOT_DEFAULT_WIDTH,
@@ -88,6 +93,17 @@ _RUNAS_QUERY = {"runas": "1"}
 # Path-segment values that would address a different route than the one named.
 _RELATIVE_PATH_SEGMENTS = frozenset({"", ".", ".."})
 _PATH_SEPARATORS = ("/", "\\")
+
+# File API: the route prefix of each tree, the multipart field it reads, and
+# the largest file get_file returns inline (the /mcp response is JSON, and
+# base64 grows the bytes by a third).
+_FILE_TREE_PREFIXES = {"terminal": "/files", "compile": "/compile/files"}
+_FILE_FORM_FIELD = "file"
+_FILE_MAX_INLINE_BYTES = 16 * 1024 * 1024
+_JSON_MIME_TYPE = "application/json"
+_DOT_SEGMENTS = frozenset({".", ".."})
+_UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+_FLAG_ON = "1"
 
 _INSTRUCTIONS = (
     "HTTP interface to a MetaTrader 5 terminal, exposed over MCP as "
@@ -121,16 +137,32 @@ _CHARTCTL_INSTRUCTIONS = (
     "enable, re-point or delete one only when the user asked for it."
 )
 
+_FILES_INSTRUCTIONS = (
+    " The file API is enabled on this terminal: list_files, get_file, "
+    "put_file (put_file with extract unpacks a zip) and delete_file work on "
+    "the terminal's install directory (tree 'terminal': MQL5/Include, "
+    "MQL5/Libraries, MQL5/Files, logs, ...) or on the MQL5 tree compile "
+    "builds against (tree 'compile'). A file written to MQL5/Experts, "
+    "MQL5/Libraries or MQL5/Include changes what an expert on this account "
+    "runs, so only write or delete there when the user asked for it."
+)
 
-def build_mcp_server(chartctl_enabled: bool = CHARTCTL_ENABLED) -> FastMCP:
+
+def build_mcp_server(
+    chartctl_enabled: bool = CHARTCTL_ENABLED,
+    files_enabled: bool = FILES_ENABLED,
+) -> FastMCP:
     """Construct the FastMCP server mounted (via a2wsgi) under ``/mcp``.
 
-    The Chart Deployments tools are registered only when ``chartctl_enabled``,
-    matching server.py, which registers their REST routes under the same flag.
+    The Chart Deployments tools are registered only when ``chartctl_enabled``
+    and the file tools only when ``files_enabled``, matching server.py, which
+    registers their REST routes under the same flags.
     """
     instructions = _INSTRUCTIONS
     if chartctl_enabled:
         instructions += _CHARTCTL_INSTRUCTIONS
+    if files_enabled:
+        instructions += _FILES_INSTRUCTIONS
     mcp = FastMCP(
         name="mt5-httpapi",
         instructions=instructions,
@@ -425,6 +457,8 @@ def build_mcp_server(chartctl_enabled: bool = CHARTCTL_ENABLED) -> FastMCP:
 
     if chartctl_enabled:
         _register_chartctl_tools(mcp)
+    if files_enabled:
+        _register_files_tools(mcp)
 
     # ── Escape hatches ───────────────────────────────────────────────
 
@@ -628,8 +662,10 @@ def _register_chartctl_tools(mcp: FastMCP) -> None:
         (``PATCH /deployments/{deployment_id}``).
 
         ``enabled``: false pauses it (the loader closes its chart), true
-        resumes it. ``set_file``: a staged ``.set`` name to switch to, or
-        ``""`` to run on the expert's default inputs. Pass at least one.
+        resumes it; resuming is refused with 409 ``DUPLICATE_CHART`` while
+        another enabled deployment targets the same symbol/timeframe.
+        ``set_file``: a staged ``.set`` name to switch to, or ``""`` to run
+        on the expert's default inputs. Pass at least one.
 
         A new ``set_file`` does NOT reach an expert that is already running:
         the loader leaves a chart it owns alone, so the new inputs apply the
@@ -744,7 +780,8 @@ def _register_chartctl_tools(mcp: FastMCP) -> None:
         terminal. Only call on explicit user request.
 
         The new list is stored before it is applied, so it is kept even when
-        the apply fails, and applied again on the next API start. Applying
+        the apply fails, and applied again whenever the API starts or
+        restarts the terminal. Applying
         can take minutes while other terminals finish theirs. If the call
         times out, the apply may still be running. ``get_webrequest`` shows
         the stored list either way, so it does not prove the apply worked;
@@ -760,9 +797,10 @@ def _register_chartctl_tools(mcp: FastMCP) -> None:
         """Re-apply the stored ``WebRequest()`` allowlist to the running
         terminal (``POST /webrequest/apply``). Inside the Windows VM the
         terminal forgets the list whenever it restarts. The API re-applies
-        it once when the API process starts, so call this after any other
-        terminal restart, or when ``get_webrequest`` shows the list but an
-        expert's ``WebRequest()`` is still refused. ``runas``: as in
+        it when its process starts and after every terminal restart it
+        performs itself, so call this after a restart from outside the API,
+        or when ``get_webrequest`` shows the list but an expert's
+        ``WebRequest()`` is still refused. ``runas``: as in
         ``set_webrequest``.
 
         On a bare-metal terminal this RESTARTS the terminal. Like
@@ -771,6 +809,181 @@ def _register_chartctl_tools(mcp: FastMCP) -> None:
         """
         query = _RUNAS_QUERY if runas else None
         return await _call("POST", "/webrequest/apply", query=query)
+
+
+def _register_files_tools(mcp: FastMCP) -> None:
+    """Register the file API tools on ``mcp``."""
+
+    @mcp.tool()
+    async def list_files(path: str = "", tree: str = "terminal") -> dict[str, Any]:
+        """List one directory of this terminal's files (``GET /files/{path}``).
+
+        ``tree``: ``terminal`` (default) is the terminal's install directory,
+        the folder holding ``terminal64.exe``: ``MQL5/Include``,
+        ``MQL5/Libraries``, ``MQL5/Files``, ``MQL5/Logs``, ``logs`` and so
+        on. ``compile`` is the MQL5 directory ``POST /compile`` builds
+        against, where shared ``.mqh`` libraries go. ``path``: relative to
+        the tree root, ``/``-separated; empty lists the root.
+
+        Each entry has ``name``, ``path``, ``type`` (``file`` or ``dir``),
+        ``size``, ``modified_at`` and whether it is ``readable`` and
+        ``writable`` through this API.
+        """
+        url = _file_url(tree, path)
+        status, content_type, data = await _call_bytes("GET", url)
+        _raise_for_file_status(status, data)
+        if not content_type.startswith(_JSON_MIME_TYPE):
+            raise ToolError(f"{path} is a file; use get_file to read it")
+        return _decode_json_bytes(data)
+
+    @mcp.tool()
+    async def get_file(path: str, tree: str = "terminal") -> dict[str, Any]:
+        """Read one file (``GET /files/{path}``).
+
+        ``tree`` and ``path`` as in ``list_files``. Returns ``size``,
+        ``sha256`` and the content: ``text`` for UTF-8 or UTF-16 text (MT5
+        writes its logs as UTF-16), otherwise ``content_base64``. Files over
+        16 MiB are refused; download those through the REST API.
+        ``mt5start.ini`` and ``Config/accounts.dat`` hold the broker
+        credentials and are never returned.
+        """
+        url = _file_url(tree, path)
+        status, content_type, data = await _call_bytes("GET", url)
+        _raise_for_file_status(status, data)
+        if content_type.startswith(_JSON_MIME_TYPE):
+            raise ToolError(f"{path} is a directory; use list_files")
+        return _file_payload(path, data)
+
+    @mcp.tool()
+    async def put_file(
+        path: str,
+        content: str = "",
+        content_base64: str = "",
+        extract: bool = False,
+        tree: str = "terminal",
+    ) -> dict[str, Any]:
+        """Create or replace one file, creating its directories
+        (``PUT /files/{path}``).
+
+        Pass exactly one of ``content`` (text, written as UTF-8) or
+        ``content_base64`` (raw bytes). With ``extract`` true the bytes must
+        be a zip, and ``path`` names the directory it unpacks into: the
+        archive's tree is merged in, replacing files of the same name and
+        leaving the rest, and the zip itself is never stored. ``tree`` as in
+        ``list_files``.
+
+        Refused: paths outside the tree, ``mt5start.ini`` and
+        ``Config/accounts.dat``, the terminal's executables, and Chart
+        Deployments' own files (``MQL5/Experts/Uploaded``,
+        ``MQL5/Files/chartctl``, ``chartctl``). The ``/mcp`` request is
+        capped at 25 MiB, about 18 MiB of file after base64.
+
+        Writing into ``MQL5/Experts``, ``MQL5/Libraries`` or
+        ``MQL5/Include`` changes what experts on this account run. Only do
+        it on explicit user request.
+        """
+        data = _file_bytes(content, content_base64)
+        url = _file_url(tree, path, allow_root=False)
+        query = {"extract": _FLAG_ON} if extract else None
+        filename = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        files = {_FILE_FORM_FIELD: (filename, data)}
+        return await _call("PUT", url, query=query, files=files)
+
+    @mcp.tool()
+    async def delete_file(
+        path: str,
+        recursive: bool = False,
+        tree: str = "terminal",
+    ) -> dict[str, Any]:
+        """Delete a file, or a directory (``DELETE /files/{path}``).
+
+        A non-empty directory needs ``recursive`` true. The same paths
+        ``put_file`` refuses cannot be deleted, nor a directory holding any
+        of them. ``tree`` as in ``list_files``. Only on explicit user
+        request.
+        """
+        url = _file_url(tree, path, allow_root=False)
+        query = {"recursive": _FLAG_ON} if recursive else None
+        return await _call("DELETE", url, query=query)
+
+
+def _file_url(tree: str, path: str, allow_root: bool = True) -> str:
+    """The file API URL for ``path`` in ``tree``, each segment encoded.
+
+    Dot segments are refused here because an HTTP client would resolve
+    them before the server could refuse them.
+    """
+    prefix = _FILE_TREE_PREFIXES.get(tree)
+    if prefix is None:
+        raise ToolError(f"tree must be one of {sorted(_FILE_TREE_PREFIXES)}, got {tree!r}")
+    text = path.replace("\\", "/")
+    if text.startswith("/"):
+        raise ToolError(f"path {path!r} must be relative to the tree root")
+    segments = [segment for segment in text.rstrip("/").split("/") if segment]
+    if any(segment in _DOT_SEGMENTS for segment in segments):
+        raise ToolError(f"path {path!r} must not contain '.' or '..' segments")
+    if not segments:
+        if not allow_root:
+            raise ToolError("path is empty; name a file or directory")
+        return prefix
+    return prefix + "/" + "/".join(quote(segment, safe="") for segment in segments)
+
+
+def _raise_for_file_status(status: int, data: bytes) -> None:
+    if status == _HTTP_OK:
+        return
+    detail = data.decode("utf-8", errors="replace")
+    raise ToolError(f"HTTP {status}: {detail}")
+
+
+def _decode_json_bytes(data: bytes) -> dict[str, Any]:
+    return json.loads(data.decode("utf-8"))
+
+
+def _file_bytes(content: str, content_base64: str) -> bytes:
+    """A file's bytes from exactly one of text or base64 content. Empty
+    text is a valid (empty) file."""
+    if content and content_base64:
+        raise ToolError("pass either content or content_base64, not both")
+    if content_base64:
+        return _decode_base64("content_base64", content_base64)
+    return content.encode("utf-8")
+
+
+def _file_payload(path: str, data: bytes) -> dict[str, Any]:
+    """The get_file result: metadata plus the content as text when it is
+    text, base64 otherwise."""
+    if len(data) > _FILE_MAX_INLINE_BYTES:
+        raise ToolError(
+            f"{path} is {len(data)} bytes; get_file returns at most "
+            f"{_FILE_MAX_INLINE_BYTES}, download it through the REST API"
+        )
+    payload: dict[str, Any] = {
+        "path": path,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    text = _as_text(data)
+    if text is None:
+        payload["content_base64"] = base64.b64encode(data).decode("ascii")
+        return payload
+    payload["text"] = text
+    return payload
+
+
+def _as_text(data: bytes) -> str | None:
+    """The bytes as text if they are UTF-16 with a BOM or clean UTF-8."""
+    if data.startswith(_UTF16_BOMS):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
 
 
 def _path_segment(field: str, value: str) -> str:

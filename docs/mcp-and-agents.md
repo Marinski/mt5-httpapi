@@ -33,13 +33,14 @@ Every terminal serves `/mcp` beside its REST API. The tools are dedicated and ty
   - deployments: `create_deployment(expert, symbol, timeframe, set_file?, enabled?)`, `list_deployments`, `get_deployment`, `update_deployment(deployment_id, enabled?, set_file?)`, `delete_deployment`, `reconcile_deployments`
   - charts: `list_charts`, `get_loader`, `screenshot_chart(chart_id, width?, height?)`, `close_chart`
   - WebRequest allowlist: `get_webrequest`, `set_webrequest(urls? | add?, remove?, runas?)`, `apply_webrequest(runas?)`
+- **Files**, only on terminals with the [file API](files.md) enabled: `list_files(path?, tree?)`, `get_file(path, tree?)`, `put_file(path, content? | content_base64?, extract?, tree?)`, `delete_file(path, recursive?, tree?)`. `tree` is `terminal` (the install directory) or `compile` (the MQL5 tree `/compile` builds against).
 - **Escape hatch** — `request(method, path, query?, body?)` + `endpoints` (route catalog) for JSON-compatible routes without a dedicated tool. Multipart uploads such as `POST /backtest` still use REST directly.
 
 `request` can't send a multipart upload, which is why chart files get their own tools. `upload_expert` and `upload_set` take the file as base64 and send the same multipart form the REST API wants, so an agent can stage an `.ex5` without curl. `upload_set` also takes plain text for a hand-written set file. `screenshot_chart` returns the PNG as MCP image content, so the agent actually sees the chart.
 
 The order/position tools (`create_order`, `cancel_order`, `close_position`, …) are irreversible live-account actions and say so in their tool descriptions. So are `create_deployment`, `update_deployment`, `delete_deployment` and `close_chart`, because a running deployment is a live EA that can trade. `set_webrequest` and `apply_webrequest` restart the terminal when it runs on bare metal instead of in the Windows VM.
 
-On a per-terminal endpoint the Chart Deployments tools only show up when chartctl is on for that terminal. The unified endpoint always lists them. There, `list_terminals` reports `chartctl` per terminal, and calling one of them on a terminal without chartctl tells you to enable it instead of handing back a bare 404.
+On a per-terminal endpoint the Chart Deployments tools only show up when chartctl is on for that terminal, and the file tools only when the file API is. The unified endpoint always lists both. There, `list_terminals` reports `chartctl` and `files` per terminal, and calling one of those tools on a terminal without the feature tells you to enable it instead of handing back a bare 404.
 
 Same bearer auth as REST: an empty `api_token` disables auth on `/mcp` too; a configured token requires `Authorization: Bearer <token>` on every MCP call.
 
@@ -64,7 +65,7 @@ http://localhost:8888/mcp/
 That endpoint exposes the same tools, each taking `broker` and `account` (plus
 an optional `instance`, defaulting to `default`). Call `list_terminals` first.
 It returns every configured terminal, its process mode (`live` or
-`backtest`), and whether Chart Deployments are enabled for it (`chartctl`).
+`backtest`), and whether Chart Deployments (`chartctl`) and the file API (`files`) are enabled for it.
 This mode is not the brokerage account's live/demo classification;
 check `GET /account` before trading. A broker/account pair that is not configured
 is refused, with the valid list in the error, rather than being routed somewhere

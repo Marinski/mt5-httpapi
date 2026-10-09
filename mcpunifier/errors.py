@@ -84,6 +84,29 @@ class ChartctlDisabled(UnifierError):
         super().__init__(message)
 
 
+class FilesDisabled(UnifierError):
+    """A file API tool was called on a terminal that does not serve the
+    /files routes, which then answer a plain 404 that reads like a missing
+    file."""
+
+    def __init__(self, terminal: str, configured: bool) -> None:
+        self.terminal = terminal
+        self.configured = configured
+        if configured:
+            message = (
+                f"terminal '{terminal}' does not serve the file API although "
+                "config.yaml enables it; its API process probably started "
+                "before that change, so restart the stack"
+            )
+        else:
+            message = (
+                f"the file API is not enabled on terminal '{terminal}': set "
+                "files.enabled: true in config.yaml (the terminal entry must "
+                "not set files: false), then restart the stack"
+            )
+        super().__init__(message)
+
+
 class UnexpectedContent(UnifierError):
     """A terminal answered 2xx with a body of the wrong media type."""
 

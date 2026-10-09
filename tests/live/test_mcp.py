@@ -50,16 +50,19 @@ def test_list_terminals_reports_the_target_and_its_chartctl_state(
     assert entry["chartctl"] is chartctl_enabled
 
 
-def test_every_catalogued_route_exists_on_the_terminal(mcp_unified, rest, chartctl_enabled):
+def test_every_catalogued_route_exists_on_the_terminal(mcp_unified, rest, target):
     """A catalog entry that answers 404 sends agents at a route that is not
-    there. Only parameter-free GET routes are probed; a 4xx other than 404
-    (a missing query parameter) still proves the route exists."""
+    there. Only parameter-free GET routes are probed, and only those whose
+    `requires` feature list_terminals reports on for the target; a 4xx other
+    than 404 (a missing query parameter) still proves the route exists."""
     entries = mcp_unified.call_json("endpoints", routed=False)["endpoints"]
+    terminals = mcp_unified.call_json("list_terminals", routed=False)["terminals"]
+    features = next(t for t in terminals if t["key"] == target.terminal_key)
     probed = []
     for entry in entries:
         if entry["method"] != "GET" or "<" in entry["path"]:
             continue
-        if entry.get("requires") == "chartctl" and not chartctl_enabled:
+        if entry.get("requires") and not features.get(entry["requires"]):
             continue
         resp = rest.session.get(rest.base + entry["path"], timeout=60)
         is_json = "json" in resp.headers.get("Content-Type", "")

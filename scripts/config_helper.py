@@ -100,6 +100,29 @@ def _normalize_instance(value):
 #: 60s COMPILE_TIMEOUT ceiling is 60 + 30s waiting plus 60s compiling.
 COMPILE_PROXY_TIMEOUT = "180s"
 
+#: nginx read/send timeout for the routes that legitimately run for minutes:
+#: PUT /webrequest and /webrequest/apply wait up to 180s for the host's GUI
+#: lock plus the AutoIt run (or a bare-metal terminal restart), a terminal's
+#: own /mcp proxies those same calls, and a /files upload or ?extract writes
+#: across the VM's shared folder. Matches the unified /mcp/ route.
+LONG_PROXY_TIMEOUT = "300s"
+
+#: Per-terminal path suffixes that get LONG_PROXY_TIMEOUT. Prefix locations, so
+#: /webrequest also covers /webrequest/apply and /files/ every file path.
+LONG_RUNNING_ROUTES = ("webrequest", "mcp", "files/", "compile/files/")
+
+
+def _feature_block(raw):
+    """An opt-in feature block as a mapping. `chartctl: true` is shorthand for
+    `{enabled: true}`; anything else that is not a mapping counts as off.
+    Same rule as mt5api.config.feature_block, which this script cannot import
+    when it runs on the host."""
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
 
 def _terminal_location(match, prefix, container, port, read_timeout=None):
     """One nginx location block proxying `prefix` to a terminal's API."""
@@ -267,7 +290,7 @@ def main():
         # default FALSE) + no per-terminal `chartctl: false` override. The loader's
         # GlobalVariable mutex makes the re-fire on every launch idempotent
         # (a duplicate closes its own chart and exits).
-        chartctl_cfg = cfg.get("chartctl") or {}
+        chartctl_cfg = _feature_block(cfg.get("chartctl"))
         # Opt-IN: see mt5api/config.py. A [StartUp] expert on every live terminal
         # must never arrive by upgrade.
         chartctl_on = bool(chartctl_cfg.get("enabled", False))
@@ -304,7 +327,7 @@ def main():
                 print(f"WARN: WebRequest allowlist seed failed: {exc}", file=sys.stderr)
 
     elif cmd == "chartctl_enabled":
-        chartctl_cfg = cfg.get("chartctl") or {}
+        chartctl_cfg = _feature_block(cfg.get("chartctl"))
         print("1" if bool(chartctl_cfg.get("enabled", False)) else "0")
 
     elif cmd == "nginx_conf":
@@ -341,6 +364,15 @@ def main():
                         read_timeout=COMPILE_PROXY_TIMEOUT,
                     )
                 )
+                # nginx's 60s default would cut these off mid-call and hand the
+                # caller an HTML 504 while the work carries on in the VM.
+                for route in LONG_RUNNING_ROUTES:
+                    locs.append(
+                        _terminal_location(
+                            f"location {p}{route}", p, container, t["port"],
+                            read_timeout=LONG_PROXY_TIMEOUT,
+                        )
+                    )
 
         # The unified MCP endpoint: one session that reaches every terminal,
         # selecting which via broker/account tool params. The per-terminal

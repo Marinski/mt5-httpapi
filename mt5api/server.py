@@ -8,6 +8,7 @@ from mt5api.config import (
     API_TOKEN,
     CHARTCTL_ENABLED,
     COMPILE_API_TOKEN,
+    FILES_ENABLED,
     MAX_REQUEST_BODY_BYTES,
     MAX_UPLOAD_BODY_BYTES,
 )
@@ -91,10 +92,11 @@ def _refuse_oversized_body():
     if declared is None:
         return None
     multipart = (request.mimetype or "").startswith("multipart/")
-    limit = MAX_UPLOAD_BODY_BYTES if multipart else MAX_REQUEST_BODY_BYTES
+    is_upload = multipart or _is_file_upload()
+    limit = MAX_UPLOAD_BODY_BYTES if is_upload else MAX_REQUEST_BODY_BYTES
     if declared <= limit:
         return None
-    setting = "MAX_UPLOAD_BODY_BYTES" if multipart else "MAX_REQUEST_BODY_BYTES"
+    setting = "MAX_UPLOAD_BODY_BYTES" if is_upload else "MAX_REQUEST_BODY_BYTES"
     log.warning(
         "%s rejected %d-byte body on %s %s (cap %d)",
         getattr(g, "req_id", "--------"), declared,
@@ -106,6 +108,14 @@ def _refuse_oversized_body():
             f"{limit} ({setting})"
         ),
     }), 413
+
+
+_FILE_UPLOAD_PREFIXES = ("/files/", "/compile/files/")
+
+
+def _is_file_upload():
+    """A PUT to the file API, whose raw body is a file, not JSON."""
+    return request.method == "PUT" and request.path.startswith(_FILE_UPLOAD_PREFIXES)
 
 
 @app.after_request
@@ -181,6 +191,14 @@ if CHARTCTL_ENABLED:
     from mt5api.handlers.chartctl_routes import register_chartctl_routes
 
     register_chartctl_routes(app)
+
+# ── File API ─────────────────────────────────────────────────────
+# Read, write, unzip and delete files in the terminal's install directory and
+# the compile tree. Gated: config files.enabled (opt-in).
+if FILES_ENABLED:
+    from mt5api.handlers.files import register_files_routes
+
+    register_files_routes(app)
 
 # ── Backtest ─────────────────────────────────────────────────────
 app.post("/backtest/build-ini")(backtest_handler.build_ini_route)

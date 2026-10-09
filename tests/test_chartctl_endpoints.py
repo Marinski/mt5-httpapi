@@ -119,6 +119,48 @@ def test_duplicate_chart_conflict(client):
     assert r.get_json()["code"] == "DUPLICATE_CHART"
 
 
+def test_resuming_onto_a_pair_another_deployment_runs_is_refused(client):
+    """Pausing A frees its symbol/timeframe, so B can be created there; A may
+    not then be resumed onto the same pair."""
+    _upload_expert(client)
+    first = client.post("/deployments", json={
+        "expert": "EA.ex5", "symbol": "EURUSD", "timeframe": "H1"}).get_json()["id"]
+    client.patch(f"/deployments/{first}", json={"enabled": False})
+    second = client.post("/deployments", json={
+        "expert": "EA.ex5", "symbol": "EURUSD", "timeframe": "H1"})
+    assert second.status_code == 202
+
+    r = client.patch(f"/deployments/{first}", json={"enabled": True})
+
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "DUPLICATE_CHART"
+    stored = client.get(f"/deployments/{first}").get_json()
+    assert stored["desired"]["enabled"] is False
+
+
+def test_resuming_onto_a_free_pair_works(client):
+    _upload_expert(client)
+    dep = client.post("/deployments", json={
+        "expert": "EA.ex5", "symbol": "EURUSD", "timeframe": "H1"}).get_json()["id"]
+    client.patch(f"/deployments/{dep}", json={"enabled": False})
+
+    r = client.patch(f"/deployments/{dep}", json={"enabled": True})
+
+    assert r.status_code == 200
+    assert r.get_json()["deployment"]["enabled"] is True
+
+
+def test_an_enabled_deployment_can_be_re_pointed_without_tripping_the_duplicate_check(client):
+    _upload_expert(client)
+    _upload_set(client)
+    dep = client.post("/deployments", json={
+        "expert": "EA.ex5", "symbol": "EURUSD", "timeframe": "H1"}).get_json()["id"]
+
+    r = client.patch(f"/deployments/{dep}", json={"enabled": True, "set": "gold.set"})
+
+    assert r.status_code == 200
+
+
 def test_pause_then_delete(client):
     _upload_expert(client)
     dep_id = client.post("/deployments", json={
