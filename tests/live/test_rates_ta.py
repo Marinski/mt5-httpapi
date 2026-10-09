@@ -2,14 +2,25 @@
 indicators spec returns bars + computed TA.
 
 Wickworks is primitives-only (rsi/ema/sma/atr/macd/bbands/stoch/adx/...)
-with no divergences, signals, or divTrends. If wickworks is down the endpoint
-returns 502; we skip rather than fail in that case.
+with no divergences, signals, or divTrends. If wickworks cannot be reached the
+endpoint returns 502 with no wickworks status; we skip rather than fail in that
+case. A request wickworks answered and rejected is a failure.
 """
 from __future__ import annotations
 
 import pytest
 
 import requests
+
+_HTTP_BAD_GATEWAY = 502
+
+
+def _skip_if_wickworks_unreachable(resp):
+    if resp.status_code != _HTTP_BAD_GATEWAY:
+        return
+    if "wickworksStatus" in resp.json():
+        return
+    pytest.skip(f"wickworks unavailable: {resp.text[:200]}")
 
 
 def _post_ta(client, symbol, indicators, **params):
@@ -29,15 +40,14 @@ def test_rates_ta_rsi_ema_atr(client, config):
         client,
         config["symbol"],
         indicators={
-            "rsi14": {"type": "rsi", "params": {"period": 14}},
-            "ema21": {"type": "ema", "params": {"period": 21}},
-            "atr14": {"type": "atr", "params": {"period": 14}},
+            "rsi14": {"type": "rsi", "length": 14},
+            "ema21": {"type": "ema", "length": 21},
+            "atr14": {"type": "atr", "length": 14},
         },
         timeframe="H1",
         count=200,
     )
-    if resp.status_code == 502:
-        pytest.skip(f"wickworks unavailable: {resp.text[:200]}")
+    _skip_if_wickworks_unreachable(resp)
     assert resp.status_code == 200, f"unexpected status: {resp.status_code} {resp.text[:300]}"
     body = resp.json()
     assert body["symbol"] == config["symbol"]
@@ -46,25 +56,21 @@ def test_rates_ta_rsi_ema_atr(client, config):
     assert body["ta"] is not None, f"ta is null: {body}"
     # Wickworks puts results under the keys we supplied.
     ta = body["ta"]
-    assert "rsi14" in ta or "indicators" in ta, f"unexpected ta shape: {list(ta.keys())[:10]}"
+    for key in ("rsi14", "ema21", "atr14"):
+        assert key in ta, f"{key} missing from ta: {list(ta.keys())[:10]}"
 
 
 def test_rates_ta_macd(client, config):
     resp = _post_ta(
         client,
         config["symbol"],
-        indicators={
-            "macd": {
-                "type": "macd",
-                "params": {"fastPeriod": 12, "slowPeriod": 26, "signalPeriod": 9},
-            },
-        },
+        indicators={"macd": {"fast": 12, "slow": 26, "signal": 9}},
         timeframe="H1",
         count=200,
     )
-    if resp.status_code == 502:
-        pytest.skip(f"wickworks unavailable: {resp.text[:200]}")
+    _skip_if_wickworks_unreachable(resp)
     assert resp.status_code == 200, f"status {resp.status_code}: {resp.text[:300]}"
+    assert "macd" in resp.json()["ta"], f"macd missing from ta: {resp.text[:300]}"
 
 
 def test_rates_ta_empty_indicators_returns_400(client, config):

@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.21.1]: 2026-10-09
+
+### Fixed
+
+- The live TA tests (`tests/live/test_rates_ta.py`) sent indicators in an old `{"type", "params": {"period"}}` shape that wickworks rejects, and reported every 502 as "wickworks unavailable", so they skipped instead of failing. They now send the flat spec from [market data](docs/market-data.md), check that each requested key comes back, and skip only when wickworks cannot be reached.
+
 ## [v4.21.0]: 2026-10-09
 
 ### Changed
