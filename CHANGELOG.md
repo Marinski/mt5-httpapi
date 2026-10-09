@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.26.2]: 2026-10-09
+
+### Fixed
+
+- **The CI Docker Hub login failed the `test` job when Docker Hub's token endpoint timed out.** v4.26.1 logged in with a single attempt, and three runs in a row timed out on it, so the job stopped before running a test and nothing was published. `scripts/ci-dockerhub-login.sh` now does the login: it retries five times with a growing pause and, if every attempt fails, lets the job carry on with anonymous pulls and a warning on the run. This release is the first since v4.24.0 to publish the skill and the OpenClaw plugin to ClawHub.
+
 ## [v4.26.1]: 2026-10-09
 
 ### Fixed
