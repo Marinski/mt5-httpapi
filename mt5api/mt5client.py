@@ -420,6 +420,11 @@ def init_mt5(login=None, password=None, server=None, allow_wedged=False):
     return result
 
 
+# Last successful terminal_info snapshot, cached lock-free for cosmetic
+# readers (e.g. chartctl template build stamp). Never authoritative.
+LAST_TERMINAL_INFO = None
+
+
 def ensure_initialized():
     """Probe + reconnect helper. Caller must hold the MT5 lock.
 
@@ -431,6 +436,7 @@ def ensure_initialized():
     MT5Wedged propagates instead of becoming False, so @with_mt5 answers 503
     with Retry-After rather than the callers' generic "not initialized" 503.
     """
+    global LAST_TERMINAL_INFO
     if MODE == "backtest":
         log.warning("MT5 SDK request refused on a mode:backtest terminal reason=backtest_mode")
         return False
@@ -440,6 +446,8 @@ def ensure_initialized():
         raise
     except MT5Timeout:
         info = None
+    if info is not None:
+        LAST_TERMINAL_INFO = info
     if info is None:
         log.warning("Terminal not responding, attempting full init...")
         account = get_first_account()
@@ -565,6 +573,18 @@ def restart_terminal():
     killed = _kill_terminal()
     if not killed:
         log.warning("No terminal process found, launching fresh.")
+
+    # Apply the WebRequest allowlist while the terminal is down. MT5 rewrites
+    # common.ini on exit, so this must happen after the kill and before launch.
+    # No-op unless this terminal has a desired allowlist set.
+    try:
+        from mt5api.chartctl import webrequest as _wr
+
+        applied = _wr.apply_from_desired(TERMINAL_DIR)
+        if applied is not None:
+            log.info("Applied WebRequest allowlist (%d URL(s)) to common.ini", applied)
+    except Exception:
+        log.exception("Failed to apply WebRequest allowlist; continuing restart")
 
     today = date.today().strftime("%Y%m%d")
     journal_log = os.path.join(TERMINAL_DIR, "logs", f"{today}.log")

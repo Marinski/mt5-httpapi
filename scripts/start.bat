@@ -200,6 +200,32 @@ if "!REBOOT_INTERVAL!"=="0" (
     )
 )
 
+:: ── Compile chartctl loader EA (zero-touch bootstrap) ────────────
+:: Compiles MT5ChartLoader in every broker base and propagates the .ex5
+:: into existing terminal instances, so the [StartUp] Expert= line in
+:: mt5start.ini can auto-attach it at launch. Skipped when chartctl is
+:: disabled globally in config.yaml. Non-fatal: a compile failure only
+:: means chart deployments stay unavailable until fixed.
+:: Tempfile read, NOT for /f ('command') — with both python.exe and the
+:: script path quoted, cmd's quote-stripping mangles the subshell command
+:: and it silently outputs nothing (same failure the api_token block
+:: documents; also why install.bat's ports lookup falls back to 6542).
+set "CHARTCTL_ON="
+"%PYDIR%\python.exe" "%SCRIPTS%\config_helper.py" chartctl_enabled > "%SHARED%\mt5_cc.tmp" 2>nul
+for /f "usebackq delims=" %%C in ("%SHARED%\mt5_cc.tmp") do set "CHARTCTL_ON=%%C"
+del "%SHARED%\mt5_cc.tmp" 2>nul
+if "!CHARTCTL_ON!"=="1" (
+    call :log "%START_LOG%" "Compiling chartctl loader EA (MT5ChartLoader)..."
+    call "%SCRIPTS%\compile-chartctl-loader.bat" >> "%START_LOG%" 2>&1
+    if !errorlevel! neq 0 (
+        call :log "%START_LOG%" "WARN: chartctl loader compile failed -- chart deployments unavailable. See logs\compile-chartctl-loader.log"
+    ) else (
+        call :log "%START_LOG%" "chartctl loader compiled and propagated."
+    )
+) else (
+    call :log "%START_LOG%" "chartctl disabled in config.yaml -- skipping loader compile."
+)
+
 :: ── Launch MT5 terminals ─────────────────────────────────────────
 call :log "%START_LOG%" "Launching MT5 terminals..."
 set TERM_COUNT=0
