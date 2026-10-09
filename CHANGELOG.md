@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.22.1]: 2026-10-09
+
+### Fixed
+
+- **`GET /<broker>/<account>/files` answered nginx's 301.** v4.22.0 gave the file routes a longer timeout through an nginx location ending in `files/`, and nginx redirects a bare `/files` to `/files/` for such a location, which the API does not serve, so the root listing was unreachable through nginx. The locations no longer end in a slash.
+
 ## [v4.22.0]: 2026-10-09
 
 ### Added

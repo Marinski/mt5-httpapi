@@ -163,7 +163,7 @@ def test_only_the_long_running_routes_wait_longer_than_nginx_default(
     long_routes = {
         f"location {prefix}{route}"
         for prefix in ("/acme/main/default/", "/acme/main/")
-        for route in ("webrequest", "mcp", "files/", "compile/files/")
+        for route in ("webrequest", "mcp", "files", "compile/files")
     }
     other_routes = {
         k: v for k, v in blocks.items()

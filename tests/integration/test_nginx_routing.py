@@ -16,9 +16,11 @@ the host (`make test-integration`) rather than inside the offline test image.
 """
 
 import base64
+import http.client
 import importlib.util
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -35,6 +37,10 @@ DOWN_ALIAS = "vm-down"
 LIVE_PORT = 5001
 DOWN_PORT = 5002
 NGINX_PORT = 80
+
+# The upstream serves this at /files, standing in for the file API's root
+# listing.
+FILES_ROOT_BODY = "files-root"
 
 HTTP_OK = 200
 HTTP_NOT_FOUND = 404
@@ -185,6 +191,7 @@ def routed_stack(tmp_path_factory):
                     "sh",
                     "-c",
                     f"mkdir -p /srv && echo '{LIVE_ALIAS}' >/srv/index.html && "
+                    f"echo '{FILES_ROOT_BODY}' >/srv/files && "
                     f"cd /srv && exec python3 -u -m http.server {LIVE_PORT}",
                 ]
             )
@@ -246,6 +253,27 @@ def test_the_healthy_route_survives_a_request_to_the_dead_one(routed_stack):
 
     assert status == HTTP_OK
     assert body.strip() == LIVE_ALIAS
+
+
+@pytest.mark.parametrize("prefix", ["/acme/live", "/acme/live/default"])
+def test_the_file_api_root_is_proxied_without_a_redirect(routed_stack, prefix):
+    """GET /<broker>/<account>/files is the file API's root listing. A
+    location ending in `files/` made nginx answer it with a 301 to `files/`,
+    which the API does not serve. Sent with http.client, which does not
+    follow redirects the way urllib would."""
+    parsed = urllib.parse.urlsplit(routed_stack)
+    connection = http.client.HTTPConnection(
+        parsed.hostname, parsed.port, timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    try:
+        connection.request("GET", f"{prefix}/files")
+        response = connection.getresponse()
+        body = response.read().decode("utf-8", "replace")
+    finally:
+        connection.close()
+
+    assert response.status == HTTP_OK
+    assert body.strip() == FILES_ROOT_BODY
 
 
 def test_an_unrouted_path_still_404s(routed_stack):

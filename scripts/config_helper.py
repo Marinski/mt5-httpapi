@@ -108,8 +108,10 @@ COMPILE_PROXY_TIMEOUT = "180s"
 LONG_PROXY_TIMEOUT = "300s"
 
 #: Per-terminal path suffixes that get LONG_PROXY_TIMEOUT. Prefix locations, so
-#: /webrequest also covers /webrequest/apply and /files/ every file path.
-LONG_RUNNING_ROUTES = ("webrequest", "mcp", "files/", "compile/files/")
+#: /webrequest also covers /webrequest/apply and /files every file path. No
+#: trailing slash: nginx answers a bare /files with a 301 to /files/ when the
+#: location ends in one, and the API serves the root listing at /files.
+LONG_RUNNING_ROUTES = ("webrequest", "mcp", "files", "compile/files")
 
 
 def _feature_block(raw):
