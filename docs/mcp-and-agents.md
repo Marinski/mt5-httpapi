@@ -99,7 +99,7 @@ For MCP clients that only speak local stdio servers, the [`@psyb0t/mt5-httpapi`]
 
 ## Agent integrations
 
-The [skill](../.agents/skills/mt5-httpapi) teaches compatible agents how to use the whole mess without YOLOing trades. Install it through whichever robot cage you use:
+The [skill](../.agents/skills/mt5-httpapi) teaches compatible agents (such as [peen](https://github.com/psyb0t/peen)) how to use the whole mess without YOLOing trades. Install it through whichever robot cage you use:
 
 ### Claude Code
 

@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.28.1]: 2026-10-10
+
+### Changed
+
+- Documentation only. The agent skill section names [peen](https://github.com/psyb0t/peen) as an example of a compatible agent. See [docs/mcp-and-agents.md](docs/mcp-and-agents.md).
+
 ## [v4.28.0]: 2026-10-10
 
 Based on #29 by @Marinski, extended from backtests to live terminals.
