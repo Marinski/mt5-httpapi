@@ -385,6 +385,16 @@ def test_launch_abort_is_judged_by_the_log_not_the_clock(tmp_path, monkeypatch):
     log_text["value"] = None
     assert abort() is False
 
+    # 11 Oct, instance 18: an EA the tester cannot load fails the same way on
+    # every launch; MT5 says so, and it must not be relaunched.
+    log_text["value"] = (
+        "job1\\tester.ini\r\n"
+        "LM\t2\t22:27:17.527\tTester\tcannot load Experts\\Uploaded\\x.ex5\r\n"
+        "DP\t2\t22:27:17.527\tTerminal\ttester didn't start\r\n"
+        "CS\t0\t22:27:19.341\tTerminal\tshutdown with -1000012356\r\n"
+    )
+    assert abort() is False
+
     log_text["value"] = _ABORT_LOG.format(job="job1")
     now["t"] = start + handler.LAUNCH_ABORT_MAX_SECONDS
     assert abort() is False

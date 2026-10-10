@@ -69,6 +69,9 @@ REPORT_SETTLE_SECONDS = 2
 # the terminal's own log, not inferred from elapsed time: under load MT5 takes
 # well over a minute just to initialise, so a time window missed every abort.
 TESTER_STARTED_MARKER = "automatic testing started"
+# MT5 logs this when it refused the test (e.g. "cannot load Experts\\...ex5"):
+# a deterministic failure that a relaunch would only repeat.
+TESTER_REFUSED_MARKER = "tester didn't start"
 LAUNCH_ABORT_MAX_ATTEMPTS = 4
 # Backstop on the log check: a launch that ran this long is never retried,
 # even if its log could not be matched (e.g. the log rolled over at midnight).
@@ -654,6 +657,8 @@ def _looks_like_launch_abort(result, launch_started, report_paths, job_id):
     # No line naming the job: nothing proves the tester never ran (the launch
     # may have scrolled out of the tail), so treat it as a real failure.
     if since_launch is None:
+        return False
+    if TESTER_REFUSED_MARKER in since_launch:
         return False
     return TESTER_STARTED_MARKER not in since_launch
 
