@@ -6,6 +6,14 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.28.0]: 2026-10-10
+
+Based on #29 by @Marinski, extended from backtests to live terminals.
+
+### Added
+
+- **`disable_terminal_mcp` turns off MetaTrader's own MCP servers.** Terminal build 6090 and later starts MCP servers of its own (the transport behind its built-in AI assistant; not this API's `/mcp`) from `Config/assistant.ini`, and each tries to listen on `127.0.0.1:22346`. With several terminals in a VM all but the first log `MCP bind error on 127.0.0.1:22346 (10048)` on every launch, and backtest terminals have aborted with exit code 10053 after the same subsystem failed to sign in to MQL5.community. With `disable_terminal_mcp: true` in `config.yaml`, `Enable=0` goes into `[MCP.MetaTrader]` and `[MCP.MetaEditor]` before every launch: at boot, on a restart the API makes, and before each backtest. MT5 rewrites the file on exit, so it happens every time; endpoints, API keys and other sections are kept. A terminal entry's `disable_terminal_mcp: false` keeps its own servers on. Off by default. See [docs/installation-and-configuration.md](docs/installation-and-configuration.md).
+
 ## [v4.27.0]: 2026-10-09
 
 ### Added

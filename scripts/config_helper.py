@@ -303,11 +303,13 @@ def main():
         # Opt-IN: see mt5api/config.py. A [StartUp] expert on every live terminal
         # must never arrive by upgrade.
         chartctl_on = bool(chartctl_cfg.get("enabled", False))
+        term_entry = None
         term_override = None
         term_suffix = ""
         for t in cfg.get("terminals", []):
             if (t.get("broker") == broker and str(t.get("account")) == str(account)
                     and (t.get("instance") or "default") == instance):
+                term_entry = t
                 term_override = t.get("chartctl")
                 term_suffix = t.get("symbol_suffix") or ""
                 break
@@ -334,6 +336,17 @@ def main():
                     wr.write_common_ini(cfg_dir, urls)
             except Exception as exc:  # non-fatal: never block terminal launch
                 print(f"WARN: WebRequest allowlist seed failed: {exc}", file=sys.stderr)
+
+        # MT5's own MCP servers (mt5api/terminal_mcp.py): MT5 rewrites
+        # assistant.ini on exit, so it is turned off again before every launch.
+        try:
+            sys.path.insert(0, _SHARED_DIR)
+            from mt5api import terminal_mcp
+            if terminal_mcp.wanted(cfg.get(terminal_mcp.CONFIG_KEY), term_entry):
+                terminal_dir = os.path.dirname(os.path.abspath(outpath))
+                print(f"terminal MCP servers disabled ({terminal_mcp.disable(terminal_dir)})")
+        except Exception as exc:  # non-fatal: never block terminal launch
+            print(f"WARN: disabling terminal MCP servers failed: {exc}", file=sys.stderr)
 
     elif cmd == "chartctl_enabled":
         chartctl_cfg = _feature_block(cfg.get("chartctl"))

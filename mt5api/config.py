@@ -6,6 +6,8 @@ import re
 
 import MetaTrader5 as mt5
 
+from mt5api import terminal_mcp
+
 HOST = "0.0.0.0"
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -642,6 +644,14 @@ FILES_MAX_EXTRACT_BYTES = _chartctl_bytes(
 )
 FILES_MAX_EXTRACT_FILES = _chartctl_bytes(
     _files_cfg.get("max_extract_files"), 10000, 1
+)
+
+# Turn off MT5's own MCP servers before this terminal launches (see
+# mt5api/terminal_mcp.py). Opt-in: an install that never sets it keeps the
+# terminals exactly as MetaQuotes ships them.
+DISABLE_TERMINAL_MCP = terminal_mcp.wanted(
+    load_yaml_config().get(terminal_mcp.CONFIG_KEY),
+    _terminal_config,
 )
 
 IDENTITY = make_identity(BROKER, ACCOUNT, INSTANCE)

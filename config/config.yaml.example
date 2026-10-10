@@ -29,6 +29,15 @@ reboot_interval: 30
 # writes). Reads never hold it. 0 reboots on schedule without waiting.
 reboot_max_postpone: 360
 
+# MetaTrader's own MCP servers (terminal build 6090+, the built-in AI
+# assistant), not this API's /mcp. Each terminal tries 127.0.0.1:22346, so with
+# several terminals in a VM all but one log "MCP bind error ... (10048)" on
+# every launch, and backtest terminals have aborted after the same subsystem
+# failed to sign in to MQL5.community. true turns them off in every terminal's
+# Config/assistant.ini before each launch (boot, restart, backtest). A
+# terminal entry's `disable_terminal_mcp: false` keeps its own on.
+disable_terminal_mcp: false
+
 # Default Strategy Tester timeout. Accepts the same duration strings as
 # utc_offset ("6h", "30m", "3h30m"). POST /backtest can override per job.
 backtest_timeout: "6h"

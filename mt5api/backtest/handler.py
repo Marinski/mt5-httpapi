@@ -27,11 +27,12 @@ import psutil
 
 from flask import Response, jsonify, request, send_file
 
-from mt5api import symbol_cache
+from mt5api import symbol_cache, terminal_mcp
 from mt5api.backtest import cache_parser, ini_builder, jobs, optimization_parser, set_builder
 from mt5api.config import (
     ACCOUNT,
     BROKER,
+    DISABLE_TERMINAL_MCP,
     INSTANCE,
     LOG_DIR,
     TERMINAL_DIR,
@@ -735,6 +736,8 @@ def _execute_job(job_id):
             parser = _parse_ini(_read_text_best_effort(job["debugIniPath"]))
             ini_path = os.path.join(job["stageDir"], "tester.ini")
             _write_utf16_ini(parser, ini_path)
+            # MT5 rewrites assistant.ini on exit, so this runs before every launch.
+            terminal_mcp.apply(DISABLE_TERMINAL_MCP, TERMINAL_DIR, "backtest")
 
             cmd = [TERMINAL_PATH, "/portable", f"/config:{ini_path}"]
             log.info(

@@ -9,9 +9,11 @@ from functools import wraps
 import MetaTrader5 as mt5
 import psutil
 from flask import has_request_context, g, jsonify, request
+from mt5api import terminal_mcp
 from mt5api.config import (
     ACCOUNT,
     BROKER,
+    DISABLE_TERMINAL_MCP,
     FILLING_MAP,
     INI_FILE,
     INSTANCE,
@@ -585,6 +587,9 @@ def restart_terminal():
             log.info("Applied WebRequest allowlist (%d URL(s)) to common.ini", applied)
     except Exception:
         log.exception("Failed to apply WebRequest allowlist; continuing restart")
+
+    # MT5 rewrites assistant.ini on exit too, so the same window applies.
+    terminal_mcp.apply(DISABLE_TERMINAL_MCP, TERMINAL_DIR, "restart")
 
     today = date.today().strftime("%Y%m%d")
     journal_log = os.path.join(TERMINAL_DIR, "logs", f"{today}.log")
