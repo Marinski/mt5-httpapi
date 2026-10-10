@@ -6,11 +6,188 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
-## [Unreleased]
+## [v4.28.0]: 2026-10-10
+
+Based on #29 by @Marinski, extended from backtests to live terminals.
+
+### Added
+
+- **`disable_terminal_mcp` turns off MetaTrader's own MCP servers.** Terminal build 6090 and later starts MCP servers of its own (the transport behind its built-in AI assistant; not this API's `/mcp`) from `Config/assistant.ini`, and each tries to listen on `127.0.0.1:22346`. With several terminals in a VM all but the first log `MCP bind error on 127.0.0.1:22346 (10048)` on every launch, and backtest terminals have aborted with exit code 10053 after the same subsystem failed to sign in to MQL5.community. With `disable_terminal_mcp: true` in `config.yaml`, `Enable=0` goes into `[MCP.MetaTrader]` and `[MCP.MetaEditor]` before every launch: at boot, on a restart the API makes, and before each backtest. MT5 rewrites the file on exit, so it happens every time; endpoints, API keys and other sections are kept. A terminal entry's `disable_terminal_mcp: false` keeps its own servers on. Off by default. See [docs/installation-and-configuration.md](docs/installation-and-configuration.md).
+
+## [v4.27.0]: 2026-10-09
+
+### Added
+
+- **The scheduled VM reboot waits for running work.** Every `reboot_interval` minutes the VM rebooted no matter what, cutting off a running backtest or an order, stop loss change, deployment or file write halfway. The reboot now first asks every API on the VM what it is doing and waits while any of them runs a backtest or a request that changes something. Reads never hold it. Each wait goes to `full.log` with the terminal and the reason (`reboot postponed (reason=busy ...): teletrade/demo/default: backtest ... running`), and so does the reboot (`reason=idle`, or `reason=max_postpone` with what was still busy). Once everything is idle, the APIs refuse new writes for the last seconds with 503 `REBOOT_PENDING` and `Retry-After: 120`, so nothing starts just before the reboot. See [docs/operations.md](docs/operations.md#scheduled-reboots).
+- **`reboot_max_postpone`** in `config.yaml` caps that wait in minutes (default `360`, the default backtest timeout). `0` reboots on schedule without waiting.
+- **`GET /busy`** reports whether a reboot now would break work in that terminal's API: `busy`, `reasons`, the queued and running `backtests`, the `writes_in_flight` with method, path and age, and `draining`. See [docs/rest-api.md](docs/rest-api.md#health).
+
+### Changed
+
+- The agent sign-off rule in `.agents/rules/chat.md` now also covers pull request, issue and discussion comments, other messages, and commit message bodies (CHAT3, CHAT4). Code, docs, the CHANGELOG and tag messages stay without it.
 
 ### Fixed
 
-- **Opt-in: disable the terminal's built-in MCP server before a backtest.** MT5 build 6090+ starts its own MCP server (the transport behind the built-in AI assistant) on `127.0.0.1:22346` at launch, configured in `<terminal>/Config/assistant.ini`. Every terminal in a VM shares loopback, so only one can bind the port and the rest log `MCP bind error on 127.0.0.1:22346 [10048]` on every launch; the same subsystem authenticates against MQL5.community, which a backtest terminal has no account for, and failed launches logged `MQL5.community authorization failed` immediately before `terminal64.exe` aborted with exit code 10053. With `mcp: { disable_terminal_server: true }` in `config.yaml`, `_disable_terminal_mcp()` sets `Enable=0` for `[MCP.MetaTrader]` and `[MCP.MetaEditor]` in `assistant.ini` before each launch (MT5 rewrites the file on exit, so it is re-applied every run). Default is off — an install that does not set the block leaves its terminals exactly as MetaQuotes ships them — and a terminal's own `mcp: false` opts it out. MetaQuotes documents disabling the internal server as having no effect on trading or Expert Advisors. Best-effort: an unwritable file is logged and the run continues.
+- **Downloading a file deleted a moment earlier answered 500.** Windows keeps a deleted entry visible briefly while the delete is pending, so `GET /files/<path>` could find it and then fail to open it. It now answers 404 `NOT_FOUND`.
+
+## [v4.26.2]: 2026-10-09
+
+### Fixed
+
+- **The CI Docker Hub login failed the `test` job when Docker Hub's token endpoint timed out.** v4.26.1 logged in with a single attempt, and three runs in a row timed out on it, so the job stopped before running a test and nothing was published. `scripts/ci-dockerhub-login.sh` now does the login: it retries five times with a growing pause and, if every attempt fails, lets the job carry on with anonymous pulls and a warning on the run. This release is the first since v4.24.0 to publish the skill and the OpenClaw plugin to ClawHub.
+
+## [v4.26.1]: 2026-10-09
+
+### Fixed
+
+- **CI failed before running any test.** The `test` and `lint` jobs pull their base images from Docker Hub without logging in, and Docker Hub refused with 429 because GitHub's shared runner IPs had used up the anonymous pull limit. Both jobs now log in to Docker Hub first, except on pull requests from forks, which get no secrets. The v4.25.0 and v4.26.0 tag pipelines failed this way, so neither published the skill or the OpenClaw plugin to ClawHub; this release publishes both.
+
+## [v4.26.0]: 2026-10-09
+
+### Added
+
+- **`DELETE /sets/<name>` removes a staged `.set` file.** Sets could be uploaded but not removed, and the file API cannot remove them either, since it only reads the terminal's `chartctl/` folder. The route answers 409 `IN_USE` while any deployment names the set, paused ones included, 403 `HOST_ASSET` for a host-managed set, and 404 when nothing is staged under that name. Both MCP endpoints get a `delete_set` tool, and `make test-live` now removes the `livetest-` sets it stages. See [docs/chart-deployments.md](docs/chart-deployments.md).
+- **Example: an expert that uses a library.** [docs/files.md](docs/files.md#example-an-expert-that-uses-a-library) walks through uploading a library's headers to the compile tree, compiling an `#import`ed `.ex5` library (or bringing a DLL) and putting it in the terminal's `MQL5/Libraries`, compiling the expert against it and deploying it, and replacing a library a running expert has loaded.
+
+## [v4.25.0]: 2026-10-09
+
+### Added
+
+- `make test-live` has an opt-in terminal restart test (`MT5_LIVE_RESTART=1`). A probe expert holds a file open and calls `WebRequest()`. The test checks that the file API reports the file locked, restarts the terminal through the API, and checks that the deployment comes back on exactly one chart and that the restarted probe's `WebRequest()` still works, which happens only when the API re-applied the allowlist. See [operations](docs/operations.md).
+
+### Changed
+
+- **A missing or wrong bearer token answers JSON.** REST routes and a terminal's `/mcp` answered 401 with an HTML page. They now answer `{"error": "unauthorized", "code": "UNAUTHORIZED"}` like every other error.
+- **Every Python dependency is pinned to an exact version.** `requirements-api.txt`, the VM's `start.bat` and `install.bat`, `requirements-mcpunifier.txt`, `requirements-test.txt` and `Dockerfile.test` name exact versions, and a unit test fails when one of them loses its pin or drifts from the API's versions. The API keeps the versions the VM already ran.
+
+### Fixed
+
+- **A hard terminal stop still left a deployment on two charts.** MT5 writes a chart's expert into the saved profile only when it exits cleanly. `POST /terminal/restart`, the health monitor's recovery and a VM restart stop the terminal hard, so MT5 restored the deployment's chart without its expert, and loader 1.0.3 opened a second chart beside the bare one. Loader 1.0.4 re-applies the deployment's template to that restored chart instead, once, when its 30 second startup grace ends, and only for deployments it owned a chart for before the restart. It also re-arms a chart it owns whose expert is gone, where it used to report that chart as running. `make up` compiles and installs the new loader. See [docs/chart-control-protocol.md](docs/chart-control-protocol.md#rules).
+- **Downloading a file an expert holds open broke the response.** `GET /files/<path>` opened the file only while sending it, so a file opened without sharing (an expert's `FileOpen`, the terminal's own files) failed mid-response. It now answers 409 `FILE_LOCKED`, as `PUT` and `DELETE` already did.
+- **nginx cut `POST /terminal/restart` off after 60 seconds.** The call waits for the terminal to come back, which can take longer. The route now gets 300 seconds, like the file API and the WebRequest routes.
+- **The VM's `.bat` scripts are plain ASCII.** Some carried non-ASCII characters in comments and messages. `make lint` now checks `.bat` and `.cmd` files as well as `.ps1`.
+
+### Deprecated
+
+- **The camelCase JSON keys go away in v5.0.0.** The README, [backtesting](docs/backtesting.md) and the skill now name the release.
+
+## [v4.24.0]: 2026-10-09
+
+### Added
+
+- **`AGENTS.md` and `.agents/rules/`.** `AGENTS.md` is the guide for coding agents working on this repository: what each component does, how code reaches the VM, the layout, the Make targets and test layers, the conventions, and how releases work. `.agents/rules/` holds the project rules, one file per topic (architecture, Python code, API design, MCP, testing, the Windows VM, security, docs and releases, chat), each rule with a stable ID such as `API1` or `TST3`.
+
+### Changed
+
+- **CI validates the ClawHub skill and plugin on every push.** The pipeline's ClawHub job names the `mt5-httpapi` skill and plugin explicitly and runs the reusable workflow's validation on every push and same-repository pull request, not only on tags. Publishing is still tag-only and still waits for the test and lint jobs. Pull requests from forks skip it, since they get no ClawHub token.
+
+- **JSON keys are snake_case everywhere.** The backtest routes (`POST /backtest`, `GET /backtest/<job_id>`, `GET /backtest/<job_id>/tail`, including the `summary` and `optimization_cache` objects) and the TA route's wickworks error answered in camelCase while everything else, including the MT5 fields the API passes through, used snake_case. They now answer in snake_case (`job_id`, `started_at`, `poll_after_seconds`, `net_profit`, `wickworks_status`, ...). `POST /backtest/build-ini` accepts its fields in snake_case (`from_date`, `last_days`, `latency_ms`, ...) and `POST /backtest` accepts `top_passes`. Optimization result rows keep the report's column names and the EA's input names as they are.
+
+### Deprecated
+
+- **The camelCase keys.** Responses still carry every old camelCase key next to its snake_case twin, and request bodies still accept camelCase, so existing clients keep working. Both will be removed in a later release; move clients to the snake_case names now. Sending a field under both names with different values is refused with 400.
+
+## [v4.23.0]: 2026-10-09
+
+### Added
+
+- **File listings carry what `ls -al` shows.** Each entry now has `size_human`, `mode`, the Windows `attributes` (`readonly`, `hidden`, `system`, `archive`, ...), `nlink`, created, modified and accessed times as epoch seconds and as UTC ISO 8601, and `is_symlink`, with `link_target` and `link_outside_tree` for a symlink or junction. The listing itself adds `count` and `total_size`. See [docs/files.md](docs/files.md#endpoints).
+- `make test-live` now covers the file API's REST routes through nginx against the terminal's real file system: binary, multipart and urlencoded uploads, a 20 MiB upload, the 25 MiB cap, overwrites, case-insensitive paths, zip extraction into the terminal tree, bad and zip-slip archives, protected paths, Windows device names, recursive deletes and the listing fields.
+
+### Fixed
+
+- A symlink inside a listed directory that pointed out of the tree made the whole listing fail with 400. It is now listed, flagged `link_outside_tree`, and neither readable nor writable.
+
+## [v4.22.1]: 2026-10-09
+
+### Fixed
+
+- **`GET /<broker>/<account>/files` answered nginx's 301.** v4.22.0 gave the file routes a longer timeout through an nginx location ending in `files/`, and nginx redirects a bare `/files` to `/files/` for such a location, which the API does not serve, so the root listing was unreachable through nginx. The locations no longer end in a slash.
+
+## [v4.22.0]: 2026-10-09
+
+### Added
+
+- **File API.** `GET`, `PUT` and `DELETE` on `/files/<path>` list, download, upload and delete files in a terminal's install directory, the folder holding `terminal64.exe`: libraries in `MQL5/Include`, DLLs and `.ex5` imports in `MQL5/Libraries`, an expert's data in `MQL5/Files`, the logs. `PUT /files/<dir>?extract` unpacks a zip into that directory, merging with what is there, and never stores the zip. `/compile/files/...` does the same on the MQL5 tree `POST /compile` builds against, so a library uploaded there is what the next compile includes, in every API process at once. Both MCP endpoints get `list_files`, `get_file`, `put_file` and `delete_file`, and `list_terminals` reports `files` per terminal. Opt-in with `files.enabled: true` (`files: false` on a terminal opts it out). The broker credentials (`mt5start.ini`, `Config/accounts.dat`) are never served, the terminal's executables and Chart Deployments' own files are read-only, and every path is checked against `..`, absolute and drive paths, Windows device names and symlinks out of the tree. Archives are checked entry by entry before anything is written, and capped by `files.max_extract_bytes` (200 MiB unpacked) and `files.max_extract_files` (10000). See [docs/files.md](docs/files.md).
+
+### Fixed
+
+- **The WebRequest allowlist is re-applied after every terminal restart the API makes.** It used to be re-applied only when the API process started, so after the health monitor's recovery restart or `POST /terminal/restart` an expert's `WebRequest()` was refused until someone called `POST /webrequest/apply`.
+- **Resuming a paused deployment could put two deployments on one chart.** `PATCH /deployments/<id>` with `"enabled": true` skipped the duplicate check `POST /deployments` makes, so a deployment paused while another took its symbol and timeframe could be resumed beside it. It is now refused with 409 `DUPLICATE_CHART`.
+- **nginx cut long calls off after 60 seconds.** `PUT /webrequest` and `/webrequest/apply` can wait minutes for the GUI lock, and a terminal's own `/mcp` proxies them, so callers got nginx's HTML 504 while the work carried on. Those routes and the file API now get 300 seconds, like the unified `/mcp/`.
+- **`chartctl: true` crashed the API and the boot provisioning.** A bare `true` (or `false`) is now shorthand for `{enabled: true}`, in config.yaml's `chartctl` and `files` blocks alike. Any other non-mapping value still stops the MCP unifier with a config error, and the API treats it as off.
+
+## [v4.21.1]: 2026-10-09
+
+### Fixed
+
+- The live TA tests (`tests/live/test_rates_ta.py`) sent indicators in an old `{"type", "params": {"period"}}` shape that wickworks rejects, and reported every 502 as "wickworks unavailable", so they skipped instead of failing. They now send the flat spec from [market data](docs/market-data.md), check that each requested key comes back, and skip only when wickworks cannot be reached.
+
+## [v4.21.0]: 2026-10-09
+
+### Changed
+
+- **One live suite.** The live-trading tests (`tests/real/`) and the `/compile` sandbox tests (`tests/real_compile/`) moved into `tests/live/`, and `make test-live` runs all of it against the one `MT5_LIVE_*` target, real orders included. Name modules in `LIVE_TESTS` to run a subset, for example to leave the order tests out. `tests/real/run.sh` and its variables are gone: `MT5_API_URL` and `MT5_API_TOKEN` become `MT5_LIVE_URL`, `MT5_LIVE_BROKER`, `MT5_LIVE_ACCOUNT` and `MT5_LIVE_TOKEN`; `MT5_TEST_SYMBOL`, `MT5_TEST_VOLUME` and `MT5_TEST_MAGIC` become `MT5_LIVE_SYMBOL`, `MT5_LIVE_VOLUME` and `MT5_LIVE_MAGIC`; `MT5_COMPILE_URL` and `MT5_COMPILE_TOKEN` follow the same target, and the depth overrides become `MT5_LIVE_COMPILE_WORK_DEPTH` and `MT5_LIVE_COMPILE_INCLUDE_DEPTH`. The order volume now defaults to the symbol's minimum, and the order tests skip on a non-demo account unless `MT5_LIVE_ALLOW_REAL=1`, the same as the deployment tests. `MT5_LIVE_TRADING` is gone.
+
+## [v4.20.0]: 2026-10-09
+
+### Added
+
+- **`make test-live`** tests a running stack. Set `MT5_LIVE_URL`, `MT5_LIVE_TOKEN`, `MT5_LIVE_BROKER` and `MT5_LIVE_ACCOUNT` (or fill `tests/live/.env`) and it checks the REST API, both MCP endpoints and the route catalog against that terminal. If the terminal has Chart Deployments on, it also compiles a probe expert that never trades, deploys it, and checks the chart in screenshots. Steps that change state run only on a demo account unless `MT5_LIVE_ALLOW_REAL=1`. `MT5_LIVE_TRADING=1` adds the real-order suite in `tests/real`. See [operations](docs/operations.md#testing-a-running-stack).
+
+### Fixed
+
+- **A newly uploaded expert could not be deployed until the terminal restarted.** MT5 only loads an `.ex5` it saw on disk at startup or after a Navigator refresh, so a template naming a freshly uploaded expert opened an empty chart and the deployment failed with `EXPERT_NOT_ATTACHED` on every retry. Every successful `POST /experts` now refreshes the terminal's Navigator inside the Windows VM through the bundled AutoIt (`assets/autoit/refresh_navigator.au3`), and so does the first deployment of a host-managed expert. The response's `navigator_refresh` is `ok`, `failed` (upload the same file again to retry) or `unavailable` (no GUI automation, as on bare metal, where the terminal still needs a restart first).
+- **The loader lost track of charts whose expert calls `Comment()`.** Loader 1.0.2 marked a deployment's chart by writing `chartctl:<id>` into the chart comment, which any expert calling `Comment()` overwrites, and wrote over the expert's own comment in turn. Loader 1.0.3 keeps the chart-to-deployment map in `MQL5\Files\chartctl\owned.json` instead and never touches the chart comment. Charts the map does not know, such as the ones MT5 restores under new ids after a terminal restart, are adopted by expert, symbol and timeframe as before.
+- **A terminal restart could leave a deployment running on two charts.** The loader starts before the experts on MT5's restored charts have loaded, so it saw no chart to adopt and opened a second one, and the restored copy kept running its own expert unmanaged. Loader 1.0.3 only adopts during its first 30 seconds and opens no new charts. It also forgets a chart only once `ChartClose` succeeds, so a failed close no longer looks like a closed chart.
+- `run.sh` (`make up`) now builds images as it starts the stack. It used to start whatever image was built first, so an update never reached the MCP unifier.
+- `POST /webrequest/apply?script=` with an unknown script name answers 400 instead of an HTML 500.
+
+## [v4.19.0]: 2026-10-09
+
+### Added
+
+- **Chart Deployments over MCP.** Both MCP endpoints have typed tools for the chartctl and WebRequest routes: `upload_expert`, `list_experts`, `delete_expert`, `upload_set`, `list_sets`, `get_set`, `create_deployment`, `list_deployments`, `get_deployment`, `update_deployment`, `delete_deployment`, `reconcile_deployments`, `list_charts`, `get_loader`, `screenshot_chart`, `close_chart`, `get_webrequest`, `set_webrequest` and `apply_webrequest`. Before this an agent could reach those routes only through the generic `request` tool, which sends and reads JSON, so it could not upload an `.ex5` or `.set` file or get a screenshot back. The upload tools take the file as base64 (`upload_set` also takes plain text, and wrapped base64 is accepted) and send the multipart form the REST API expects. `screenshot_chart` returns the PNG as MCP image content. Name and id arguments are percent-encoded into the URL, and a value that would reach a different route, such as `../deployments/<id>`, is refused before any request.
+- On a per-terminal `/mcp` endpoint these tools are registered only when chartctl is enabled for that terminal. The unified `/mcp` endpoint always has them. Its `list_terminals` now reports `chartctl` per terminal, using the same rule as the API, and a chartctl tool called on a terminal without the routes says so, and why, instead of returning a bare 404. The unified endpoint gives the two WebRequest tools 290 seconds instead of the usual 120, since an apply can wait minutes for the GUI lock or a terminal restart.
+
+### Fixed
+
+- A terminal entry with `chartctl: false` still served every chartctl and WebRequest route when `chartctl.enabled` was on globally, because the API dropped that key when it read its own terminal entry. The loader was correctly left off that terminal, so the routes answered with nothing behind them. The override now turns the routes off too. The API also matches its own terminal entry when `config.yaml` gives the account as an unquoted number; before, it fell back to the first terminal's entry and its settings.
+- The unified MCP `endpoints` catalog listed none of the chartctl and WebRequest routes, so an agent on that endpoint could not discover them. They are listed now, each marked `"requires": "chartctl"`.
+- `docs/chart-deployments.md` and the skill had broken examples: the upload `curl` calls had no `Authorization` header, so they failed with 401 wherever a token is set, and the `PATCH /deployments/<id>` calls sent no `Content-Type: application/json`, so the API ignored the body and answered 400. The route was also listed as `/experts/<hash>`; it is `/experts/<name>`. The skill said Chart Deployments set themselves up, when they are off until `chartctl.enabled: true`, and linked the OpenClaw plugin on a branch that does not exist.
+- The docs said `PATCH /deployments/<id>` changes the set file in place. It updates the deployment, but the loader leaves a chart it already runs alone, so the new inputs apply only the next time it opens the chart. The docs and tool descriptions now say so and give the way to apply them right away: pause, wait until `GET /charts` no longer lists the chart, then resume.
+- The v4.18.0 notes said the WebRequest allowlist is re-applied after every terminal restart. It is re-applied once when the API process starts, which covers the periodic VM reboot but not a terminal restart inside a running API process, such as the health monitor's recovery restart. The docs now say so and point at `POST /webrequest/apply` for that case.
+
+## [v4.18.0]: 2026-10-09
+
+Remote EA deployment: attach Expert Advisors to charts with set files over the HTTP API, with no RDP and no terminal restart. Chart Deployments and the WebRequest allowlist automation were contributed by @Marinski in #10.
+
+### Added
+
+- **Chart Deployments** (`mt5api/chartctl/`, `mt5api/handlers/chartctl.py`). Stage `.ex5` and `.set` artifacts and declare deployments (expert, set, symbol, timeframe) as desired state. A resident loader EA reconciles the terminal's charts to it. New endpoints: `POST/GET/DELETE /experts`, `POST/GET /sets` and `GET /sets/<name>`, `POST/GET /deployments` and `GET/PATCH/DELETE /deployments/<id>`, `POST /deployments/reconcile`, `GET /charts`, `GET /loader`, `POST /charts/<chart_id>/screenshot`, `POST /charts/<chart_id>/close`.
+- **Chart Control Protocol v1**, a file-based contract in `MQL5\Files\chartctl\` (`desired.json`, `observed.json` and a command channel), documented in `docs/chart-control-protocol.md`. A deployment reports `running` only after the loader confirms the expert is live on a chart. Drift and failures show up in `observed.json`.
+- **Reference loader EA** `assets/experts/MT5ChartLoader.mq5` and the portable include `assets/experts/include/ChartControl.mqh`. An existing resident EA, such as an account tracker, can adopt the protocol with three calls instead of running a second EA. A terminal GlobalVariable works as a single-loader mutex, so two loaders on one terminal do not fight.
+- The loader adopts its own charts after a terminal restart. MT5's profile save and restore drops the `chartctl:<id>` chart comment, so before opening a chart, reconcile first adopts an unowned chart that already runs the deployment's exact expert, symbol and timeframe. Without this, every restart, including the periodic auto-reboot, opened a duplicate chart. A failed attach closes the chart it opened and backs off for 60 s, and errors are tracked per deployment.
+- The `close_chart` loader command closes any chart by id, including charts the loader cannot attribute to a deployment. The loader refuses to close its own chart.
+- Config block `chartctl:` in `config.yaml` (enable flag, reconcile hint, staleness window, command timeout, upload cap). Live-mode terminals only, with a per-terminal `chartctl: false` override.
+- **Loader bootstrap on boot.** `scripts/compile-chartctl-loader.bat` compiles the loader in every broker base and copies the `.ex5` into existing terminal instances. `config_helper.py write_ini` adds a `[StartUp] Expert=Advisors\MT5ChartLoader` section (honoring `symbol_suffix`) to live chartctl-enabled terminals, so the loader attaches itself when the terminal launches. Deploying needs no RDP and no manual attach. A duplicate loader from a re-fired `[StartUp]` line closes itself through the mutex.
+- **WebRequest allowlist provisioning** (`GET`/`PUT /webrequest`, `POST /webrequest/apply`; `mt5api/chartctl/webrequest.py`, `mt5api/chartctl/autoit_webrequest.py`, `mt5api/handlers/webrequest.py`). Set the terminal's `WebRequest()` allowed-URL list over the API instead of the Options dialog. It is its own call, not a deployment field, because it is rarely needed. The API picks one of two apply paths at runtime:
+  - **Windows VM (the default here):** on this terminal build the allowlist lives in the machine-bound `MQL5\experts.dat`, not in `common.ini`, and MT5 drops it on every restart. So the API sets it the way a user would. A bundled portable AutoIt interpreter (`assets/autoit/AutoIt3_x64.exe` with `set_webrequest.au3`) opens Tools > Options > Expert Advisors and types the URLs in. The list takes effect in the running session. Because MT5 forgets it on restart, `main.py` re-applies the stored list about 25 s after each terminal start or restart, including the periodic auto-reboot.
+  - **Bare metal:** where `common.ini` does hold the list, the API encodes it into `common.ini` (`scripts/webrequest_allowlist_codec.py`, format reverse-engineered from `terminal64.exe` and checked byte-identical against 18 real broker blobs) and restarts the terminal.
+
+  The desired list is stored per terminal in `Config/webrequest.json`. The first use imports the terminal's existing list, so manually configured URLs survive. The AutoIt scripts find the right terminal by the `terminal64.exe` PID that the API resolves from the executable path, because cloned terminals of one account have identical window titles. A named Windows kernel mutex (`Global\mt5_httpapi_webrequest_autoit`, crash-safe through `WAIT_ABANDONED`) serializes GUI applies across the host, since all terminals share desktop focus, and each terminal's boot re-apply is staggered by its port. `inspect_options.au3` and `selftest.au3` ship as GUI-automation diagnostics (`POST /webrequest/apply?script=`). Live-mode chartctl terminals only.
+- Tests: `tests/test_chartctl_units.py`, `tests/test_chartctl_endpoints.py`, `tests/test_webrequest.py`, and `tests/chartctl_fake_loader.py`, a Python stand-in for the EA side of the protocol, so the endpoint suite runs on Linux without MT5.
+
+### Notes
+
+- All chartctl handlers are lock-free. They only do file I/O against the terminal data dir, so they never wait behind the process-wide MT5 SDK lock.
+- Additive and opt-in: `chartctl.enabled` defaults to `false`. Without the block the API behaves exactly as before and writes no `[StartUp]` section. Turning it on attaches the loader EA to every live terminal, which is a fleet-wide change, so it never turns on through an upgrade alone.
+
+## [v4.17.1]: 2026-10-08
+
+### Fixed
+
+- **The health monitor could no longer see a terminal once its queue was full** (issue #25, reported by @Marinski). Its check went through the same `MT5_MAX_QUEUE_DEPTH` gate as client requests, and a full queue or an MT5 lock held past 60s made it log a warning and skip the round without counting it. So the backpressure the monitor exists to recover from also stopped it from acting. The monitor now skips the queue-depth cap and still waits for the lock. A lock it can't get within 60s counts as a dead check. After five in a row it kills the terminal without an SDK call, which releases whatever was stuck holding the lock, and the next check restarts the terminal. Client requests still get `503` for a full queue or a held lock, as before.
 
 ## [v4.17.0]: 2026-10-07
 
@@ -38,6 +215,7 @@ Rotating every VM's log directory and gzipping the archives was contributed by @
 ### Changed
 
 - **Rotated logs are named `*.log.YYYYMMDD.gz`** instead of `*.log.YYYYMMDD`. On its first pass after the upgrade the rotator gzips the plain archives an older version left behind, and retention prunes both names. Expired archives are deleted before that pass, so they are never compressed only to be removed. Nothing to migrate; anything that reads the archives directly needs to read gzip.
+
 
 ## [v4.15.0]: 2026-09-30
 

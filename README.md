@@ -130,6 +130,8 @@ The old README became a massive wall of API shit, so the details now live in sep
 | Copy working curl and Go examples instead of guessing | [Clients and examples](docs/clients-and-examples.md) |
 | Operate the bastard: Make targets, ports, remote access, concurrency, and logs | [Operations](docs/operations.md) |
 | Split terminals across several Windows VMs or NUMA nodes | [Multi-VM setup](docs/multi-vm-setup.md) |
+| Deploy EAs onto charts over HTTP instead of clicking through the Navigator | [Chart Deployments](docs/chart-deployments.md) |
+| Push libraries, DLLs and data into a terminal, zipped or not, and read its files and logs back | [File API](docs/files.md) |
 
 ## API at a glance
 
@@ -154,11 +156,14 @@ curl -H "Authorization: Bearer $MT5_API_TOKEN" \
 
 That is just the hello-world shit. The [REST API docs](docs/rest-api.md) link to every endpoint and response shape.
 
+JSON keys are snake_case everywhere, the same as the MT5 fields the API passes through (`time_msc`, `volume_real`). The backtest and TA routes used to answer in camelCase (`jobId`, `startedAt`, `wickworksStatus`), so for now they still send those keys next to the snake_case ones and still accept camelCase in request bodies. **The camelCase keys are deprecated and go away in v5.0.0.** Move your clients to the snake_case names.
+
 ## Development
 
 ```bash
 make status            # see whether the whole contraption is alive
 make test              # run all the tests, including integration + Go race
+make test-live         # test a running stack, set by MT5_LIVE_* (see docs/operations.md)
 make lint              # lint the PowerShell and shell shit
 make format            # format the shell scripts
 make verify-binaries   # check every vendored executable against the manifest

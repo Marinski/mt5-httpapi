@@ -17,7 +17,7 @@ paths = [
 
 [[allowlists]]
 description = """
-Test fixtures use deliberately fake credentials. tests/real/.env.example ships
+Test fixtures use deliberately fake credentials. tests/live/.env.example ships
 placeholders so a contributor knows which variables to set, and the API tests
 use obviously-fake account numbers and tokens.
 """

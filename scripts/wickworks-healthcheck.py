@@ -53,7 +53,9 @@ from concurrent.futures import ThreadPoolExecutor
 # so they are present when the namespaces are shared and gone when orphaned.
 GATEWAY_HOST = os.environ.get("WICKWORKS_GATEWAY_HOST", "20.20.20.1")
 GATEWAY_PORTS = [
-    int(p) for p in os.environ.get("WICKWORKS_GATEWAY_PORTS", "445,139,5900,5700").split(",") if p.strip()
+    int(p)
+    for p in os.environ.get("WICKWORKS_GATEWAY_PORTS", "445,139,5900,5700").split(",")
+    if p.strip()
 ]
 PROBE_TIMEOUT = int(os.environ.get("WICKWORKS_PROBE_TIMEOUT", "2"))
 

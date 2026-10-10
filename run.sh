@@ -77,13 +77,17 @@ cp "${DIR}/scripts/start.bat" "${DIR}/data/shared/scripts/start.bat"
 # Single reboot path for the stack — always writes rebooting.flag and releases
 # both lock dirs, so a reboot can never strand a lock the way it used to.
 cp "${DIR}/scripts/reboot.bat" "${DIR}/data/shared/scripts/reboot.bat"
+# Holds a scheduled reboot while an API runs a backtest or a write request.
+cp "${DIR}/scripts/reboot_guard.py" "${DIR}/data/shared/scripts/reboot_guard.py"
 # Boot-stamped lock acquire used by both start.bat and install.bat.
 cp "${DIR}/scripts/acquire_lock.ps1" "${DIR}/data/shared/scripts/acquire_lock.ps1"
 cp "${DIR}/scripts/api_runner.bat" "${DIR}/data/shared/scripts/api_runner.bat"
 cp "${DIR}/scripts/compile-warmup-ea.bat" "${DIR}/data/shared/scripts/compile-warmup-ea.bat"
 
+cp "${DIR}/scripts/compile-chartctl-loader.bat" "${DIR}/data/shared/scripts/compile-chartctl-loader.bat"
 cp "${DIR}/scripts/check_health.py" "${DIR}/data/shared/scripts/check_health.py"
 cp "${DIR}/scripts/config_helper.py" "${DIR}/data/shared/scripts/config_helper.py"
+cp "${DIR}/scripts/webrequest_allowlist_codec.py" "${DIR}/data/shared/scripts/webrequest_allowlist_codec.py"
 
 cp "${DIR}/scripts/event-log-tailer.ps1" "${DIR}/data/shared/scripts/event-log-tailer.ps1"
 cp "${DIR}/scripts/healthcheck.sh" "${DIR}/data/shared/scripts/healthcheck.sh"
@@ -219,7 +223,9 @@ if docker compose -f "${DIR}/docker-compose.yml" ps -q 2>/dev/null | grep -q .; 
 fi
 
 echo "Starting MT5 Windows VM..."
-docker compose -f "${DIR}/docker-compose.yml" up -d
+# --build: services built from this checkout (the MCP unifier) otherwise keep
+# whatever image was built first, so a `git pull` never reaches them.
+docker compose -f "${DIR}/docker-compose.yml" up -d --build
 
 API_HOST_PORT="${API_HOST_PORT:-8888}"
 echo ""

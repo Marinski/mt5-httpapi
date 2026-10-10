@@ -13,6 +13,7 @@ One HTTP surface for routing, auth, health, terminal control, account state, and
 - [Trading and history](trading-and-history.md)
 - [Backtesting](backtesting.md)
 - [Compiling MQL5](compiling.md)
+- [Chart Deployments](chart-deployments.md)
 
 ## API
 
@@ -43,6 +44,7 @@ curl -H "Authorization: Bearer $MT5_API_TOKEN" http://localhost:8888/roboforex/m
 | ------ | -------- | ----------------- |
 | GET    | `/ping`  | Is this thing on? |
 | GET    | `/error` | Last MT5 error    |
+| GET    | `/busy`  | Whether a VM reboot now would break work here |
 
 **GET `/ping`** (`mode` is `live` or `backtest`):
 
@@ -57,6 +59,20 @@ curl -H "Authorization: Bearer $MT5_API_TOKEN" http://localhost:8888/roboforex/m
 ```json
 { "code": 1, "message": "Success" }
 ```
+
+**GET `/busy`**: what this terminal's API is doing that a scheduled VM reboot would break. The reboot waits while any API on the VM says `busy`; see [Scheduled reboots](operations.md#scheduled-reboots).
+
+```json
+{
+  "busy": true,
+  "reasons": ["write_in_flight POST /orders (0.4s)"],
+  "backtests": [],
+  "writes_in_flight": [{ "method": "POST", "path": "/orders", "seconds": 0.4 }],
+  "draining": false
+}
+```
+
+`backtests` lists this terminal's queued and running backtests as `job_id` and `status`. `writes_in_flight` lists requests other than `GET`, `HEAD` and `OPTIONS` that have not finished. `draining` is true in the seconds before a reboot, when every write answers 503 `REBOOT_PENDING` with `Retry-After: 120`.
 
 ### Terminal
 

@@ -840,6 +840,49 @@ def test_the_hash_describes_the_mirror_not_the_source(client, compile_env, monke
     assert again == mirrored, "hash followed the source instead of the compiled tree"
 
 
+def test_a_change_marked_by_the_file_api_reaches_the_next_compile(
+    client, compile_env, monkeypatch, tmp_path
+):
+    """The file API writes a library into the compile tree and marks it
+    changed. The next compile, in any API process, must build against the new
+    copy at once instead of waiting out INCLUDE_REFRESH_SECONDS, or it
+    reports ok:true for a binary built against the old library."""
+    shared = tmp_path
+    include = shared / "MQL5" / "Include"
+    include.mkdir(parents=True)
+    (include / "Lib.mqh").write_text("// v1")
+    (shared / "Config").mkdir()
+    cache = tmp_path / "marked"
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", str(cache))
+    monkeypatch.setattr(compile_handler, "INCLUDE_REFRESH_SECONDS", 3600)
+    monkeypatch.setattr(
+        compile_handler.subprocess, "run",
+        _fake_metaeditor(_utf16_log(SUCCESS_LOG), b"ex5"),
+    )
+    _post(client, {"source": "void OnTick(){}"})
+    mirrored = cache / "MQL5" / "Include" / "Lib.mqh"
+    assert mirrored.read_text() == "// v1"
+
+    (include / "Lib.mqh").write_text("// v2 and longer")
+    os.utime(include / "Lib.mqh", (time.time() + 5, time.time() + 5))
+    _post(client, {"source": "void OnTick(){}"})
+    assert mirrored.read_text() == "// v1", "refreshed inside the window without a mark"
+
+    # Another process's clock: the mark lands after this process last checked.
+    monkeypatch.setattr(compile_handler, "_INCLUDES_CHECKED_WALL", time.time() - 10)
+    compile_handler.mark_includes_changed()
+    _post(client, {"source": "void OnTick(){}"})
+    assert mirrored.read_text() == "// v2 and longer"
+
+
+def test_marking_the_includes_changed_without_a_cache_does_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(compile_handler, "COMPILE_LOCAL_CACHE", "")
+
+    compile_handler.mark_includes_changed()
+
+    assert list(tmp_path.iterdir()) == []
+
+
 # ── Boot warm-up ─────────────────────────────────────────────────────────────
 #
 # The warm-up exists to move MetaEditor's cold load off the first real caller.

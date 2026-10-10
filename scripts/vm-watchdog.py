@@ -265,7 +265,8 @@ _HEX_ID = re.compile(r"[0-9a-f]{12,64}")
 
 def log(message: str, *args) -> None:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    print(f"[{stamp}] [vm-watchdog] {message}" if not args else f"[{stamp}] [vm-watchdog] {message % args}")
+    text = message % args if args else message
+    print(f"[{stamp}] [vm-watchdog] {text}")
 
 
 # ── Minimal Docker Engine API client over the unix socket (stdlib only) ──────
@@ -456,14 +457,16 @@ def decide(state: dict, health_status: str, failing_streak: int, now: int) -> tu
     # Delay before the NEXT restart, indexed by how many restarts already
     # happened: after the 1st restart wait BACKOFF[0], after the 2nd wait
     # BACKOFF[1], etc. First restart has no prior wait.
-    delay = BACKOFF_ATTEMPTS[max(0, min(attempts - 1, len(BACKOFF_ATTEMPTS) - 1))] if attempts else 0
+    backoff_index = max(0, min(attempts - 1, len(BACKOFF_ATTEMPTS) - 1))
+    delay = BACKOFF_ATTEMPTS[backoff_index] if attempts else 0
     if last_restart and (now - last_restart) < delay:
         return "wait", f"backoff {now - last_restart}s < {delay}s (attempt {attempts + 1})"
 
     state["attempts"] = attempts + 1
     state["last_restart"] = now
     state["healthy_since"] = 0
-    return "restart", f"unhealthy streak {failing_streak} >= {MIN_FAILING_STREAK} (attempt {attempts + 1})"
+    reason = f"unhealthy streak {failing_streak} >= {MIN_FAILING_STREAK} (attempt {attempts + 1})"
+    return "restart", reason
 
 
 # ── Docker-facing logic ──────────────────────────────────────────────────────
@@ -589,7 +592,12 @@ def _health_of(client: DockerClient, container_id: str) -> tuple[str, int]:
     return status, int(streak or 0)
 
 
-def sweep_once(client: DockerClient, project: str, dry_run: bool = False, now: int | None = None) -> int:
+def sweep_once(
+    client: DockerClient,
+    project: str,
+    dry_run: bool = False,
+    now: int | None = None,
+) -> int:
     """One pass over the project's VMs, then over their netns sidecars.
 
     Returns the recovery count across both.
@@ -804,7 +812,10 @@ def main() -> int:
     if SELF_FULL_ID:
         log(f"own container id resolved: {SELF_FULL_ID[:12]}")
     else:
-        log(f"cannot inspect own container '{SELF_ID}'; self-exclusion falls back to the short-id prefix")
+        log(
+            f"cannot inspect own container '{SELF_ID}'; "
+            "self-exclusion falls back to the short-id prefix"
+        )
 
     project = COMPOSE_PROJECT or _compose_project(client) or ""
     if not project:

@@ -19,6 +19,7 @@ from mt5api.config import (
     WICKWORKS_TIMEOUT_SECONDS,
     WICKWORKS_URL,
 )
+from mt5api.jsonkeys import with_legacy_keys
 from mt5api.logger import log
 from mt5api.mt5client import (
     broker_to_utc_ms,
@@ -46,6 +47,8 @@ RATES_FORWARD_MAX_ATTEMPTS = 4    # final window: 1.5 * 2^3 = 12x
 TICKS_BACKWARD_INITIAL_SEC_PER_TICK = 0.1  # ~10 ticks/sec assumption
 TICKS_BACKWARD_FLOOR_WINDOW_SEC = 60       # min window for sparse symbols
 TICKS_BACKWARD_MAX_ATTEMPTS = 6   # final window: floor * 2^5
+
+_BAD_RANGE_ANCHOR = "'from'/'to' must be unix seconds or YYYY_MM_DD[_HH_MM_SS]"
 
 
 def _parse_anchor(s):
@@ -308,7 +311,7 @@ def _fetch_rates(symbol):
         to_utc = _parse_anchor(date_to)
         if from_utc is None or to_utc is None:
             return None, "", (
-                jsonify({"error": "'from'/'to' must be unix seconds or YYYY_MM_DD[_HH_MM_SS]"}),
+                jsonify({"error": _BAD_RANGE_ANCHOR}),
                 400,
             )
         df = utc_seconds_to_broker_dt(from_utc)
@@ -449,11 +452,11 @@ def get_rates_ta(symbol):
         log.warning("wickworks call failed: %s", conn_err)
         return jsonify({"error": conn_err}), 502
     if status >= 400:
-        return jsonify({
+        return jsonify(with_legacy_keys({
             "error": "wickworks rejected request",
             "wickworksStatus": status,
             "wickworksBody": ta_body,
-        }), 502
+        })), 502
 
     return jsonify({
         "symbol": symbol,
@@ -474,7 +477,8 @@ def get_ticks(symbol):
     flags_str = request.args.get("flags", "ALL").upper()
     flags = TICK_FLAGS_MAP.get(flags_str)
     if flags is None:
-        return jsonify({"error": f"Invalid flags: {flags_str}. Use: {list(TICK_FLAGS_MAP.keys())}"}), 400
+        valid_flags = list(TICK_FLAGS_MAP.keys())
+        return jsonify({"error": f"Invalid flags: {flags_str}. Use: {valid_flags}"}), 400
 
     date_from = request.args.get("from")
     date_to = request.args.get("to")
@@ -491,7 +495,7 @@ def get_ticks(symbol):
         from_utc = _parse_anchor(date_from)
         to_utc = _parse_anchor(date_to)
         if from_utc is None or to_utc is None:
-            return jsonify({"error": "'from'/'to' must be unix seconds or YYYY_MM_DD[_HH_MM_SS]"}), 400
+            return jsonify({"error": _BAD_RANGE_ANCHOR}), 400
         df = utc_seconds_to_broker_dt(from_utc)
         dt = utc_seconds_to_broker_dt(to_utc)
         ticks = m(mt5.copy_ticks_range, symbol, df, dt, flags)

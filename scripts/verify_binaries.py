@@ -24,7 +24,7 @@ no upstream release -- and pretending otherwise would either block the build
 forever or hide the fact. Recording it makes it visible on every single run
 without holding the repo hostage, and any CHANGE to it still fails hard.
 
-Run it: `make verify-binaries`, or as part of `make lint`.
+Run it: `make verify-binaries`, or as part of `make test`.
 """
 from __future__ import annotations
 

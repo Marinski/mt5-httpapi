@@ -1,8 +1,8 @@
-"""HTTP-contract coverage for the flows exercised only by tests/real/ (needs a
+"""HTTP-contract coverage for the flows exercised only by tests/live/ (needs a
 live MT5 terminal, so CI never runs them). Same route -> handler -> mt5client
 -> SDK path as tests/test_handlers_*.py, driven through the same
 `api_client` + `patch_handler` harness from conftest.py — just with the SDK
-scripted to mirror each tests/real/ flow instead of a single canned call.
+scripted to mirror each tests/live/ flow instead of a single canned call.
 
 Every fixture below is an obviously-fake placeholder (symbol 'TESTUSD',
 volume 0.01, ticket 12345, magic 424242) — never a real broker name or price.
@@ -16,17 +16,17 @@ list for a scripted, strictly-ordered flow like these.
 
 Flow-by-flow accounting (real-suite file -> flow -> this file):
 
-tests/real/test_account.py
+tests/live/test_account.py
   test_get_account                        -> already covered by
     tests/test_handlers_readonly.py::test_account_returns_the_logged_in_account
 
-tests/real/test_ping_terminal.py
+tests/live/test_ping_terminal.py
   test_ping_returns_ok                    -> already covered by
     tests/test_handlers_readonly.py::test_ping_needs_no_terminal_at_all
   test_get_terminal_metadata              -> test_terminal_returns_the_broker_metadata
   test_last_error_endpoint                -> test_error_endpoint_returns_the_last_sdk_error
 
-tests/real/test_symbols.py
+tests/live/test_symbols.py
   test_list_symbols                       -> test_list_symbols_returns_the_tradeable_names
   test_symbol_info                        -> test_get_symbol_returns_tradeable_info
   test_volume_min_meets_config            -> same flow as test_symbol_info (config-only
@@ -34,7 +34,7 @@ tests/real/test_symbols.py
                                               /symbols/<symbol> response, no separate route)
   test_current_tick                       -> test_get_tick_returns_the_live_price
 
-tests/real/test_rates.py
+tests/live/test_rates.py
   test_get_rates_count                    -> test_get_rates_returns_the_requested_bar_count
   test_get_rates_timeframes               -> test_get_rates_returns_the_requested_bar_count
                                               (parametrized over timeframe strings)
@@ -42,7 +42,7 @@ tests/real/test_rates.py
   test_rates_invalid_timeframe            -> already covered by
     tests/test_handlers_validation.py::test_validation_returns_400[...invalid timeframe]
 
-tests/real/test_rates_ta.py
+tests/live/test_rates_ta.py
   test_rates_ta_empty_indicators_returns_400 -> test_rates_ta_rejects_a_missing_or_empty_indicators_spec
                                               (parametrized over an empty indicators object and a
                                               missing body)
@@ -53,7 +53,7 @@ tests/real/test_rates_ta.py
                                               (same test covers the single-indicator macd shape;
                                               the wickworks passthrough is indicator-agnostic)
 
-tests/real/test_market_order.py
+tests/live/test_market_order.py
   test_buy_market_open_then_close         -> test_buy_market_open_then_close_lifecycle
   test_sell_market_open_then_close        -> test_sell_market_open_then_close_lifecycle
   test_order_invalid_symbol_does_not_500  -> already covered by
@@ -64,7 +64,7 @@ tests/real/test_market_order.py
     test_buy_market_open_then_close_lifecycle (asserts two consecutive GET
     /positions calls agree before the close)
 
-tests/real/test_limit_order.py
+tests/live/test_limit_order.py
   test_buy_limit_place_modify_cancel      -> test_buy_limit_place_modify_cancel_lifecycle
   test_sell_limit_place_and_cancel        -> test_sell_limit_place_and_cancel_lifecycle
   test_buy_stop_place_and_cancel          -> test_stop_orders_place_and_cancel_send_the_right_type
@@ -73,7 +73,7 @@ tests/real/test_limit_order.py
   test_get_order_not_found                -> already covered by
     tests/test_handlers_orders.py::test_get_order_returns_404_for_an_unknown_ticket
 
-tests/real/test_position_management.py
+tests/live/test_position_management.py
   test_modify_sl_tp_on_open_position       -> test_modify_sl_tp_on_open_position_lifecycle
   test_modify_sl_only                      -> already covered by
     tests/test_handlers_positions.py::test_updating_only_the_stop_keeps_the_existing_take_profit
@@ -83,7 +83,7 @@ tests/real/test_position_management.py
   test_modify_position_not_found           -> already covered by
     tests/test_handlers_positions.py::test_update_of_an_unknown_position_sends_nothing
 
-tests/real/test_history.py
+tests/live/test_history.py
   test_history_orders_30d                  -> test_history_orders_returns_populated_rows
   test_history_deals_30d                   -> test_history_deals_returns_populated_rows
   test_history_orders_missing_params_returns_400 -> already covered by
@@ -189,7 +189,7 @@ def _fake_ticks(count, start=1_700_000_000):
     return ticks
 
 
-# ── tests/real/test_ping_terminal.py ─────────────────────────────────────
+# ── tests/live/test_ping_terminal.py ─────────────────────────────────────
 # test_ping_returns_ok -> already covered by
 #   tests/test_handlers_readonly.py::test_ping_needs_no_terminal_at_all
 
@@ -224,7 +224,7 @@ def test_error_endpoint_returns_the_last_sdk_error(api_client, patch_handler):
     assert body["message"] == "no error"
 
 
-# ── tests/real/test_symbols.py ───────────────────────────────────────────
+# ── tests/live/test_symbols.py ───────────────────────────────────────────
 
 
 def test_list_symbols_returns_the_tradeable_names(
@@ -278,7 +278,7 @@ def test_get_tick_returns_the_live_price(api_client, patch_handler):
     assert body["time"] > 0
 
 
-# ── tests/real/test_rates.py ─────────────────────────────────────────────
+# ── tests/live/test_rates.py ─────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("timeframe,count", [("H1", 100), ("M5", 10), ("D1", 10)])
@@ -312,7 +312,7 @@ def test_get_ticks_returns_recent_ticks(api_client, patch_handler):
         assert "bid" in t or "ask" in t
 
 
-# ── tests/real/test_rates_ta.py ──────────────────────────────────────────
+# ── tests/live/test_rates_ta.py ──────────────────────────────────────────
 
 
 @pytest.mark.parametrize("body_json", [{"indicators": {}}, None])
@@ -366,7 +366,7 @@ def test_rates_ta_returns_bars_and_the_ta_payload(api_client, patch_handler, mon
     assert "recentBars" not in captured_payload
 
 
-# ── tests/real/test_market_order.py ──────────────────────────────────────
+# ── tests/live/test_market_order.py ──────────────────────────────────────
 
 
 def test_buy_market_open_then_close_lifecycle(api_client, patch_handler):
@@ -473,7 +473,7 @@ def test_sell_market_open_then_close_lifecycle(api_client, patch_handler):
     assert sent_close["price"] == ASK
 
 
-# ── tests/real/test_limit_order.py ───────────────────────────────────────
+# ── tests/live/test_limit_order.py ───────────────────────────────────────
 
 
 def test_buy_limit_place_modify_cancel_lifecycle(api_client, patch_handler):
@@ -633,7 +633,7 @@ def test_get_order_by_ticket_returns_the_pending_order(api_client, patch_handler
     assert body["price_open"] == 0.5000
 
 
-# ── tests/real/test_position_management.py ───────────────────────────────
+# ── tests/live/test_position_management.py ───────────────────────────────
 
 
 def test_modify_sl_tp_on_open_position_lifecycle(api_client, patch_handler):
@@ -699,7 +699,7 @@ def test_get_position_by_ticket_returns_the_position(api_client, patch_handler):
     assert body["volume"] == VOLUME
 
 
-# ── tests/real/test_history.py ───────────────────────────────────────────
+# ── tests/live/test_history.py ───────────────────────────────────────────
 
 
 def test_history_orders_returns_populated_rows(api_client, patch_handler):

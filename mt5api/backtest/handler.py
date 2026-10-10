@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import configparser
 import io
-import json
 import os
 import shutil
 import subprocess
@@ -26,13 +25,14 @@ import uuid
 
 import psutil
 
-from flask import Response, abort, jsonify, request, send_file
+from flask import Response, jsonify, request, send_file
 
-from mt5api import symbol_cache
+from mt5api import symbol_cache, terminal_mcp
 from mt5api.backtest import cache_parser, ini_builder, jobs, optimization_parser, set_builder
 from mt5api.config import (
     ACCOUNT,
     BROKER,
+    DISABLE_TERMINAL_MCP,
     INSTANCE,
     LOG_DIR,
     TERMINAL_DIR,
@@ -43,10 +43,10 @@ from mt5api.config import (
     BACKTEST_MAX_TIMEOUT_SECONDS,
     BACKTEST_TIMEOUT_SECONDS,
     BACKTEST_JOB_DIR,
-    DISABLE_TERMINAL_MCP,
     load_yaml_config,
     parse_duration_to_seconds,
 )
+from mt5api.jsonkeys import accept_snake_keys, with_legacy_keys
 from mt5api.logger import log
 
 RUN_LOCK = threading.Lock()
@@ -70,8 +70,11 @@ MAX_TOP_PASSES = 500
 def build_ini_route():
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 400
+    body = request.get_json(silent=True) or {}
     try:
-        ini_text = ini_builder.build_ini(request.get_json(silent=True) or {})
+        if isinstance(body, dict):
+            body = accept_snake_keys(body, ini_builder.CAMEL_CASE_FIELDS)
+        ini_text = ini_builder.build_ini(body)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return Response(ini_text, mimetype="text/plain")
@@ -88,6 +91,16 @@ def build_set_route():
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
+
+
+def _form_field(name: str, legacy_name: str) -> str | None:
+    """A form field under its snake_case name or its deprecated camelCase
+    one. Both with different values is a ValueError."""
+    value = request.form.get(name)
+    legacy = request.form.get(legacy_name)
+    if value is not None and legacy is not None and value != legacy:
+        raise ValueError(f"{name} and {legacy_name} are the same field; send one")
+    return value if value is not None else legacy
 
 
 def _load_account_config():
@@ -256,86 +269,6 @@ def _write_utf16_ini(parser, path):
     with open(path, "wb") as handle:
         handle.write(b"\xff\xfe")
         handle.write(text.encode("utf-16-le"))
-
-
-#: MT5 build 6090+ starts its own MCP server (the transport behind the built-in
-#: AI assistant) at launch. It is configured in ``<terminal>/Config/assistant.ini``
-#: and defaults to binding 127.0.0.1:22346. Every terminal in a VM shares
-#: loopback, so only one can hold the port: the rest log
-#: ``MCP bind error on 127.0.0.1:22346 [10048]`` on every single launch, and the
-#: same subsystem authenticates against MQL5.community (which a backtest terminal
-#: has no account for), so its startup path is a source of spurious terminal
-#: aborts. MetaQuotes documents disabling the internal server as having no effect
-#: on trading or Expert Advisors, and it plays no part in a backtest. Gated by the
-#: opt-in ``mcp.disable_terminal_server`` config (see config.py); sections mirror
-#: Tools > Options > MCP in the terminal.
-MCP_SECTIONS_TO_DISABLE = ("MCP.MetaTrader", "MCP.MetaEditor")
-
-
-def _disable_terminal_mcp():
-    """Turn off this terminal's built-in MCP servers before it is launched.
-
-    Only called when ``DISABLE_TERMINAL_MCP`` is set (``mcp.disable_terminal_server``
-    in config.yaml). Reads the existing ``Config/assistant.ini`` (UTF-16-LE + BOM,
-    as MT5 writes it) so the Endpoint/ApiKey lines survive, flips each section's
-    ``Enable`` to ``0``, and writes it back. A missing or unreadable file is
-    treated as empty and recreated with the sections disabled — exactly the state
-    a fresh terminal is in before MT5 writes its default (enabled) file.
-
-    MT5 rewrites ``assistant.ini`` when it exits, so this must be re-applied on
-    every launch, not once at provisioning.
-    """
-    path = os.path.join(TERMINAL_DIR, "Config", "assistant.ini")
-    parser = configparser.RawConfigParser()
-    parser.optionxform = str
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
-    except OSError:
-        raw = b""
-    if raw[:2] == b"\xff\xfe":
-        text = raw.decode("utf-16-le", errors="replace")
-    elif raw[:2] == b"\xfe\xff":
-        text = raw.decode("utf-16-be", errors="replace")
-    else:
-        text = raw.decode("utf-8", errors="replace")
-    # Drop the BOM: configparser rejects a file whose first line begins with
-    # U+FEFF ("File contains no section headers"), which would silently discard
-    # the Endpoint/ApiKey we are trying to preserve.
-    text = text.lstrip("\ufeff")
-    if text.strip():
-        try:
-            parser.read_string(text)
-        except configparser.Error:
-            # A corrupt file must not fail the run: fall back to a clean one
-            # carrying only the disabled sections.
-            parser = configparser.RawConfigParser()
-            parser.optionxform = str
-    for section in MCP_SECTIONS_TO_DISABLE:
-        if not parser.has_section(section):
-            parser.add_section(section)
-        parser.set(section, "Enable", "0")
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        _write_utf16_ini(parser, path)
-    except OSError as exc:
-        # Best-effort: a terminal that keeps MCP enabled can still run (it does
-        # so today), so failing to write this must not fail the backtest.
-        log.warning(
-            "backtest could not disable terminal MCP server broker=%s account=%s instance=%s err=%s",
-            BROKER,
-            ACCOUNT,
-            INSTANCE,
-            exc,
-        )
-        return
-    log.info(
-        "backtest disabled terminal MCP server broker=%s account=%s instance=%s path=%s",
-        BROKER,
-        ACCOUNT,
-        INSTANCE,
-        path,
-    )
 
 
 def _read_text_best_effort(path):
@@ -650,7 +583,7 @@ def run_backtest():
 
     try:
         timeout_value = (request.form.get("timeout") or "").strip()
-        top_passes = _parse_top_passes(request.form.get("topPasses"))
+        top_passes = _parse_top_passes(_form_field("top_passes", "topPasses"))
         timeout_seconds = (
             parse_duration_to_seconds(timeout_value)
             if timeout_value
@@ -803,9 +736,8 @@ def _execute_job(job_id):
             parser = _parse_ini(_read_text_best_effort(job["debugIniPath"]))
             ini_path = os.path.join(job["stageDir"], "tester.ini")
             _write_utf16_ini(parser, ini_path)
-            if DISABLE_TERMINAL_MCP:
-                # Re-apply before every launch: MT5 rewrites assistant.ini on exit.
-                _disable_terminal_mcp()
+            # MT5 rewrites assistant.ini on exit, so this runs before every launch.
+            terminal_mcp.apply(DISABLE_TERMINAL_MCP, TERMINAL_DIR, "backtest")
 
             cmd = [TERMINAL_PATH, "/portable", f"/config:{ini_path}"]
             log.info(
@@ -1016,7 +948,12 @@ def get_log(job_id):
     path = job.get("logPath")
     if not path or not os.path.exists(path):
         return jsonify({"error": "Log not available yet"}), 404
-    return send_file(path, mimetype="text/plain", as_attachment=False, download_name=f"{job_id}.log")
+    return send_file(
+        path,
+        mimetype="text/plain",
+        as_attachment=False,
+        download_name=f"{job_id}.log",
+    )
 
 
 def _tail_dir_log(log_dir, lines):
@@ -1094,7 +1031,7 @@ def get_tail(job_id):
     tester_log_dir = os.path.join(TERMINAL_DIR, "Tester", "logs")
     tester_log_file, tester_log = _tail_dir_log(tester_log_dir, n_lines)
 
-    return jsonify({
+    return jsonify(with_legacy_keys({
         "jobId": job_id,
         "status": job.get("status"),
         "startedAt": job.get("startedAt"),
@@ -1105,4 +1042,4 @@ def get_tail(job_id):
         "testerLog": tester_log,
         "terminalLogFile": os.path.basename(terminal_log_file) if terminal_log_file else None,
         "testerLogFile": os.path.basename(tester_log_file) if tester_log_file else None,
-    })
+    }))

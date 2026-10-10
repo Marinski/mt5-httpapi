@@ -68,6 +68,21 @@ def test_match_terminal_config_distinguishes_instances():
     assert legacy["instance"] == cfg.DEFAULT_INSTANCE
 
 
+def test_match_terminal_config_matches_an_unquoted_numeric_account():
+    """YAML reads `account: 12345678` as an int; start.bat passes the login as
+    the string "12345678". Missing the match falls back to the FIRST terminal's
+    entry, so that terminal's settings (mode, chartctl) would apply here."""
+    terms = [
+        {"broker": "roboforex", "account": 11111111, "port": 6542, "chartctl": False},
+        {"broker": "roboforex", "account": 22222222, "port": 6543},
+    ]
+
+    match = cfg.match_terminal_config(terms, broker="roboforex", account="22222222")
+
+    assert match["port"] == 6543
+    assert match["chartctl"] is None
+
+
 def test_terminal_dir_candidates_prefer_instance_dir():
     candidates = cfg.terminal_dir_candidates("/terminals", "darwinex", "live", "a")
 

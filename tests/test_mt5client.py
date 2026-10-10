@@ -426,10 +426,49 @@ def test_session_rejects_when_lock_acquire_times_out(monkeypatch):
             raise AssertionError("release should not be called — acquire failed")
 
     monkeypatch.setattr(mc, "_mt5_lock", _FakeLock())
-    with pytest.raises(mc.QueueFull, match="could not acquire MT5 lock"):
+    with pytest.raises(mc.MT5LockTimeout, match="could not acquire MT5 lock") as exc:
         with mc.session():
             pass
+    assert isinstance(exc.value, mc.QueueFull)
     assert mc.current_queue_depth() == 0
+
+
+def test_session_bypass_skips_the_queue_cap_but_others_are_still_rejected(monkeypatch):
+    monkeypatch.setattr(mc, "MAX_QUEUE_DEPTH", 0)
+    with mc.session(bypass_queue_cap=True):
+        assert mc._mt5_lock.locked()
+    assert mc.current_queue_depth() == 0
+
+    with pytest.raises(mc.QueueFull):
+        with mc.session():
+            pass
+
+
+def test_session_bypass_still_waits_for_the_lock(monkeypatch):
+    monkeypatch.setattr(mc, "SESSION_ACQUIRE_TIMEOUT", 0.05)
+    assert mc._mt5_lock.acquire(timeout=1)
+    try:
+        with pytest.raises(mc.MT5LockTimeout):
+            with mc.session(bypass_queue_cap=True):
+                pass
+    finally:
+        mc._mt5_lock.release()
+    assert mc.current_queue_depth() == 0
+
+
+def test_with_mt5_answers_503_when_the_lock_stays_held(monkeypatch):
+    @mc.with_mt5
+    def handler():
+        return "unreachable"
+
+    monkeypatch.setattr(mc, "SESSION_ACQUIRE_TIMEOUT", 0.05)
+    assert mc._mt5_lock.acquire(timeout=1)
+    try:
+        with _flask_app.test_request_context("/"):
+            _resp, status = handler()
+    finally:
+        mc._mt5_lock.release()
+    assert status == 503
 
 
 # --- with_mt5() — Flask handler decorator -----------------------------------
@@ -970,6 +1009,40 @@ def test_restart_terminal_seeks_past_pre_existing_journal_content(monkeypatch, t
 
     assert mc.restart_terminal() is True
     assert captured_offset["offset"] == len(old_content)
+
+
+def _restart_harness(monkeypatch, reconnects: bool):
+    from mt5api.chartctl import autoit_webrequest
+
+    monkeypatch.setattr(mc, "m", lambda fn, *a, **kw: True)
+    monkeypatch.setattr(mc, "_kill_terminal", lambda: True)
+    monkeypatch.setattr(mc.subprocess, "Popen", MagicMock())
+    monkeypatch.setattr(mc, "_wait_for_journal", lambda *a, **kw: True)
+    monkeypatch.setattr(mc, "get_first_account", lambda: None)
+    monkeypatch.setattr(mc, "init_mt5", lambda *a, **kw: reconnects)
+    reapplied = []
+    monkeypatch.setattr(
+        autoit_webrequest, "reapply_in_background",
+        lambda delay, reason: reapplied.append(reason),
+    )
+    return reapplied
+
+
+def test_a_successful_restart_re_applies_the_webrequest_allowlist(monkeypatch):
+    """The terminal in the VM forgets its WebRequest list on every restart, and
+    the API's start-up re-apply has long since run by the time the health
+    monitor or POST /terminal/restart restarts it."""
+    reapplied = _restart_harness(monkeypatch, reconnects=True)
+
+    assert mc.restart_terminal() is True
+    assert reapplied == ["terminal restart"]
+
+
+def test_a_failed_restart_does_not_re_apply(monkeypatch):
+    reapplied = _restart_harness(monkeypatch, reconnects=False)
+
+    assert mc.restart_terminal() is False
+    assert reapplied == []
 
 
 def test_restart_terminal_relaunches_without_a_configured_account(monkeypatch):

@@ -38,8 +38,8 @@ No matter which mode you pick, the dance is the same:
 2. Provide an `.ex5` expert.
 3. Provide a `.set` file containing MT5 optimization ranges.
 4. Submit `POST /backtest`.
-5. Poll `GET /backtest/<jobId>` until `completed` or `failed`.
-6. Inspect `optimizationResults`, `optimizationCache`, `/report`, and `/log`.
+5. Poll `GET /backtest/<job_id>` until `completed` or `failed`.
+6. Inspect `optimization_results`, `optimization_cache`, `/report`, and `/log`.
 
 ## Optimization Modes
 
@@ -69,12 +69,12 @@ curl -sS -X POST "$URL/backtest/build-ini" \
     "symbol":"GBPCAD",
     "timeframe":"M15",
     "expert":"EA Studio GBPCAD M15 1615044595.ex5",
-    "lastYears":1,
+    "last_years":1,
     "modelling":"open-prices",
-    "expertParameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set",
+    "expert_parameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set",
     "optimization":1,
-    "optimizationCriterion":0,
-    "reportName":"gbpcad-m15-complete-search"
+    "optimization_criterion":0,
+    "report_name":"gbpcad-m15-complete-search"
   }'
 ```
 
@@ -86,7 +86,7 @@ curl -sS -X POST "$URL/backtest" \
   -F "ini=@tester.ini" \
   -F "expert_name=EA Studio GBPCAD M15 1615044595.ex5" \
   -F "set_name=ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set" \
-  -F "topPasses=20"
+  -F "top_passes=20"
 ```
 
 Typical completed payload shape:
@@ -94,10 +94,10 @@ Typical completed payload shape:
 ```json
 {
   "status": "completed",
-  "optimizationType": 1,
-  "reportName": "gbpcad-m15-complete-search.xml",
-  "optimizationCache": null,
-  "optimizationResults": [
+  "optimization_type": 1,
+  "report_name": "gbpcad-m15-complete-search.xml",
+  "optimization_cache": null,
+  "optimization_results": [
     {
       "Pass": 12,
       "Result": 1450.22,
@@ -129,12 +129,12 @@ curl -sS -X POST "$URL/backtest/build-ini" \
     "symbol":"GBPUSD",
     "timeframe":"M15",
     "expert":"MyEA.ex5",
-    "lastYears":3,
+    "last_years":3,
     "modelling":"open-prices",
-    "expertParameters":"myea-optimizer.set",
+    "expert_parameters":"myea-optimizer.set",
     "optimization":2,
-    "optimizationCriterion":5,
-    "reportName":"gbpusd-m15-sharpe-search"
+    "optimization_criterion":5,
+    "report_name":"gbpusd-m15-sharpe-search"
   }'
 ```
 
@@ -143,10 +143,10 @@ Example completed payload shape:
 ```json
 {
   "status": "completed",
-  "optimizationType": 2,
-  "reportName": "gbpusd-m15-sharpe-search.xml",
-  "optimizationCache": null,
-  "optimizationResults": [
+  "optimization_type": 2,
+  "report_name": "gbpusd-m15-sharpe-search.xml",
+  "optimization_cache": null,
+  "optimization_results": [
     {
       "Pass": 184,
       "Result": 2.41,
@@ -182,7 +182,7 @@ mt5-httpapi handles this by:
 - discovering the matching `.opt` cache file from the normalized INI
 - parsing the cache rows and sorting them by `Result`
 - recovering pass-to-symbol mappings from agent logs
-- exposing the matched cache artifact through `optimizationCache`
+- exposing the matched cache artifact through `optimization_cache`
 
 Example `build-ini` request:
 
@@ -194,12 +194,12 @@ curl -sS -X POST "$URL/backtest/build-ini" \
     "symbol":"GBPCAD",
     "timeframe":"M15",
     "expert":"EA Studio GBPCAD M15 1615044595.ex5",
-    "lastYears":5,
+    "last_years":5,
     "modelling":"open-prices",
-    "expertParameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set",
+    "expert_parameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set",
     "optimization":3,
-    "optimizationCriterion":0,
-    "reportName":"mode3-gbpcad-m15-last5y-rerun5"
+    "optimization_criterion":0,
+    "report_name":"mode3-gbpcad-m15-last5y-rerun5"
   }'
 ```
 
@@ -211,18 +211,18 @@ curl -sS -X POST "$URL/backtest" \
   -F "ini=@tester.ini;filename=tester.ini" \
   -F "expert_name=EA Studio GBPCAD M15 1615044595.ex5" \
   -F "set_name=ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set" \
-  -F "topPasses=50"
+  -F "top_passes=50"
 ```
 
 Example completed payload shape from a real replay:
 
 ```json
 {
-  "jobId": "b05643c6d51c4a4cb0cad8a2b6c5573b",
+  "job_id": "b05643c6d51c4a4cb0cad8a2b6c5573b",
   "status": "completed",
-  "reportName": "mode3-gbpcad-m15-last5y-rerun5.symbols.xml",
-  "optimizationType": 3,
-  "optimizationResults": [
+  "report_name": "mode3-gbpcad-m15-last5y-rerun5.symbols.xml",
+  "optimization_type": 3,
+  "optimization_results": [
     {
       "Pass": 21,
       "Symbol": "GBPJPY",
@@ -237,20 +237,20 @@ Example completed payload shape from a real replay:
       "Custom": ""
     }
   ],
-  "optimizationCache": {
+  "optimization_cache": {
     "name": "EA Studio GBPCAD M15 1615044595.all_symbols.M15.20210525.20260525.22.788ECDD113BA3097A58EF888EBEFF9CA.opt",
     "path": "C:\\Users\\Docker\\Desktop\\Shared\\terminals\\darwinex\\live\\a\\Tester\\cache\\EA Studio GBPCAD M15 1615044595.all_symbols.M15.20210525.20260525.22.788ECDD113BA3097A58EF888EBEFF9CA.opt",
     "pattern": "EA Studio GBPCAD M15 1615044595.all_symbols.M15.20210525.20260525.*.opt",
     "build": "22",
-    "cacheHash": "788ECDD113BA3097A58EF888EBEFF9CA",
-    "rowCount": 28,
-    "sizeBytes": 20013,
-    "symbolComponent": "all_symbols",
+    "cache_hash": "788ECDD113BA3097A58EF888EBEFF9CA",
+    "row_count": 28,
+    "size_bytes": 20013,
+    "symbol_component": "all_symbols",
     "period": "M15",
-    "fromDate": "20210525",
-    "toDate": "20260525",
+    "from_date": "20210525",
+    "to_date": "20260525",
     "expert": "EA Studio GBPCAD M15 1615044595",
-    "modifiedAt": "2026-05-25T08:19:59.371833"
+    "modified_at": "2026-05-25T08:19:59.371833"
   }
 }
 ```
@@ -320,21 +320,21 @@ curl -sS -H "Authorization: Bearer $TOK" "$URL/backtest/$JOB"
 Important fields:
 
 - `status`: `queued`, `running`, `completed`, or `failed`
-- `optimizationType`: submitted MT5 mode
-- `optimizationResults`: parsed top `N` rows exposed by the API
-- `optimizationCache`: metadata for the matched `.opt` file when cache parsing is used
-- `reportName`: final report artifact name; mode `3` usually ends in `.symbols.xml`
-- `reportUrl`: fetch raw MT5 report artifact
-- `logUrl`: fetch terminal log for the job
+- `optimization_type`: submitted MT5 mode
+- `optimization_results`: parsed top `N` rows exposed by the API
+- `optimization_cache`: metadata for the matched `.opt` file when cache parsing is used
+- `report_name`: final report artifact name; mode `3` usually ends in `.symbols.xml`
+- `report_url`: fetch raw MT5 report artifact
+- `log_url`: fetch terminal log for the job
 
 ## Raw Artifacts and Debugging
 
 When MT5 produces confusing garbage, start here:
 
 - For modes `1` and `2`, start with `/report` because the XML spreadsheet is the main source of optimization rows.
-- For mode `3`, start with `optimizationCache` and `optimizationResults`; `/report` exists, but it is the `.symbols.xml` header export rather than the real pass table.
+- For mode `3`, start with `optimization_cache` and `optimization_results`; `/report` exists, but it is the `.symbols.xml` header export rather than the real pass table.
 - If mode `3` symbols look wrong or missing, inspect the agent logs under `Tester/Agent-*/logs/` because pass numbers are recovered from those logs.
-- If `optimizationResults` is empty for mode `1` or `2`, inspect the raw XML report and terminal log first.
+- If `optimization_results` is empty for mode `1` or `2`, inspect the raw XML report and terminal log first.
 
 ## End-to-End Example Script
 
@@ -355,12 +355,12 @@ curl -sS -X POST "$URL/backtest/build-ini" \
     "symbol":"GBPCAD",
     "timeframe":"M15",
     "expert":"EA Studio GBPCAD M15 1615044595.ex5",
-    "lastYears":1,
+    "last_years":1,
     "modelling":"open-prices",
-    "expertParameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set",
+    "expert_parameters":"ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set",
     "optimization":2,
-    "optimizationCriterion":0,
-    "reportName":"gbpcad-m15-opt"
+    "optimization_criterion":0,
+    "report_name":"gbpcad-m15-opt"
   }' > "$tmp_ini"
 
 curl -sS -X POST "$URL/backtest" \
@@ -368,9 +368,9 @@ curl -sS -X POST "$URL/backtest" \
   -F "ini=@$tmp_ini;filename=tester.ini" \
   -F "expert_name=EA Studio GBPCAD M15 1615044595.ex5" \
   -F "set_name=ea studio gbpcad m15 1615044595.take-profit-opt-80-92-step4.set" \
-  -F "topPasses=20" > "$job_json"
+  -F "top_passes=20" > "$job_json"
 
-JOB=$(jq -r '.jobId' "$job_json")
+JOB=$(jq -r '.job_id' "$job_json")
 echo "Submitted job: $JOB"
 
 while :; do
@@ -381,5 +381,5 @@ while :; do
   sleep 10
 done
 
-printf '%s\n' "$STATUS_JSON" | jq '{jobId,status,reportName,optimizationType,optimizationCache,optimizationResults}'
+printf '%s\n' "$STATUS_JSON" | jq '{job_id,status,report_name,optimization_type,optimization_cache,optimization_results}'
 ```

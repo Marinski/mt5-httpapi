@@ -156,7 +156,9 @@ def _cross_process_lock_path():
             os.makedirs(COMPILE_LOCAL_CACHE, exist_ok=True)
             return os.path.join(COMPILE_LOCAL_CACHE, _CROSS_PROCESS_LOCK_BASENAME)
         except OSError as exc:
-            log.warning("compile: local cache %s unusable for the lock (%s)", COMPILE_LOCAL_CACHE, exc)
+            log.warning(
+                "compile: local cache %s unusable for the lock (%s)", COMPILE_LOCAL_CACHE, exc
+            )
     return os.path.join(os.path.dirname(COMPILE_METAEDITOR), _CROSS_PROCESS_LOCK_BASENAME)
 
 
@@ -253,6 +255,13 @@ _INCLUDE_DIGEST_PATTERNS = tuple(
 #: used the old copy still returned ok:true - a silently stale binary, which is
 #: the worst failure shape this endpoint has. Bound that window instead.
 INCLUDE_REFRESH_SECONDS = 60
+
+#: Touched in the shared cache when the file API changes the compile tree, so
+#: the next compile in ANY API process re-validates the mirror instead of
+#: waiting out INCLUDE_REFRESH_SECONDS. Every terminal's API process compiles
+#: from the same mirror, but each keeps its own refresh timer.
+_INCLUDES_CHANGED_MARKER = ".includes-changed"
+_INCLUDES_CHECKED_WALL = 0.0
 
 #: What MetaEditor actually needs to compile. Deliberately NOT the whole
 #: terminal directory - that also holds terminal64.exe, metatester64.exe and
@@ -469,6 +478,37 @@ def _include_file_digests(include_root):
     return digests
 
 
+def _includes_changed_since(wall_time):
+    """Whether the file API changed the compile tree after `wall_time`."""
+    marker = os.path.join(COMPILE_LOCAL_CACHE, _INCLUDES_CHANGED_MARKER)
+    try:
+        return os.path.getmtime(marker) > wall_time
+    except OSError:
+        return False
+
+
+def mark_includes_changed():
+    """Make the next compile re-validate the mirrored include tree.
+
+    Called by the file API after it writes into or deletes from the compile
+    tree. A no-op without COMPILE_LOCAL_CACHE, where MetaEditor reads the tree
+    directly.
+    """
+    if not COMPILE_LOCAL_CACHE:
+        return
+    marker = os.path.join(COMPILE_LOCAL_CACHE, _INCLUDES_CHANGED_MARKER)
+    try:
+        os.makedirs(COMPILE_LOCAL_CACHE, exist_ok=True)
+        with open(marker, "a", encoding="utf-8"):
+            pass
+        os.utime(marker)
+    except OSError as exc:
+        log.warning(
+            "compile: could not mark the include tree changed (%s); "
+            "the mirror catches up within %ds", exc, INCLUDE_REFRESH_SECONDS,
+        )
+
+
 def _refresh_mirrored_includes():
     """Re-validate the mirrored include tree against the source.
 
@@ -485,14 +525,16 @@ def _refresh_mirrored_includes():
     Caller must hold _COMPILE_LOCK and the cross-process lock: this writes
     into the mirror other processes compile from.
     """
-    global _INCLUDES_CHECKED_AT
+    global _INCLUDES_CHECKED_AT, _INCLUDES_CHECKED_WALL
 
     if not _LOCAL_TOOLCHAIN or not COMPILE_LOCAL_CACHE:
         return
-    if time.monotonic() - _INCLUDES_CHECKED_AT < INCLUDE_REFRESH_SECONDS:
+    recently_checked = time.monotonic() - _INCLUDES_CHECKED_AT < INCLUDE_REFRESH_SECONDS
+    if recently_checked and not _includes_changed_since(_INCLUDES_CHECKED_WALL):
         return
 
     _INCLUDES_CHECKED_AT = time.monotonic()
+    _INCLUDES_CHECKED_WALL = time.time()
     src = os.path.join(os.path.dirname(COMPILE_METAEDITOR), "MQL5")
     dst = os.path.join(COMPILE_LOCAL_CACHE, "MQL5")
     if not os.path.isdir(src):
@@ -523,6 +565,7 @@ def _local_toolchain():
     concurrently or under a running MetaEditor.
     """
     global _LOCAL_TOOLCHAIN, _LOCAL_TOOLCHAIN_RESOLVED, _INCLUDES_CHECKED_AT
+    global _INCLUDES_CHECKED_WALL
 
     if _LOCAL_TOOLCHAIN_RESOLVED:
         _refresh_mirrored_includes()
@@ -530,6 +573,7 @@ def _local_toolchain():
 
     _LOCAL_TOOLCHAIN_RESOLVED = True
     _INCLUDES_CHECKED_AT = time.monotonic()
+    _INCLUDES_CHECKED_WALL = time.time()
     if not COMPILE_LOCAL_CACHE:
         return None
 
@@ -746,7 +790,7 @@ _DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
 def _outside_path_reason(directive, path):
     """Why `path` could name a file outside the allowed trees, or None.
 
-    Measured on MetaEditor 5.00 build 5836 (tests/real_compile/): #include
+    Measured on MetaEditor 5.00 build 5836 (tests/live/test_compile_reach.py): #include
     reads an absolute path and a `..` walk out of the temp directory or the
     include tree, with either slash; #property icon reads a `..` walk;
     #resource refuses both itself. The rule here does not lean on which ones

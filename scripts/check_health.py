@@ -12,7 +12,7 @@ try:
     import yaml
 except ImportError:
     print('  ERROR: pyyaml not installed')
-    raise SystemExit(1)
+    raise SystemExit(1) from None
 
 # Reuse config_helper's per-VM filter rather than re-deriving it. It sits in
 # this same directory and guards its main() behind __name__, so importing it
@@ -39,7 +39,7 @@ try:
     terminals = cfg.get('terminals') or []
 except Exception as e:
     print(f'  ERROR reading config.yaml: {e}')
-    raise SystemExit(1)
+    raise SystemExit(1) from e
 
 now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 dead = []

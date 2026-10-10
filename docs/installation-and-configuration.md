@@ -49,6 +49,8 @@ api_token: "paste-the-output-of-openssl-rand-hex-32-here"
 
 # VM auto-reboot every N minutes (flushes DWM/VirtIO-GPU state). 0 = disable.
 reboot_interval: 30
+reboot_max_postpone: 360
+disable_terminal_mcp: false
 
 # Default Strategy Tester timeout. POST /backtest can override per job.
 backtest_timeout: "6h"
@@ -101,6 +103,8 @@ Per-field notes:
 
 - **`api_token`** — if set, every endpoint requires `Authorization: Bearer <token>`. Empty = open. Generate with `openssl rand -hex 32`.
 - **`reboot_interval`** — minutes between scheduled VM reboots. `0` disables.
+- **`reboot_max_postpone`**: the longest a scheduled reboot waits, in minutes (default `360`), while any API on the VM is running a backtest or a request that changes something. Reads never hold it. `0` reboots on schedule without waiting. See [operations](operations.md#scheduled-reboots).
+- **`disable_terminal_mcp`**: `true` turns off MetaTrader's own MCP servers (terminal build 6090+, the transport behind its built-in AI assistant; not this API's `/mcp`). Every such terminal tries to listen on `127.0.0.1:22346`, so with several terminals in a VM all but the first log `MCP bind error on 127.0.0.1:22346 (10048)` on every launch, and backtest terminals have aborted with exit code 10053 after the same subsystem failed to sign in to MQL5.community. With `true`, `Enable=0` goes into `[MCP.MetaTrader]` and `[MCP.MetaEditor]` of each terminal's `Config/assistant.ini` before every launch: at boot, on a restart the API makes, and before each backtest. MT5 rewrites the file on exit, which is why it happens every time. A terminal entry's own `disable_terminal_mcp: false` keeps that terminal's servers on. Default `false` leaves the terminals as MetaQuotes ships them.
 - **`backtest_timeout`** — default Strategy Tester timeout for `POST /backtest`. Accepts the same duration grammar as `utc_offset`: `"6h"`, `"30m"`, `"3h30m"`, `"90m"`, or a bare number interpreted as hours. Per-request form field `timeout` overrides it.
 - **`wickworks.url`** — technical-analysis sidecar URL as seen from inside the Windows VM. The default reaches the sidecar sharing the MT5 container's network namespace; override it only when changing that network topology. `WICKWORKS_URL` overrides the file at runtime.
 - **`wickworks.timeout`** — sidecar request timeout as a duration. Defaults to `"30s"`; `WICKWORKS_TIMEOUT` overrides the file at runtime.

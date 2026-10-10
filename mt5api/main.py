@@ -1,4 +1,5 @@
 import asyncio
+import json
 import signal
 import sys
 import threading
@@ -20,7 +21,7 @@ from mt5api.mt5client import (
     init_mt5,
     session,
 )
-from mt5api.server import app
+from mt5api.server import UNAUTHORIZED_BODY, app
 
 # Each handler that touches MT5 grabs a process-wide mutex for its full
 # duration (see @with_mt5 in mt5client.py), so only one MT5 worker runs at
@@ -94,13 +95,31 @@ def _mcp_auth_gate(mcp_wsgi_app):
                 "401 Unauthorized",
                 [("Content-Type", "application/json")],
             )
-            return [b'{"error": "unauthorized"}']
+            return [json.dumps(UNAUTHORIZED_BODY).encode("utf-8")]
         return mcp_wsgi_app(environ, start_response)
 
     return _gated
 
 
 _WSGI_APP = DispatcherMiddleware(app, {"/mcp": _mcp_auth_gate(_MCP_BRIDGE)})
+
+_webrequest_reapplied = threading.Event()
+
+
+def _reapply_webrequest_once():
+    """Re-apply this terminal's desired WebRequest allowlist via AutoIt after
+    the API starts. MT5 on the VM drops the list every restart, so the API
+    re-sets it once the terminal GUI is up. Guarded to run once per process;
+    mt5client.restart_terminal re-applies after its own restarts."""
+    if _webrequest_reapplied.is_set():
+        return
+    _webrequest_reapplied.set()
+    try:
+        from mt5api.chartctl import autoit_webrequest as autoit
+
+        autoit.reapply_in_background(autoit.gui_settle_seconds(), "api start")
+    except Exception:  # noqa: BLE001 - never block startup on an optional feature
+        log.exception("Boot WebRequest re-apply could not start")
 
 
 def _background_init():
@@ -122,6 +141,7 @@ def _background_init():
             connected = False
         if connected:
             log.info("MT5 connected on attempt %d.", attempt)
+            _reapply_webrequest_once()
             return
         log.warning("MT5 not ready, retrying in %ds...", RETRY_INTERVAL)
         time.sleep(RETRY_INTERVAL)
@@ -205,6 +225,7 @@ def main():
 
         if connected:
             log.info("MT5 connected.")
+            _reapply_webrequest_once()
         else:
             log.warning(
                 "MT5 not ready yet, retrying every %ds in background...",

@@ -143,12 +143,14 @@ def test_every_terminal_route_carries_a_resolver(
         assert re.search(r"proxy_pass\s+\$", block), "route lacks a variable upstream"
 
 
-def test_only_the_compile_route_waits_longer_than_nginx_default(
+def test_only_the_long_running_routes_wait_longer_than_nginx_default(
     single_terminal_config, tmp_path, monkeypatch
 ):
-    """POST /compile can wait its turn behind other compiles, so it needs more
-    than nginx's 60s read timeout. Every other route keeps the default: a
-    stuck order or history call should not hold its connection for minutes.
+    """POST /compile can wait its turn behind other compiles, and the
+    WebRequest, per-terminal MCP and file routes can run for minutes, so they
+    need more than nginx's 60s read timeout. Every other route keeps the
+    default: a stuck order or history call should not hold its connection
+    for minutes.
     """
     helper = _load_config_helper_module()
 
@@ -158,8 +160,14 @@ def test_only_the_compile_route_waits_longer_than_nginx_default(
         re.findall(r"        (location [^{]*?) \{(.*?)\n        \}", content, re.S)
     )
     compile_routes = {k: v for k, v in blocks.items() if k.endswith("compile")}
+    long_routes = {
+        f"location {prefix}{route}"
+        for prefix in ("/acme/main/default/", "/acme/main/")
+        for route in ("webrequest", "mcp", "files", "compile/files", "terminal/restart")
+    }
     other_routes = {
-        k: v for k, v in blocks.items() if k.startswith("location /acme/")
+        k: v for k, v in blocks.items()
+        if k.startswith("location /acme/") and k not in long_routes
     }
     assert set(compile_routes) == {
         "location = /acme/main/default/compile",
@@ -168,9 +176,14 @@ def test_only_the_compile_route_waits_longer_than_nginx_default(
     for block in compile_routes.values():
         assert f"proxy_read_timeout {helper.COMPILE_PROXY_TIMEOUT};" in block
         assert "rewrite ^/acme/main/" in block
+    assert long_routes <= set(blocks)
+    for name in long_routes:
+        assert f"proxy_read_timeout {helper.LONG_PROXY_TIMEOUT};" in blocks[name]
+        assert f"proxy_send_timeout {helper.LONG_PROXY_TIMEOUT};" in blocks[name]
+        assert "rewrite ^/acme/main/" in blocks[name]
     assert other_routes
     for name, block in other_routes.items():
-        assert "proxy_read_timeout" not in block, f"{name} got the compile timeout"
+        assert "proxy_read_timeout" not in block, f"{name} got a long timeout"
 
 
 def test_terminals_route_to_their_own_vm_container(tmp_path, monkeypatch):
@@ -237,6 +250,69 @@ def test_live_terminal_ini_declares_no_startup_expert(tmp_path, monkeypatch):
     assert "[StartUp]" not in content
     assert "Expert=" not in content
     assert content.count("[Experts]") == 1
+
+
+@pytest.mark.parametrize("chartctl", [{"enabled": True}, True])
+def test_startup_expert_is_written_only_when_chartctl_is_opted_in(
+    tmp_path, monkeypatch, chartctl
+):
+    """The other half of the guard above.
+
+    That test pins the default; this one pins that the feature still works when
+    asked for, so "no [StartUp]" cannot be satisfied by quietly breaking the
+    loader bootstrap. Chart Deployments is opt-IN: an upgrade must not start
+    attaching an EA to every live terminal in a fleet that never enabled it.
+    A bare `chartctl: true` is the same opt-in and used to crash the helper.
+    """
+    helper = _load_config_helper_module()
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump({
+            "api_token": "test-token",
+            "chartctl": chartctl,
+            "terminals": [{"broker": "acme", "account": "main", "port": 5001}],
+        }),
+        encoding="utf-8",
+    )
+    outpath = tmp_path / "terminal.ini"
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(path))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["config_helper.py", "write_ini", "acme", "main", str(outpath), "default", "live"],
+    )
+
+    helper.main()
+
+    content = outpath.read_text(encoding="utf-8")
+    assert "[StartUp]" in content
+    assert "Expert=Advisors\\MT5ChartLoader" in content
+
+
+def test_a_terminal_can_opt_out_even_when_chartctl_is_on(tmp_path, monkeypatch):
+    """Per-terminal `chartctl: false` has to beat the global enable, or there is
+    no way to keep one terminal clear of the loader."""
+    helper = _load_config_helper_module()
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump({
+            "api_token": "test-token",
+            "chartctl": {"enabled": True},
+            "terminals": [
+                {"broker": "acme", "account": "main", "port": 5001, "chartctl": False}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    outpath = tmp_path / "terminal.ini"
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(path))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["config_helper.py", "write_ini", "acme", "main", str(outpath), "default", "live"],
+    )
+
+    helper.main()
+
+    assert "[StartUp]" not in outpath.read_text(encoding="utf-8")
 
 
 def test_clean_start_uses_single_vm_compose_without_explicit_topology(tmp_path):

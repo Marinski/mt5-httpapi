@@ -9,9 +9,11 @@ from functools import wraps
 import MetaTrader5 as mt5
 import psutil
 from flask import has_request_context, g, jsonify, request
+from mt5api import terminal_mcp
 from mt5api.config import (
     ACCOUNT,
     BROKER,
+    DISABLE_TERMINAL_MCP,
     FILLING_MAP,
     INI_FILE,
     INSTANCE,
@@ -109,6 +111,15 @@ class MT5Wedged(MT5Timeout):
 
 class QueueFull(Exception):
     """Too many requests queued on the MT5 lock — fast-fail to client."""
+
+
+class MT5LockTimeout(QueueFull):
+    """The MT5 lock stayed held for longer than SESSION_ACQUIRE_TIMEOUT.
+
+    Subclasses QueueFull so request handlers keep answering 503. The health
+    monitor catches it first, because a lock nobody releases means the
+    terminal is not answering.
+    """
 
 
 # Single mutex serializing every mt5.* call across handlers, monitor, and
@@ -308,16 +319,21 @@ def m(fn, *args, _timeout=MT5_CALL_TIMEOUT, _allow_wedged=False, **kwargs):
 
 
 @contextmanager
-def session():
+def session(bypass_queue_cap=False):
     """Acquire the MT5 lock for the duration of the block.
 
     Bumps queue depth on entry; fast-fails with QueueFull if too many
-    requests are already piled up. Releases lock + decrements depth on
-    exit, regardless of how the block exits.
+    requests are already piled up, and with MT5LockTimeout if the lock is
+    not free within SESSION_ACQUIRE_TIMEOUT. Releases lock + decrements
+    depth on exit, regardless of how the block exits.
+
+    `bypass_queue_cap` skips the queue-depth check but still waits for the
+    lock. The health monitor uses it so client backpressure cannot stop it
+    from checking the terminal.
     """
     depth = _bump_depth()
     try:
-        if depth > MAX_QUEUE_DEPTH:
+        if depth > MAX_QUEUE_DEPTH and not bypass_queue_cap:
             log.warning(
                 "%s queue depth %d exceeds max %d — rejecting",
                 _req_id(), depth, MAX_QUEUE_DEPTH,
@@ -329,7 +345,7 @@ def session():
                 "%s session lock acquire timeout after %ds",
                 _req_id(), SESSION_ACQUIRE_TIMEOUT,
             )
-            raise QueueFull("could not acquire MT5 lock")
+            raise MT5LockTimeout("could not acquire MT5 lock")
         try:
             yield
         finally:
@@ -406,6 +422,11 @@ def init_mt5(login=None, password=None, server=None, allow_wedged=False):
     return result
 
 
+# Last successful terminal_info snapshot, cached lock-free for cosmetic
+# readers (e.g. chartctl template build stamp). Never authoritative.
+LAST_TERMINAL_INFO = None
+
+
 def ensure_initialized():
     """Probe + reconnect helper. Caller must hold the MT5 lock.
 
@@ -417,6 +438,7 @@ def ensure_initialized():
     MT5Wedged propagates instead of becoming False, so @with_mt5 answers 503
     with Retry-After rather than the callers' generic "not initialized" 503.
     """
+    global LAST_TERMINAL_INFO
     if MODE == "backtest":
         log.warning("MT5 SDK request refused on a mode:backtest terminal reason=backtest_mode")
         return False
@@ -426,6 +448,8 @@ def ensure_initialized():
         raise
     except MT5Timeout:
         info = None
+    if info is not None:
+        LAST_TERMINAL_INFO = info
     if info is None:
         log.warning("Terminal not responding, attempting full init...")
         account = get_first_account()
@@ -552,6 +576,21 @@ def restart_terminal():
     if not killed:
         log.warning("No terminal process found, launching fresh.")
 
+    # Apply the WebRequest allowlist while the terminal is down. MT5 rewrites
+    # common.ini on exit, so this must happen after the kill and before launch.
+    # No-op unless this terminal has a desired allowlist set.
+    try:
+        from mt5api.chartctl import webrequest as _wr
+
+        applied = _wr.apply_from_desired(TERMINAL_DIR)
+        if applied is not None:
+            log.info("Applied WebRequest allowlist (%d URL(s)) to common.ini", applied)
+    except Exception:
+        log.exception("Failed to apply WebRequest allowlist; continuing restart")
+
+    # MT5 rewrites assistant.ini on exit too, so the same window applies.
+    terminal_mcp.apply(DISABLE_TERMINAL_MCP, TERMINAL_DIR, "restart")
+
     today = date.today().strftime("%Y%m%d")
     journal_log = os.path.join(TERMINAL_DIR, "logs", f"{today}.log")
     offset = 0
@@ -588,9 +627,24 @@ def restart_terminal():
     # terminal again on each cycle.
     abandoned = _forget_sdk_workers()
     if abandoned:
-        log.warning("Dropped %d SDK call(s) stuck on the killed terminal from the wedge guard.", abandoned)
+        log.warning(
+            "Dropped %d SDK call(s) stuck on the killed terminal from the wedge guard.",
+            abandoned,
+        )
     log.info("Terminal restarted successfully.")
+    _reapply_webrequest_after_restart()
     return True
+
+
+def _reapply_webrequest_after_restart():
+    """The terminal in the VM forgets its WebRequest allowlist on every
+    restart, and the API's own start-up re-apply has long since run."""
+    try:
+        from mt5api.chartctl import autoit_webrequest as autoit
+
+        autoit.reapply_in_background(autoit.gui_settle_seconds(), "terminal restart")
+    except Exception:  # noqa: BLE001 - the restart itself succeeded; never fail it here
+        log.exception("WebRequest re-apply after restart could not start")
 
 
 def to_dict(named_tuple):

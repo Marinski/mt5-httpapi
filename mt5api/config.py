@@ -6,6 +6,8 @@ import re
 
 import MetaTrader5 as mt5
 
+from mt5api import terminal_mcp
+
 HOST = "0.0.0.0"
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -133,9 +135,11 @@ def normalize_instance(value):
 def match_terminal_config(terms, broker=None, account=None, instance=None):
     wanted_instance = normalize_instance(instance) if instance is not None else None
     for terminal in terms:
-        if broker is not None and terminal.get("broker") != broker:
+        # str() on both sides: an unquoted MT5 login in config.yaml is an int,
+        # while start.bat passes it on the command line as a string.
+        if broker is not None and str(terminal.get("broker")) != str(broker):
             continue
-        if account is not None and terminal.get("account", "") != account:
+        if account is not None and str(terminal.get("account", "")) != str(account):
             continue
         terminal_instance = normalize_instance(terminal.get("instance"))
         if wanted_instance is not None and terminal_instance != wanted_instance:
@@ -148,8 +152,57 @@ def match_terminal_config(terms, broker=None, account=None, instance=None):
             "utc_offset": terminal.get("utc_offset", "0"),
             "mode": (terminal.get("mode") or "live"),
             "symbol_suffix": terminal.get("symbol_suffix"),
+            "chartctl": terminal.get("chartctl"),
+            "files": terminal.get("files"),
         }
     return None
+
+
+MODE_LIVE = "live"
+MODE_BACKTEST = "backtest"
+
+
+def normalize_mode(raw) -> str:
+    """The process mode: backtest, or live for anything else, including a
+    missing value."""
+    mode = str(raw or "").strip().lower()
+    return mode if mode == MODE_BACKTEST else MODE_LIVE
+
+
+def feature_block(raw) -> dict:
+    """An opt-in feature block from config.yaml as a mapping.
+
+    ``chartctl: true`` and ``files: true`` are accepted as shorthand for
+    ``{enabled: true}``. Anything that is neither a bool nor a mapping counts
+    as disabled: this module is imported by the whole API, so a malformed
+    optional block must not stop trading.
+    """
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def chartctl_enabled(mode: str, chartctl_block, terminal_override) -> bool:
+    """Whether a terminal serves Chart Deployments: a live-mode process, the
+    global ``chartctl.enabled`` flag, and no per-terminal ``chartctl: false``.
+    mcpunifier/config.py applies the same rule to the same config.yaml."""
+    return (
+        mode == MODE_LIVE
+        and bool(feature_block(chartctl_block).get("enabled", False))
+        and terminal_override is not False
+    )
+
+
+def files_enabled(files_block, terminal_override) -> bool:
+    """Whether a terminal serves the file API (/files, /compile/files): the
+    global ``files.enabled`` flag and no per-terminal ``files: false``. Any
+    process mode. mcpunifier/config.py applies the same rule."""
+    return (
+        bool(feature_block(files_block).get("enabled", False))
+        and terminal_override is not False
+    )
 
 
 def terminal_dir_candidates(brokers_dir, broker, account="", instance=DEFAULT_INSTANCE):
@@ -291,15 +344,20 @@ COMPILE_INCLUDE_DIGESTS = _compile_setting(
     "COMPILE_INCLUDE_DIGESTS", "compile_include_digests"
 )
 
-UTC_OFFSET_RAW = _args.utc_offset if _args.utc_offset is not None else os.environ.get("UTC_OFFSET", "")
+UTC_OFFSET_RAW = (
+    _args.utc_offset if _args.utc_offset is not None else os.environ.get("UTC_OFFSET", "")
+)
 UTC_OFFSET_SECONDS = parse_duration_to_seconds(UTC_OFFSET_RAW)
 UTC_OFFSET_HOURS = UTC_OFFSET_SECONDS / 3600.0
 _BACKTEST_TIMEOUT_ENV = os.environ.get("BACKTEST_TIMEOUT")
 _BACKTEST_TIMEOUT_CONFIG = load_yaml_config().get("backtest_timeout")
-BACKTEST_TIMEOUT_RAW = (
-    _BACKTEST_TIMEOUT_ENV
-    if _BACKTEST_TIMEOUT_ENV not in (None, "")
-    else (_BACKTEST_TIMEOUT_CONFIG if _BACKTEST_TIMEOUT_CONFIG not in (None, "") else DEFAULT_BACKTEST_TIMEOUT)
+BACKTEST_TIMEOUT_RAW = next(
+    (
+        value
+        for value in (_BACKTEST_TIMEOUT_ENV, _BACKTEST_TIMEOUT_CONFIG)
+        if value not in (None, "")
+    ),
+    DEFAULT_BACKTEST_TIMEOUT,
 )
 BACKTEST_TIMEOUT = BACKTEST_TIMEOUT_RAW
 BACKTEST_TIMEOUT_SECONDS = parse_duration_to_seconds(BACKTEST_TIMEOUT)
@@ -328,9 +386,7 @@ BACKTEST_JOB_RETENTION_SECONDS = parse_duration_to_seconds(
     _JOB_RETENTION_ENV if _JOB_RETENTION_ENV not in (None, "") else "30d"
 )
 _MODE_RAW = (_args.mode or _terminal_config.get("mode") or os.environ.get("MT5_MODE") or "live")
-MODE = str(_MODE_RAW).strip().lower() or "live"
-if MODE not in ("live", "backtest"):
-    MODE = "live"
+MODE = normalize_mode(_MODE_RAW)
 def _setting_warning(msg, *args):
     # mt5api.logger imports this module, so it cannot be used here yet.
     # Nothing has configured logging this early, so logging's last-resort
@@ -520,33 +576,82 @@ for _c in _candidates:
 TERMINAL_DIR = os.path.dirname(TERMINAL_PATH)
 INI_FILE = os.path.join(TERMINAL_DIR, "mt5start.ini")
 
+# Chart Deployments (chartctl) — live-mode only feature. Global default from
+# config.yaml `chartctl:` block; per-terminal `chartctl: false` in terminals[]
+# overrides it. Backtest-mode terminals never enable it: there is no running
+# terminal64.exe to manage charts on.
+_chartctl_cfg = feature_block(load_yaml_config().get("chartctl"))
+# Opt-IN. Defaulting this on would auto-attach the loader EA to every live
+# terminal of any install that upgraded without asking for it - a fleet-wide
+# behaviour change nobody opted into. Absent chartctl block = unchanged API.
+CHARTCTL_ENABLED = chartctl_enabled(
+    MODE,
+    _chartctl_cfg,
+    _terminal_config.get("chartctl"),
+)
+def _chartctl_seconds(raw, default_text: str, floor: int) -> int:
+    """A duration from the chartctl block, never below `floor`.
 
-def terminal_mcp_disabled(mode, mcp_cfg, terminal_cfg):
-    """Whether a backtest launch should disable the terminal's built-in MCP server.
+    `or <default>` already covers absent and zero, but NOT negative:
+    parse_duration_to_seconds accepts "-5s" on purpose, because west-of-UTC
+    broker offsets need the sign. Without the floor a negative is taken
+    literally - a stale window that calls every observation stale, or a hint
+    interval that is permanently due. Both present as a broken loader rather
+    than as a bad setting.
 
-    MetaTrader 5 build 6090+ starts its own MCP server (the transport behind the
-    built-in AI assistant), configured in ``<terminal>/Config/assistant.ini`` and
-    defaulting to 127.0.0.1:22346. Every terminal in a VM shares loopback, so only
-    one can hold the port and the rest log ``MCP bind error ... [10048]`` on every
-    launch; the same subsystem authenticates against MQL5.community, which a
-    backtest terminal has no account for.
-
-    Opt-IN: an absent or False ``mcp.disable_terminal_server`` leaves the terminal
-    exactly as MetaQuotes ships it, and a terminal's own ``mcp: false`` opts it out
-    of an install-wide setting. Pure so the precedence is testable without
-    reloading the module.
+    Clamped rather than refused, deliberately. This module is imported by the
+    whole API, so raising on an optional feature's tuning value would stop
+    trading and backtesting too. vm-watchdog makes the opposite call for the
+    opposite reason: it holds the Docker socket, so it refuses to start rather
+    than run on values nobody chose.
     """
-    if mode != "backtest":
-        return False
-    global_on = bool(isinstance(mcp_cfg, dict) and mcp_cfg.get("disable_terminal_server", False))
-    override = terminal_cfg.get("mcp") if isinstance(terminal_cfg, dict) else None
-    return global_on and override is not False
+    parsed = parse_duration_to_seconds(str(raw or default_text))
+    return max(floor, parsed or parse_duration_to_seconds(default_text))
 
 
-# Opt-IN: defaulting this on would change every backtest terminal of an install
-# that upgraded without asking for it.
-DISABLE_TERMINAL_MCP = terminal_mcp_disabled(
-    MODE, load_yaml_config().get("mcp"), _terminal_config
+def _chartctl_bytes(raw, default: int, floor: int) -> int:
+    """A byte cap from the chartctl block, never below `floor`.
+
+    A negative cap makes read(cap + 1) return nothing and every upload fail the
+    length check, reporting a limit of -1 bytes.
+    """
+    return max(floor, int(raw or default))
+
+
+CHARTCTL_RECONCILE_HINT_SECONDS = _chartctl_seconds(
+    _chartctl_cfg.get("reconcile_hint_interval"), "5s", 1
+)
+CHARTCTL_OBSERVED_STALE_SECONDS = _chartctl_seconds(
+    _chartctl_cfg.get("observed_stale_after"), "60s", 1
+)
+CHARTCTL_COMMAND_TIMEOUT_SECONDS = _chartctl_seconds(
+    _chartctl_cfg.get("command_timeout"), "30s", 1
+)
+# Floor of 1 KiB: a cap below that rejects every real .ex5 and .set.
+CHARTCTL_MAX_UPLOAD_BYTES = _chartctl_bytes(
+    _chartctl_cfg.get("max_upload_bytes"), 16 * 1024 * 1024, 1024
+)
+# File API: read, write and delete files under this terminal's install
+# directory (/files) and the compile tree (/compile/files). Opt-in, like
+# chartctl: it reaches everything an expert can, including DLLs in
+# MQL5/Libraries. See docs/files.md.
+_files_cfg = feature_block(load_yaml_config().get("files"))
+FILES_ENABLED = files_enabled(_files_cfg, _terminal_config.get("files"))
+# Caps on one PUT ?extract: total unpacked bytes and number of files. Floors
+# keep a typo from refusing every archive.
+FILES_MAX_EXTRACT_BYTES = _chartctl_bytes(
+    _files_cfg.get("max_extract_bytes"), 200 * 1024 * 1024, 1024 * 1024
+)
+FILES_MAX_EXTRACT_FILES = _chartctl_bytes(
+    _files_cfg.get("max_extract_files"), 10000, 1
+)
+
+# Turn off MT5's own MCP servers before this terminal launches (see
+# mt5api/terminal_mcp.py). Opt-in: an install that never sets it keeps the
+# terminals exactly as MetaQuotes ships them.
+DISABLE_TERMINAL_MCP = terminal_mcp.wanted(
+    load_yaml_config().get(terminal_mcp.CONFIG_KEY),
+    _terminal_config,
 )
 
 IDENTITY = make_identity(BROKER, ACCOUNT, INSTANCE)

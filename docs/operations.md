@@ -26,6 +26,7 @@ make test        Run the complete automated test suite
 make test-unit   Run unit and contract tests in a throwaway Docker image
 make test-integration  Container-backed suites: nginx routing + MCP unifier
 make test-go     Compile and race-test the public Go client
+make test-live   Test a running stack end to end (see below)
 make clean       Nuke VM disk and state (keeps ISO)
 make distclean   Nuke everything including ISO
 ```
@@ -33,6 +34,25 @@ make distclean   Nuke everything including ISO
 `make test` is the complete automated gate: it runs `make test-unit`,
 `make test-integration`, and `make test-go`. Use a scoped target directly while
 iterating.
+
+### Testing a running stack
+
+`make test-live` points the suite in `tests/live/` at a deployed stack and one of its terminals, so you can check what is actually running after an update. Set the target in the environment or in `tests/live/.env` (copy `tests/live/.env.example`; the file is gitignored and never baked into an image):
+
+```bash
+MT5_LIVE_URL=http://127.0.0.1:8888 MT5_LIVE_TOKEN=... \
+MT5_LIVE_BROKER=yourbroker MT5_LIVE_ACCOUNT=demo make test-live
+```
+
+It checks the REST API, market data, history, both MCP endpoints, and the route catalog against the routes the terminal really serves, and runs the `/compile` sandbox cases against the real MetaEditor. It places, modifies and closes real orders on `MT5_LIVE_SYMBOL` (`test_market_order`, `test_limit_order`, `test_position_management`, `test_history`), at `MT5_LIVE_VOLUME` or the symbol's minimum, each tagged with `MT5_LIVE_MAGIC` so it only ever closes its own. On a terminal with [Chart Deployments](chart-deployments.md) enabled it also compiles a probe expert that never trades, stages it over MCP, deploys it, reads its chart from screenshots, switches its set file, and deletes it again. The order and deployment tests change state, so they run only on a demo account unless `MT5_LIVE_ALLOW_REAL=1`, and everything they create is removed before and after the run. `MT5_LIVE_WEBREQUEST=1` adds a round trip through the WebRequest allowlist that drives the terminal's GUI. `MT5_LIVE_RESTART=1` restarts the target terminal through `POST /terminal/restart` and checks that the deployment comes back on exactly one chart, that the API re-applies the WebRequest allowlist (the probe calls `WebRequest()` on `MT5_LIVE_WEBREQUEST_URL`, `https://example.com/` by default, so the VM needs to reach it), and that a file the expert holds open answers `FILE_LOCKED`. It needs the file API on the target too.
+
+To run part of it, name the modules in `LIVE_TESTS`. This skips the order tests:
+
+```bash
+make test-live LIVE_TESTS="tests/live/test_rest.py tests/live/test_mcp.py tests/live/test_chartctl.py"
+```
+
+`LIVE_ARGS` passes extra pytest arguments, for example `LIVE_ARGS="-k chartctl"`.
 
 `make test-unit` is the offline suite — it runs inside a throwaway image with
 the MT5 SDK stubbed, so it needs nothing but docker and finishes in seconds.
@@ -183,6 +203,8 @@ scripts/                     Scripts that run inside the Windows VM
   start.bat                  Boot entrypoint (install + start terminals + APIs)
   reboot.bat                 The only reboot path — writes rebooting.flag and
                              releases both lock dirs before shutting down
+  reboot_guard.py            Holds a scheduled reboot while an API runs a
+                             backtest or a write request (GET /busy)
   acquire_lock.ps1           Boot-stamped lock acquire for start.bat and
                              install.bat; auto-clears reboot-orphaned locks
   debloat.bat                Windows debloat script
@@ -221,6 +243,7 @@ Knock-on effects you'll observe:
 - While that thread is alive, every later SDK call on that terminal fails at once with **`503 mt5 call is wedged`** and `Retry-After: 30`, instead of piling a second call onto the stuck connection and waiting out its own 30s. Calls work again as soon as the stuck thread returns.
 - If it never returns, the live health monitor restarts the terminal. The restart kills the terminal without calling `mt5.shutdown`, reconnects, and once the reconnect succeeds it stops tracking the stuck thread, so calls go through again.
 - When too many requests pile up on the lock, new ones get **`503 queue depth N exceeds max M`** instead of waiting. Default cap is 20; tune with `MT5_MAX_QUEUE_DEPTH=...` in the environment.
+- The health monitor is not subject to that cap, so client backpressure can't stop its check. It still waits for the lock like everyone else. If the lock stays held past 60s, that check counts as a dead terminal (logged as `!!! MT5 LOCK HELD FOR OVER 60s !!!`). After five in a row it kills the terminal without making an SDK call, which releases whatever was stuck holding the lock, and the next check restarts the terminal.
 - Every SDK call logs its timing (`<req_id> mt5.<fn> dur_ms=...`). A timeout or a refused call logs one error line with `TIMEOUT` or `WEDGED (<stuck call> stuck <N>s)`, plus the process mode, request path, and how many SDK threads are still alive.
 
 If you see persistent 503/504 from a single terminal, check `data/shared/logs/api-<broker>-<account>.log` for `TIMEOUT` and `WEDGED` lines. The first `TIMEOUT` names the call that got stuck; `WEDGED` lines are later requests refused because of it.
@@ -417,9 +440,26 @@ grace. When you catch a single wedged terminal before the watchdog does,
 `POST /terminal/restart` on that terminal (see `docs/rest-api.md`) is the
 cheaper first response.
 
-This complements the in-VM `MT5AutoReboot` scheduled task, which reboots on a
-fixed timer and can interrupt long-running backtests; operators who disable that
+This complements the in-VM `MT5AutoReboot` scheduled task (see [Scheduled reboots](#scheduled-reboots)); operators who disable that
 task still get crash recovery from the watchdog.
+
+### Scheduled reboots
+
+The `MT5AutoReboot` task in the VM runs `scripts/reboot.bat scheduled` every `reboot_interval` minutes. Before rebooting, `scripts/reboot_guard.py` asks every API on the VM through `GET /busy` whether it is doing something a reboot would break:
+
+- a backtest of that terminal is queued or running;
+- a request that changes something is in flight: placing, modifying or closing an order or position (a new stop loss included), a deployment change, a file write, a compile, a terminal restart.
+
+Reads (`GET`, `HEAD`, `OPTIONS`) never hold a reboot. While any API is busy the reboot waits and the guard checks again every 30 seconds. Each wait goes to `full.log` with the terminal and the reason, again whenever the reasons change and every 5 minutes while they do not:
+
+```
+[2026-10-09 22:10:01] [reboot-guard] reboot postponed (reason=busy, waited 0 min): teletrade/demo/default: backtest 3f2a... running
+[2026-10-09 22:41:31] [reboot-guard] all 8 API(s) idle, rebooting (reason=idle)
+```
+
+When every API is idle the guard creates `reboot.draining` in the shared folder and checks once more. While that flag is fresh (under 2 minutes old) the APIs answer any new write with 503 `REBOOT_PENDING` and `Retry-After: 120`, so nothing starts in the seconds before the reboot. `start.bat` deletes the flag on the next boot.
+
+`reboot_max_postpone` (minutes, default 360) caps the wait, so a job that never ends cannot keep a wedged VM from its reboot. The guard then reboots anyway and logs `reason=max_postpone` with what was still busy. `0` turns the guard off. An API that does not answer counts as idle, and a guard that fails logs `reason=guard_error` and lets the reboot go ahead: the guard decides when, never whether. Reboots made during boot (`pip-changed`, `install-requested`) happen before any API is up and skip the guard.
 
 ### The probe budget: why the ports are probed concurrently
 

@@ -18,7 +18,10 @@ except ImportError:
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
-        print("ERROR: pip install pyyaml failed — run 'pip install pyyaml' manually", file=sys.stderr)
+        print(
+            "ERROR: pip install pyyaml failed; run 'pip install pyyaml' manually",
+            file=sys.stderr,
+        )
         sys.exit(1)
     import yaml
 
@@ -54,7 +57,7 @@ def _render_compose_template(template_source, vms):
             )
         except subprocess.CalledProcessError:
             print(
-                "ERROR: pip install jinja2 failed — run 'pip install jinja2' manually",
+                "ERROR: pip install jinja2 failed; run 'pip install jinja2' manually",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -100,6 +103,32 @@ def _normalize_instance(value):
 #: 60s COMPILE_TIMEOUT ceiling is 60 + 30s waiting plus 60s compiling.
 COMPILE_PROXY_TIMEOUT = "180s"
 
+#: nginx read/send timeout for the routes that legitimately run for minutes:
+#: PUT /webrequest and /webrequest/apply wait up to 180s for the host's GUI
+#: lock plus the AutoIt run (or a bare-metal terminal restart), POST
+#: /terminal/restart waits for the relaunched terminal's journal, a terminal's
+#: own /mcp proxies those same calls, and a /files upload or ?extract writes
+#: across the VM's shared folder. Matches the unified /mcp/ route.
+LONG_PROXY_TIMEOUT = "300s"
+
+#: Per-terminal path suffixes that get LONG_PROXY_TIMEOUT. Prefix locations, so
+#: /webrequest also covers /webrequest/apply and /files every file path. No
+#: trailing slash: nginx answers a bare /files with a 301 to /files/ when the
+#: location ends in one, and the API serves the root listing at /files.
+LONG_RUNNING_ROUTES = ("webrequest", "mcp", "files", "compile/files", "terminal/restart")
+
+
+def _feature_block(raw):
+    """An opt-in feature block as a mapping. `chartctl: true` is shorthand for
+    `{enabled: true}`; anything else that is not a mapping counts as off.
+    Same rule as mt5api.config.feature_block, which this script cannot import
+    when it runs on the host."""
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
 
 def _terminal_location(match, prefix, container, port, read_timeout=None):
     """One nginx location block proxying `prefix` to a terminal's API."""
@@ -117,7 +146,7 @@ def _terminal_location(match, prefix, container, port, read_timeout=None):
         f"            proxy_set_header Host $host;\n"
         f"            proxy_set_header X-Forwarded-For $remote_addr;\n"
         + timeouts +
-        f"        }}"
+        "        }"
     )
 
 
@@ -244,9 +273,14 @@ def main():
 
     elif cmd == "write_ini":
         if len(sys.argv) < 5:
-            print("Usage: config_helper.py write_ini <broker> <account> <outpath>", file=sys.stderr)
+            print(
+                "Usage: config_helper.py write_ini <broker> <account> <outpath> [instance] [mode]",
+                file=sys.stderr,
+            )
             sys.exit(1)
         broker, account, outpath = sys.argv[2], sys.argv[3], sys.argv[4]
+        instance = sys.argv[5] if len(sys.argv) > 5 else "default"
+        mode = (sys.argv[6] if len(sys.argv) > 6 else "live").lower()
         accounts = cfg.get("accounts", {})
         b = accounts.get(broker, {})
         creds = b.get(account) if account else next(iter(b.values()), None) if b else None
@@ -258,8 +292,65 @@ def main():
         ini += "KeepPrivate=0\nAutoTrading=1\nNewsEnable=0\n"
         ini += "[Experts]\nAllowLiveTrading=1\nAllowDllImport=1\nEnabled=1\n"
         ini += "[Email]\nEnable=0\n"
+
+        # Chart Deployments loader bootstrap: auto-attach MT5ChartLoader at
+        # terminal launch via [StartUp]. Gated exactly like the API's
+        # CHARTCTL_ENABLED: live mode + global chartctl.enabled (opt-in,
+        # default FALSE) + no per-terminal `chartctl: false` override. The loader's
+        # GlobalVariable mutex makes the re-fire on every launch idempotent
+        # (a duplicate closes its own chart and exits).
+        chartctl_cfg = _feature_block(cfg.get("chartctl"))
+        # Opt-IN: see mt5api/config.py. A [StartUp] expert on every live terminal
+        # must never arrive by upgrade.
+        chartctl_on = bool(chartctl_cfg.get("enabled", False))
+        term_entry = None
+        term_override = None
+        term_suffix = ""
+        for t in cfg.get("terminals", []):
+            if (t.get("broker") == broker and str(t.get("account")) == str(account)
+                    and (t.get("instance") or "default") == instance):
+                term_entry = t
+                term_override = t.get("chartctl")
+                term_suffix = t.get("symbol_suffix") or ""
+                break
+        if mode == "live" and chartctl_on and term_override is not False:
+            ini += "[StartUp]\n"
+            ini += "Expert=Advisors\\MT5ChartLoader\n"
+            ini += f"Symbol=EURUSD{term_suffix}\n"
+            ini += "Period=H1\n"
+
         with open(outpath, "w", encoding="utf-8") as f:
             f.write(ini)
+
+        # WebRequest allowlist boot-seed: start.bat deletes Config/common.ini
+        # every boot, so re-emit it here (after the delete, before launch) from
+        # the persistent per-terminal desired file. No-op when this terminal has
+        # no allowlist set. Gated exactly like the loader [StartUp] block above.
+        if mode == "live" and chartctl_on and term_override is not False:
+            try:
+                sys.path.insert(0, _SHARED_DIR)
+                from mt5api.chartctl import webrequest as wr
+                cfg_dir = os.path.join(os.path.dirname(os.path.abspath(outpath)), "Config")
+                urls = wr.load_desired(cfg_dir)
+                if urls is not None:
+                    wr.write_common_ini(cfg_dir, urls)
+            except Exception as exc:  # non-fatal: never block terminal launch
+                print(f"WARN: WebRequest allowlist seed failed: {exc}", file=sys.stderr)
+
+        # MT5's own MCP servers (mt5api/terminal_mcp.py): MT5 rewrites
+        # assistant.ini on exit, so it is turned off again before every launch.
+        try:
+            sys.path.insert(0, _SHARED_DIR)
+            from mt5api import terminal_mcp
+            if terminal_mcp.wanted(cfg.get(terminal_mcp.CONFIG_KEY), term_entry):
+                terminal_dir = os.path.dirname(os.path.abspath(outpath))
+                print(f"terminal MCP servers disabled ({terminal_mcp.disable(terminal_dir)})")
+        except Exception as exc:  # non-fatal: never block terminal launch
+            print(f"WARN: disabling terminal MCP servers failed: {exc}", file=sys.stderr)
+
+    elif cmd == "chartctl_enabled":
+        chartctl_cfg = _feature_block(cfg.get("chartctl"))
+        print("1" if bool(chartctl_cfg.get("enabled", False)) else "0")
 
     elif cmd == "nginx_conf":
         if len(sys.argv) < 3:
@@ -295,6 +386,15 @@ def main():
                         read_timeout=COMPILE_PROXY_TIMEOUT,
                     )
                 )
+                # nginx's 60s default would cut these off mid-call and hand the
+                # caller an HTML 504 while the work carries on in the VM.
+                for route in LONG_RUNNING_ROUTES:
+                    locs.append(
+                        _terminal_location(
+                            f"location {p}{route}", p, container, t["port"],
+                            read_timeout=LONG_PROXY_TIMEOUT,
+                        )
+                    )
 
         # The unified MCP endpoint: one session that reaches every terminal,
         # selecting which via broker/account tool params. The per-terminal

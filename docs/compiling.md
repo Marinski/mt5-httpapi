@@ -201,13 +201,17 @@ elsewhere, sync it into that directory as part of your deploy — a stale `.mqh`
 compiles clean and then misbehaves at runtime, which is the worst failure shape
 available.
 
+With the [file API](files.md) enabled you can do that over HTTP: `PUT /compile/files/Include/MyLib?extract` with a zip of the library unpacks it into that directory, and `DELETE /compile/files/Include/MyLib?recursive` removes it. [An expert that uses a library](files.md#example-an-expert-that-uses-a-library) walks through the whole flow, `#import`ed `.ex5` libraries and DLLs included.
+
 Edits are picked up by a running server without a restart. With
 `COMPILE_LOCAL_CACHE` set the include tree is re-validated against the source at
 most once every `INCLUDE_REFRESH_SECONDS` (60s), so an updated header reaches
 builds within that window rather than at the next restart. If you have just
-changed a shared library and are about to rebuild everything that depends on
-it, let that window pass first — otherwise the first builds of the batch can
-still use the previous copy, and they will report success while doing it.
+changed a shared library on the host and are about to rebuild everything that
+depends on it, let that window pass first, otherwise the first builds of the
+batch can still use the previous copy, and they will report success while doing
+it. A change made through `/compile/files` does not wait: it marks the mirror
+stale, and the next compile in any API process re-validates it first.
 
 ## Performance
 
@@ -373,7 +377,7 @@ MetaEditor would ignore can be refused but one it honours cannot slip past.
 
 The check reads lines the way the preprocessor does. Every `\r\n` and lone `\r` in the source becomes `\n` before the check, and the file MetaEditor compiles is written from that same text. For the check only, `\u0085`, ` ` and ` ` also break lines, backslash-newline continuations are joined, and form feed and vertical tab count as spaces. A `#` left alone on its line once comments are removed is refused, because a comment spanning a line break between `#` and the directive name still joins them for the preprocessor.
 
-`tests/real_compile/` runs these cases against a deployed endpoint. Against
+`tests/live/test_compile_reach.py` runs these cases against a deployed endpoint (`make test-live`). Against
 build 5836 without this check, MetaEditor ran on all sixteen and read the
 target in nine.
 

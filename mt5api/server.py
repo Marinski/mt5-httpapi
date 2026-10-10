@@ -1,12 +1,14 @@
 import os
 import time
 
-from flask import Flask, abort, g, jsonify, request
+from flask import Flask, g, jsonify, request
 from flask_compress import Compress
 from mt5api.backtest import handler as backtest_handler
 from mt5api.config import (
     API_TOKEN,
+    CHARTCTL_ENABLED,
     COMPILE_API_TOKEN,
+    FILES_ENABLED,
     MAX_REQUEST_BODY_BYTES,
     MAX_UPLOAD_BODY_BYTES,
 )
@@ -19,9 +21,13 @@ from mt5api.handlers import (
     symbols,
     terminal,
 )
+from mt5api import reboot_guard
 from mt5api.logger import log
 
 app = Flask(__name__)
+
+#: The 401 body for a missing or wrong bearer token, on REST and /mcp alike.
+UNAUTHORIZED_BODY = {"error": "unauthorized", "code": "UNAUTHORIZED"}
 
 
 def _client_ip():
@@ -40,6 +46,44 @@ def _start_request():
         g.req_id, request.method, request.full_path,
         _client_ip(), request.headers.get("User-Agent", "-"),
     )
+    refusal = _authorize()
+    if refusal is not None:
+        return refusal
+    return _guard_write()
+
+
+def _guard_write():
+    """Hold a scheduled reboot while this request changes something.
+
+    Runs only for an authorized request, so a caller without the token can
+    neither hold a reboot nor learn that one is pending.
+    """
+    if not reboot_guard.is_write(request.method):
+        return None
+    if reboot_guard.draining():
+        log.warning(
+            "%s refused %s %s: a scheduled reboot is about to happen (reason=reboot_pending)",
+            g.req_id, request.method, request.path,
+        )
+        response = jsonify({
+            "error": "a scheduled VM reboot is about to happen; retry after it",
+            "code": "REBOOT_PENDING",
+        })
+        response.headers["Retry-After"] = str(reboot_guard.DRAIN_RETRY_AFTER_SECONDS)
+        return response, 503
+    reboot_guard.write_started(g.req_id, request.method, request.path)
+    return None
+
+
+@app.teardown_request
+def _end_write(_exc):
+    req_id = getattr(g, "req_id", None)
+    if req_id is not None:
+        reboot_guard.write_finished(req_id)
+
+
+def _authorize():
+    """Refuse a request without the right token or with an oversized body."""
     auth = request.headers.get("Authorization", "")
 
     # /compile carries a SECOND, compile-only credential.
@@ -62,7 +106,9 @@ def _start_request():
         return None
 
     if API_TOKEN and auth != f"Bearer {API_TOKEN}":
-        abort(401)
+        # JSON like every other error here: clients treat a non-JSON body as
+        # a broken host rather than a bad token.
+        return jsonify(UNAUTHORIZED_BODY), 401
     return _refuse_oversized_body()
 
 
@@ -90,10 +136,11 @@ def _refuse_oversized_body():
     if declared is None:
         return None
     multipart = (request.mimetype or "").startswith("multipart/")
-    limit = MAX_UPLOAD_BODY_BYTES if multipart else MAX_REQUEST_BODY_BYTES
+    is_upload = multipart or _is_file_upload()
+    limit = MAX_UPLOAD_BODY_BYTES if is_upload else MAX_REQUEST_BODY_BYTES
     if declared <= limit:
         return None
-    setting = "MAX_UPLOAD_BODY_BYTES" if multipart else "MAX_REQUEST_BODY_BYTES"
+    setting = "MAX_UPLOAD_BODY_BYTES" if is_upload else "MAX_REQUEST_BODY_BYTES"
     log.warning(
         "%s rejected %d-byte body on %s %s (cap %d)",
         getattr(g, "req_id", "--------"), declared,
@@ -105,6 +152,14 @@ def _refuse_oversized_body():
             f"{limit} ({setting})"
         ),
     }), 413
+
+
+_FILE_UPLOAD_PREFIXES = ("/files/", "/compile/files/")
+
+
+def _is_file_upload():
+    """A PUT to the file API, whose raw body is a file, not JSON."""
+    return request.method == "PUT" and request.path.startswith(_FILE_UPLOAD_PREFIXES)
 
 
 @app.after_request
@@ -132,6 +187,13 @@ Compress(app)
 # ── Health / System ──────────────────────────────────────────────
 app.get("/ping")(terminal.ping)
 app.get("/error")(terminal.last_error)
+
+
+@app.get("/busy")
+def busy():
+    """Whether a VM reboot now would break work here, and why. Polled by
+    scripts/reboot_guard.py before every scheduled reboot."""
+    return jsonify(reboot_guard.status())
 
 # ── Terminal ─────────────────────────────────────────────────────
 app.get("/terminal")(terminal.get_terminal)
@@ -172,6 +234,22 @@ app.get("/history/deals")(history.get_deals)
 # Source text in, .ex5 out. Auth for this one route is handled in
 # _start_request above; it accepts COMPILE_API_TOKEN as well as API_TOKEN.
 app.post("/compile")(compile_handler.compile_source)
+
+# ── Chart Deployments (chartctl) ─────────────────────────────────
+# Lock-free EA deployment primitives plus the WebRequest allowlist. Gated:
+# live mode + config enabled.
+if CHARTCTL_ENABLED:
+    from mt5api.handlers.chartctl_routes import register_chartctl_routes
+
+    register_chartctl_routes(app)
+
+# ── File API ─────────────────────────────────────────────────────
+# Read, write, unzip and delete files in the terminal's install directory and
+# the compile tree. Gated: config files.enabled (opt-in).
+if FILES_ENABLED:
+    from mt5api.handlers.files import register_files_routes
+
+    register_files_routes(app)
 
 # ── Backtest ─────────────────────────────────────────────────────
 app.post("/backtest/build-ini")(backtest_handler.build_ini_route)
