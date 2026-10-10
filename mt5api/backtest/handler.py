@@ -83,12 +83,30 @@ LAUNCH_ABORT_SETTLE_SECONDS = 3
 LAUNCH_ABORT_BACKOFF_SECONDS = 15
 # Terminals that start at the same moment on one VM abort at startup (the
 # 10053 above): a paced queue never hit it, a full fleet hit it on most
-# instances. So only one terminal on the VM starts at a time. The slot is a
-# file lock in the VM's local temp dir (every mt5api process on a VM shares it;
-# the Shared folder would serialise both VMs), held from launch until the
+# instances. So only a few terminals on the VM start at a time. Each slot is a
+# file lock in the VM's local temp dir (every mt5api process on a VM shares
+# them; the Shared folder would serialise both VMs), held from launch until the
 # terminal logs a broker login or the tester start, or for at most
-# LAUNCH_SLOT_HOLD_SECONDS. A launch that cannot get the slot within
-# LAUNCH_SLOT_WAIT_SECONDS goes ahead without it rather than stall the job.
+# LAUNCH_SLOT_HOLD_SECONDS. A launch that cannot get a slot within
+# LAUNCH_SLOT_WAIT_SECONDS goes ahead without one rather than stall the job.
+#
+# One slot cost throughput on a loaded VM: a launch takes ~20 s to log in
+# (p50; 80 s p90) with 30 tests running, so the VM started ~2 terminals a
+# minute and launches waited 144 s (p50) for their turn. config.yaml
+# `backtest.launch_slots` sets how many may start at once.
+DEFAULT_LAUNCH_SLOTS = 2
+
+
+def _launch_slot_count(backtest_config):
+    raw = (backtest_config or {}).get("launch_slots", DEFAULT_LAUNCH_SLOTS)
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LAUNCH_SLOTS
+    return count if count >= 1 else DEFAULT_LAUNCH_SLOTS
+
+
+LAUNCH_SLOTS = _launch_slot_count(load_yaml_config().get("backtest"))
 LAUNCH_SLOT_PATH = os.path.join(tempfile.gettempdir(), "mt5api-terminal-launch.lock")
 LAUNCH_SLOT_HOLD_SECONDS = 45
 LAUNCH_SLOT_WAIT_SECONDS = 1800
@@ -677,15 +695,16 @@ def _await_launch_abort_exit(attempt):
 
 
 class _LaunchSlot:
-    """A VM-wide, cross-process lock on LAUNCH_SLOT_PATH.
+    """One of `slots` VM-wide, cross-process locks: `<path>.0` .. `<path>.N-1`.
 
-    The OS drops the lock if the holding process dies, so a crashed mt5api
+    The OS drops a lock if the holding process dies, so a crashed mt5api
     never wedges the VM's launches. release() is idempotent and safe from
     another thread.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, slots=1):
         self.path = path
+        self.paths = [f"{path}.{i}" for i in range(max(1, slots))]
         self._handle = None
         self._mutex = threading.Lock()
 
@@ -713,31 +732,42 @@ class _LaunchSlot:
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def acquire(self, timeout):
-        """Wait up to `timeout` seconds for the slot; True if it was taken."""
-        try:
-            # Kept open while held: closing it would drop the lock.
-            handle = open(self.path, "a+b")  # noqa: SIM115
-        except OSError:
-            return False
-        deadline = time.time() + timeout
-        while True:
+    def _try_any(self):
+        """Lock the first free slot; its open handle, or None if all are held."""
+        for path in self.paths:
+            try:
+                # Kept open while held: closing it would drop the lock.
+                handle = open(path, "a+b")  # noqa: SIM115
+            except OSError:
+                continue
             try:
                 self._try_lock(handle)
             except OSError:
-                if time.time() >= deadline:
-                    handle.close()
-                    return False
-                time.sleep(0.5)
+                handle.close()
                 continue
+            except Exception:
+                handle.close()
+                raise
+            return handle
+        return None
+
+    def acquire(self, timeout):
+        """Wait up to `timeout` seconds for a slot; True if one was taken."""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                handle = self._try_any()
             except Exception:  # noqa: BLE001
                 # Fail open: a broken lock must never fail the launch.
                 log.exception("backtest launch slot unusable path=%s", self.path)
-                handle.close()
                 return False
-            with self._mutex:
-                self._handle = handle
-            return True
+            if handle is not None:
+                with self._mutex:
+                    self._handle = handle
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.5)
 
     def release(self):
         with self._mutex:
@@ -772,13 +802,13 @@ def _hold_launch_slot(slot, job_id, finished):
 def _launch_terminal(cmd, job):
     """Run one terminal launch, streaming its output to the job's run.log.
 
-    The launch first takes the VM's launch slot (see LAUNCH_SLOT_PATH), which
-    a watcher thread hands back once the terminal is past startup. Returns the
+    The launch first takes one of the VM's launch slots (see LAUNCH_SLOTS),
+    which a watcher thread hands back once the terminal is past startup. Returns the
     CompletedProcess; subprocess.TimeoutExpired propagates to the caller,
     which owns the timeout policy.
     """
     job_id = job["jobId"]
-    slot = _LaunchSlot(LAUNCH_SLOT_PATH)
+    slot = _LaunchSlot(LAUNCH_SLOT_PATH, LAUNCH_SLOTS)
     waited_from = time.time()
     if slot.acquire(LAUNCH_SLOT_WAIT_SECONDS):
         log.info(

@@ -553,6 +553,7 @@ def test_launch_goes_ahead_without_the_slot_when_it_never_frees(
 ):
     holder = handler._LaunchSlot(slot_path)
     assert holder.acquire(1)
+    monkeypatch.setattr(handler, "LAUNCH_SLOTS", 1)
     monkeypatch.setattr(handler, "LAUNCH_SLOT_WAIT_SECONDS", 0.2)
     job_id = _submit(client)
     report = jobs.load_job(job_id)["reportPath"]
@@ -565,3 +566,34 @@ def test_launch_goes_ahead_without_the_slot_when_it_never_frees(
     assert calls["n"] == 1
     assert jobs.load_job(job_id)["status"] == "completed"
     holder.release()
+
+
+def test_two_slots_let_two_launches_start_and_hold_the_third(slot_path):
+    first = handler._LaunchSlot(slot_path, 2)
+    second = handler._LaunchSlot(slot_path, 2)
+    third = handler._LaunchSlot(slot_path, 2)
+
+    assert first.acquire(1) is True
+    assert second.acquire(1) is True
+    assert third.acquire(0.3) is False
+
+    second.release()
+    assert third.acquire(1) is True
+    first.release()
+    third.release()
+
+
+@pytest.mark.parametrize(
+    "backtest_config, expected",
+    [
+        (None, 2),
+        ({}, 2),
+        ({"launch_slots": 3}, 3),
+        ({"launch_slots": "1"}, 1),
+        ({"launch_slots": 0}, 2),
+        ({"launch_slots": -1}, 2),
+        ({"launch_slots": "many"}, 2),
+    ],
+)
+def test_launch_slot_count_from_config(backtest_config, expected):
+    assert handler._launch_slot_count(backtest_config) == expected

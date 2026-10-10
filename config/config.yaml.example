@@ -89,6 +89,14 @@ files:
   max_extract_bytes: 209715200  # 200 MB unpacked per ?extract
   max_extract_files: 10000      # files per ?extract
 
+# Backtest launches. Terminals that start at the same moment on one VM abort at
+# startup (terminal64.exe exit 10053) before reaching the broker or the tester,
+# so at most `launch_slots` terminals per VM start at once; the rest wait their
+# turn. A slot is held until the terminal logs its broker login or the tester
+# start, for at most 45 s. A launch that aborts anyway is relaunched in place.
+backtest:
+  launch_slots: 2
+
 # Extra pip packages installed in the VM on every boot.
 # MetaTrader5, flask, waitress, and flask-compress are always installed.
 requirements: []
