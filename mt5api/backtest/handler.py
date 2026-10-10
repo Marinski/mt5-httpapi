@@ -19,6 +19,7 @@ import io
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -77,6 +78,18 @@ LAUNCH_ABORT_MAX_SECONDS = 600
 LAUNCH_ABORT_SETTLE_SECONDS = 3
 # The aborts cluster in time, so back off before each relaunch (x attempt).
 LAUNCH_ABORT_BACKOFF_SECONDS = 15
+# Terminals that start at the same moment on one VM abort at startup (the
+# 10053 above): a paced queue never hit it, a full fleet hit it on most
+# instances. So only one terminal on the VM starts at a time. The slot is a
+# file lock in the VM's local temp dir (every mt5api process on a VM shares it;
+# the Shared folder would serialise both VMs), held from launch until the
+# terminal logs a broker login or the tester start, or for at most
+# LAUNCH_SLOT_HOLD_SECONDS. A launch that cannot get the slot within
+# LAUNCH_SLOT_WAIT_SECONDS goes ahead without it rather than stall the job.
+LAUNCH_SLOT_PATH = os.path.join(tempfile.gettempdir(), "mt5api-terminal-launch.lock")
+LAUNCH_SLOT_HOLD_SECONDS = 45
+LAUNCH_SLOT_WAIT_SECONDS = 1800
+LAUNCH_SETTLED_MARKERS = ("authorized on", TESTER_STARTED_MARKER)
 DIAGNOSTIC_TAIL_CHARS = 4000
 DEFAULT_TOP_PASSES = 50
 MAX_TOP_PASSES = 500
@@ -658,21 +671,139 @@ def _await_launch_abort_exit(attempt):
     time.sleep(LAUNCH_ABORT_BACKOFF_SECONDS * attempt)
 
 
+class _LaunchSlot:
+    """A VM-wide, cross-process lock on LAUNCH_SLOT_PATH.
+
+    The OS drops the lock if the holding process dies, so a crashed mt5api
+    never wedges the VM's launches. release() is idempotent and safe from
+    another thread.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._handle = None
+        self._mutex = threading.Lock()
+
+    @staticmethod
+    def _try_lock(handle):
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @staticmethod
+    def _unlock(handle):
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def acquire(self, timeout):
+        """Wait up to `timeout` seconds for the slot; True if it was taken."""
+        try:
+            # Kept open while held: closing it would drop the lock.
+            handle = open(self.path, "a+b")  # noqa: SIM115
+        except OSError:
+            return False
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self._try_lock(handle)
+            except OSError:
+                if time.time() >= deadline:
+                    handle.close()
+                    return False
+                time.sleep(0.5)
+                continue
+            except Exception:  # noqa: BLE001
+                # Fail open: a broken lock must never fail the launch.
+                log.exception("backtest launch slot unusable path=%s", self.path)
+                handle.close()
+                return False
+            with self._mutex:
+                self._handle = handle
+            return True
+
+    def release(self):
+        with self._mutex:
+            handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            self._unlock(handle)
+        except Exception:  # noqa: BLE001
+            # Closing the handle below drops the lock anyway.
+            log.debug("backtest launch slot unlock failed path=%s", self.path)
+        handle.close()
+
+
+def _launch_settled(job_id):
+    since_launch = _terminal_log_since_launch(job_id)
+    return bool(since_launch) and any(
+        marker in since_launch for marker in LAUNCH_SETTLED_MARKERS
+    )
+
+
+def _hold_launch_slot(slot, job_id, finished):
+    """Release `slot` once this launch is past startup (or after the cap)."""
+    deadline = time.time() + LAUNCH_SLOT_HOLD_SECONDS
+    while time.time() < deadline and not finished.is_set():
+        if _launch_settled(job_id):
+            break
+        finished.wait(1)
+    slot.release()
+
+
 def _launch_terminal(cmd, job):
     """Run one terminal launch, streaming its output to the job's run.log.
 
-    Returns the CompletedProcess; subprocess.TimeoutExpired propagates to the
-    caller, which owns the timeout policy.
+    The launch first takes the VM's launch slot (see LAUNCH_SLOT_PATH), which
+    a watcher thread hands back once the terminal is past startup. Returns the
+    CompletedProcess; subprocess.TimeoutExpired propagates to the caller,
+    which owns the timeout policy.
     """
-    with open(job["logPath"], "w", encoding="utf-8") as log_handle:
-        return subprocess.run(
-            cmd,
-            cwd=TERMINAL_DIR,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            timeout=job["timeoutSeconds"],
-            check=False,
+    job_id = job["jobId"]
+    slot = _LaunchSlot(LAUNCH_SLOT_PATH)
+    waited_from = time.time()
+    if slot.acquire(LAUNCH_SLOT_WAIT_SECONDS):
+        log.info(
+            "backtest launch slot acquired broker=%s account=%s job=%s waited=%.1fs",
+            BROKER, ACCOUNT, job_id, time.time() - waited_from,
         )
+    else:
+        log.warning(
+            "backtest launching without the launch slot broker=%s account=%s "
+            "job=%s waited=%.1fs",
+            BROKER, ACCOUNT, job_id, time.time() - waited_from,
+        )
+    finished = threading.Event()
+    watcher = threading.Thread(
+        target=_hold_launch_slot, args=(slot, job_id, finished), daemon=True
+    )
+    watcher.start()
+    try:
+        with open(job["logPath"], "w", encoding="utf-8") as log_handle:
+            return subprocess.run(
+                cmd,
+                cwd=TERMINAL_DIR,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                timeout=job["timeoutSeconds"],
+                check=False,
+            )
+    finally:
+        finished.set()
+        slot.release()
 
 
 def _parse_top_passes(raw_value):

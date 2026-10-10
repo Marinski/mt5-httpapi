@@ -367,7 +367,7 @@ def test_launch_abort_is_judged_by_the_log_not_the_clock(tmp_path, monkeypatch):
         handler, "_terminal_log_since_launch", lambda _job_id: log_text["value"]
     )
     start = 1000.0
-    result = lambda code: type("R", (), {"returncode": code})()  # noqa: E731
+    result = lambda code: type("R", (), {"returncode": code})()
 
     def abort(code=10053):
         return handler._looks_like_launch_abort(
@@ -456,3 +456,102 @@ def test_nonzero_exit_past_the_backstop_is_not_relaunched(client, monkeypatch):
 
     assert calls["n"] == 1
     assert jobs.load_job(job_id)["status"] == "failed"
+
+
+# --- VM-wide launch slot: one terminal starts at a time per VM -----------------
+
+
+@pytest.fixture
+def slot_path(tmp_path, monkeypatch):
+    path = str(tmp_path / "launch.lock")
+    monkeypatch.setattr(handler, "LAUNCH_SLOT_PATH", path)
+    return path
+
+
+def test_launch_slot_is_exclusive_until_released(slot_path):
+    first = handler._LaunchSlot(slot_path)
+    second = handler._LaunchSlot(slot_path)
+
+    assert first.acquire(1) is True
+    assert second.acquire(0.2) is False
+
+    first.release()
+    first.release()  # idempotent
+    assert second.acquire(1) is True
+    second.release()
+
+
+def test_slot_is_held_until_the_terminal_logs_a_broker_login(slot_path, monkeypatch):
+    log_text = {"value": ""}
+    monkeypatch.setattr(
+        handler, "_terminal_log_since_launch", lambda _job_id: log_text["value"]
+    )
+    monkeypatch.setattr(handler, "LAUNCH_SLOT_HOLD_SECONDS", 30)
+    slot = handler._LaunchSlot(slot_path)
+    assert slot.acquire(1)
+    finished = handler.threading.Event()
+    watcher = handler.threading.Thread(
+        target=handler._hold_launch_slot, args=(slot, "job1", finished)
+    )
+    watcher.start()
+
+    other = handler._LaunchSlot(slot_path)
+    assert other.acquire(0.3) is False  # still starting up
+
+    log_text["value"] = "job1 ... Network '4000074342': authorized on Darwinex-Live"
+    watcher.join(5)
+    assert not watcher.is_alive()
+    assert other.acquire(1) is True
+    other.release()
+
+
+def test_slot_is_released_after_the_hold_cap(slot_path, monkeypatch):
+    monkeypatch.setattr(handler, "_terminal_log_since_launch", lambda _job_id: None)
+    monkeypatch.setattr(handler, "LAUNCH_SLOT_HOLD_SECONDS", 0.3)
+    slot = handler._LaunchSlot(slot_path)
+    assert slot.acquire(1)
+
+    handler._hold_launch_slot(slot, "job1", handler.threading.Event())
+
+    other = handler._LaunchSlot(slot_path)
+    assert other.acquire(0.5) is True
+    other.release()
+
+
+def test_launch_releases_the_slot_when_the_terminal_exits(
+    client, slot_path, monkeypatch
+):
+    job_id = _submit(client)
+    calls = _run_with_exit_codes(
+        monkeypatch,
+        [1],
+        elapsed_seconds=1,
+        log_since_launch=_TESTER_RAN_LOG.format(job=job_id),
+    )
+    monkeypatch.setattr(handler, "LAUNCH_SLOT_HOLD_SECONDS", 600)
+
+    handler._execute_job(job_id)
+
+    assert calls["n"] == 1
+    other = handler._LaunchSlot(slot_path)
+    assert other.acquire(0.5) is True
+    other.release()
+
+
+def test_launch_goes_ahead_without_the_slot_when_it_never_frees(
+    client, slot_path, monkeypatch
+):
+    holder = handler._LaunchSlot(slot_path)
+    assert holder.acquire(1)
+    monkeypatch.setattr(handler, "LAUNCH_SLOT_WAIT_SECONDS", 0.2)
+    job_id = _submit(client)
+    report = jobs.load_job(job_id)["reportPath"]
+    calls = _run_with_exit_codes(
+        monkeypatch, [0], report_path=report, report_on_attempt=1
+    )
+
+    handler._execute_job(job_id)
+
+    assert calls["n"] == 1
+    assert jobs.load_job(job_id)["status"] == "completed"
+    holder.release()
