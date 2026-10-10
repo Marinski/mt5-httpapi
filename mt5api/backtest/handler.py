@@ -60,15 +60,23 @@ RELAUNCH_GRACE_SECONDS = 30
 RELAUNCH_MAX_EXIT_SECONDS = 60
 # The report is written just before the terminal exits.
 REPORT_SETTLE_SECONDS = 2
-# A terminal that starts and dies inside this window with a non-zero code and
-# no report aborted before it ran the tester -- MT5's own MCP/MQL5.community
-# startup path is the known one (exit 10053 = WSAECONNABORTED). That abort is
-# transient, so relaunch the same job in place instead of failing it.
-LAUNCH_ABORT_MAX_SECONDS = 25
-LAUNCH_ABORT_MAX_ATTEMPTS = 3
+# A launch that exits non-zero with no report, before the tester ever started,
+# aborted at startup (exit 10053 = WSAECONNABORTED: the terminal logs "exit
+# with code 0" seconds after "started for", never reaching the broker). That
+# abort is transient and comes in bursts across instances, so relaunch the same
+# job in place instead of failing it. "Before the tester started" is read from
+# the terminal's own log, not inferred from elapsed time: under load MT5 takes
+# well over a minute just to initialise, so a time window missed every abort.
+TESTER_STARTED_MARKER = "automatic testing started"
+LAUNCH_ABORT_MAX_ATTEMPTS = 4
+# Backstop on the log check: a launch that ran this long is never retried,
+# even if its log could not be matched (e.g. the log rolled over at midnight).
+LAUNCH_ABORT_MAX_SECONDS = 600
 # Let an aborted terminal finish exiting before relaunching onto the same data
 # folder: MT5 is single-instance per data folder.
 LAUNCH_ABORT_SETTLE_SECONDS = 3
+# The aborts cluster in time, so back off before each relaunch (x attempt).
+LAUNCH_ABORT_BACKOFF_SECONDS = 15
 DIAGNOSTIC_TAIL_CHARS = 4000
 DEFAULT_TOP_PASSES = 50
 MAX_TOP_PASSES = 500
@@ -583,29 +591,71 @@ def _await_self_relaunch(job_id, report_paths, deadline):
     return _any_report_exists(report_paths)
 
 
-def _looks_like_launch_abort(result, start_time, report_paths):
-    """True when a launch died fast with a non-zero code and wrote no report.
+def _terminal_logs_newest_first():
+    """The terminal's dated run logs, most recently written first."""
+    log_dir = os.path.join(TERMINAL_DIR, "logs")
+    try:
+        candidates = [
+            entry
+            for entry in os.scandir(log_dir)
+            if entry.is_file()
+            and entry.name.endswith(".log")
+            and entry.name.lower() != "metaeditor.log"
+        ]
+        candidates.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    return [entry.path for entry in candidates]
 
-    A run that reached the tester takes far longer than the window (tens of
-    seconds just to connect and synchronise), so the window alone separates a
-    startup abort from a genuine failure that ran the tester.
+
+def _terminal_log_since_launch(job_id):
+    """The terminal log written since this job's latest launch, or None.
+
+    Every launch logs `successfully initialized from start config` and
+    `launched with` lines naming the job's own tester.ini, so the text from
+    the last mention of the job id on is what this launch did. The two newest
+    logs are searched so a launch just before midnight still matches. None
+    means no line names the job.
+    """
+    for path in _terminal_logs_newest_first()[:2]:
+        content = _read_tail_text(path)
+        marker = content.rfind(job_id)
+        if marker != -1:
+            return content[marker:]
+    return None
+
+
+def _looks_like_launch_abort(result, launch_started, report_paths, job_id):
+    """True when a launch exited non-zero before the tester ever started.
+
+    A launch that reached the tester is a real run and is never relaunched,
+    whatever it exited with: rerunning it could double a long test.
     """
     if result.returncode == 0:
         return False
-    if time.time() - start_time >= LAUNCH_ABORT_MAX_SECONDS:
+    if time.time() - launch_started >= LAUNCH_ABORT_MAX_SECONDS:
         return False
-    return not _any_report_exists(report_paths)
+    if _any_report_exists(report_paths):
+        return False
+    since_launch = _terminal_log_since_launch(job_id)
+    # No line naming the job: nothing proves the tester never ran (the launch
+    # may have scrolled out of the tail), so treat it as a real failure.
+    if since_launch is None:
+        return False
+    return TESTER_STARTED_MARKER not in since_launch
 
 
-def _await_launch_abort_exit():
-    """Give an aborted terminal time to release its data folder before relaunch.
+def _await_launch_abort_exit(attempt):
+    """Wait for an aborted terminal to release its data folder, then back off.
 
     MT5 is single-instance per data folder; relaunching while the aborted
-    process is still exiting would just abort again.
+    process is still exiting would just abort again. The aborts come in
+    bursts, so each relaunch waits a little longer than the last.
     """
     deadline = time.time() + LAUNCH_ABORT_SETTLE_SECONDS
     while time.time() < deadline and _terminal_process_alive():
         time.sleep(0.5)
+    time.sleep(LAUNCH_ABORT_BACKOFF_SECONDS * attempt)
 
 
 def _launch_terminal(cmd, job):
@@ -830,6 +880,8 @@ def _execute_job(job_id):
                         "job=%s attempt=%d",
                         BROKER, ACCOUNT, job_id, attempt,
                     )
+                    jobs.update_job(job_id, launchAttempts=attempt)
+                launch_started = time.time()
                 try:
                     result = _launch_terminal(cmd, job)
                 except subprocess.TimeoutExpired:
@@ -856,9 +908,16 @@ def _execute_job(job_id):
                         finishedAt=jobs.now_iso(),
                     )
                     return
-                if not _looks_like_launch_abort(result, start_time, report_paths):
+                if attempt == LAUNCH_ABORT_MAX_ATTEMPTS or not _looks_like_launch_abort(
+                    result, launch_started, report_paths, job_id
+                ):
                     break
-                _await_launch_abort_exit()
+                log.warning(
+                    "backtest launch abort broker=%s account=%s job=%s attempt=%d "
+                    "exit=%s",
+                    BROKER, ACCOUNT, job_id, attempt, result.returncode,
+                )
+                _await_launch_abort_exit(attempt)
         except Exception as exc:
             log.exception(
                 "backtest crashed broker=%s account=%s job=%s",

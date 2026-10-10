@@ -12,6 +12,7 @@ genuine no-report failure must still fail without inheriting that wait.
 from __future__ import annotations
 
 import io
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -255,16 +256,48 @@ def test_percent_paren_in_an_ini_value_is_not_a_substitution():
 
 # --- launch-abort retry: exit 10053 (WSAECONNABORTED) at startup --------------
 
+#: What a startup abort leaves in the terminal log: the launch, then an exit
+#: seconds later with no broker login and no tester run (instance 46, 10 Oct).
+_ABORT_LOG = (
+    "DP\t0\t07:45:50.700\tStartup\tsuccessfully initialized from start config "
+    '"C:\\Shared\\logs\\backtest-jobs\\{job}\\tester.ini"\r\n'
+    "NN\t0\t07:46:26.941\tTerminal\tDarwinex MetaTrader 5 x64 build 6230 started\r\n"
+    "RN\t0\t07:46:34.694\tTerminal\texit with code 0\r\n"
+    "HD\t0\t07:46:38.426\tTerminal\tstopped with 10053\r\n"
+)
+_TESTER_RAN_LOG = (
+    "DP\t0\t07:45:50.700\tStartup\tsuccessfully initialized from start config "
+    '"C:\\Shared\\logs\\backtest-jobs\\{job}\\tester.ini"\r\n'
+    "LM\t0\t07:49:27.882\tTester\tautomatic testing started\r\n"
+    "HD\t0\t07:53:38.426\tTerminal\tstopped with 10053\r\n"
+)
+
+
+def _write_terminal_log(terminal_dir, name, text, mtime):
+    log_dir = Path(terminal_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / name
+    path.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
+    os.utime(path, (mtime, mtime))
+    return path
+
 
 def _run_with_exit_codes(
-    monkeypatch, codes, *, elapsed_seconds=3, report_path=None, report_on_attempt=None
+    monkeypatch,
+    codes,
+    *,
+    elapsed_seconds=3,
+    report_path=None,
+    report_on_attempt=None,
+    log_since_launch="",
 ):
     """Stub subprocess.run to return `codes` in order, one launch per call.
 
-    Each launch advances the stubbed clock by `elapsed_seconds`, so the abort
-    window can be crossed without real waiting. `report_on_attempt` writes the
-    report file when that 1-based attempt returns, standing in for a run that
-    got far enough to write output.
+    Each launch advances the stubbed clock by `elapsed_seconds`, so the
+    backstop window can be crossed without real waiting. `report_on_attempt`
+    writes the report file when that 1-based attempt returns, standing in for
+    a run that got far enough to write output. `log_since_launch` is what the
+    terminal log shows for the launch (default: nothing, i.e. no tester run).
     """
     real_time = time.time
     offset = {"value": 0.0}
@@ -287,37 +320,85 @@ def _run_with_exit_codes(
     )
     monkeypatch.setattr(handler.subprocess, "run", _fake_run)
     monkeypatch.setattr(handler, "_terminal_process_alive", lambda: False)
+    monkeypatch.setattr(
+        handler, "_terminal_log_since_launch", lambda _job_id: log_since_launch
+    )
     return calls
 
 
-def test_launch_abort_detected_only_for_fast_nonzero_without_report(
-    tmp_path, monkeypatch
-):
+def test_log_since_launch_starts_at_the_jobs_latest_launch(tmp_path, monkeypatch):
+    monkeypatch.setattr(handler, "TERMINAL_DIR", str(tmp_path))
+    _write_terminal_log(
+        tmp_path,
+        "20261010.log",
+        _TESTER_RAN_LOG.format(job="otherjob") + _ABORT_LOG.format(job="job1"),
+        mtime=2000,
+    )
+    (tmp_path / "logs" / "metaeditor.log").write_text("job1 compiled")
+
+    since = handler._terminal_log_since_launch("job1")
+
+    assert since.startswith("job1")
+    assert "stopped with 10053" in since
+    assert handler.TESTER_STARTED_MARKER not in since
+    assert handler._terminal_log_since_launch("missing") is None
+
+
+def test_log_since_launch_finds_a_launch_before_midnight(tmp_path, monkeypatch):
+    monkeypatch.setattr(handler, "TERMINAL_DIR", str(tmp_path))
+    _write_terminal_log(
+        tmp_path, "20261009.log", _ABORT_LOG.format(job="job1"), mtime=1000
+    )
+    _write_terminal_log(
+        tmp_path, "20261010.log", "XX\t0\t00:00:01.000\tTerminal\tidle\r\n", mtime=2000
+    )
+
+    assert "stopped with 10053" in handler._terminal_log_since_launch("job1")
+
+
+def test_launch_abort_is_judged_by_the_log_not_the_clock(tmp_path, monkeypatch):
     report = tmp_path / "report.htm"
     now = {"t": 1000.0}
     monkeypatch.setattr(
         handler, "time", SimpleNamespace(time=lambda: now["t"], sleep=lambda _s: None)
     )
-    monkeypatch.setattr(handler, "LAUNCH_ABORT_MAX_SECONDS", 25)
+    log_text = {"value": _ABORT_LOG.format(job="job1")}
+    monkeypatch.setattr(
+        handler, "_terminal_log_since_launch", lambda _job_id: log_text["value"]
+    )
     start = 1000.0
     result = lambda code: type("R", (), {"returncode": code})()  # noqa: E731
 
-    assert handler._looks_like_launch_abort(result(10053), start, [str(report)]) is True
-    assert handler._looks_like_launch_abort(result(0), start, [str(report)]) is False
+    def abort(code=10053):
+        return handler._looks_like_launch_abort(
+            result(code), start, [str(report)], "job1"
+        )
 
-    now["t"] = start + 60
-    assert handler._looks_like_launch_abort(result(10053), start, [str(report)]) is False
+    # The 10 Oct aborts ran 75-193 s; a slow startup is still an abort.
+    now["t"] = start + 190
+    assert abort() is True
+    assert abort(0) is False
+
+    log_text["value"] = _TESTER_RAN_LOG.format(job="job1")
+    assert abort() is False
+
+    log_text["value"] = None
+    assert abort() is False
+
+    log_text["value"] = _ABORT_LOG.format(job="job1")
+    now["t"] = start + handler.LAUNCH_ABORT_MAX_SECONDS
+    assert abort() is False
 
     now["t"] = start
     report.write_text("x")
-    assert handler._looks_like_launch_abort(result(10053), start, [str(report)]) is False
+    assert abort() is False
 
 
 def test_launch_abort_relaunches_then_fails_with_the_exit_code(client, monkeypatch):
     """A terminal that aborts at startup on every attempt is relaunched the full
     number of times, then failed with the exit code rather than silently."""
     job_id = _submit(client)
-    calls = _run_with_exit_codes(monkeypatch, [10053], elapsed_seconds=3)
+    calls = _run_with_exit_codes(monkeypatch, [10053], elapsed_seconds=90)
 
     handler._execute_job(job_id)
 
@@ -325,6 +406,8 @@ def test_launch_abort_relaunches_then_fails_with_the_exit_code(client, monkeypat
     job = jobs.load_job(job_id)
     assert job["status"] == "failed"
     assert job["exitCode"] == 10053
+    assert job["launchAttempts"] == handler.LAUNCH_ABORT_MAX_ATTEMPTS
+    assert job["error"].startswith("terminal64.exe exited with code 10053")
 
 
 def test_launch_abort_recovers_on_relaunch(client, monkeypatch):
@@ -335,7 +418,7 @@ def test_launch_abort_recovers_on_relaunch(client, monkeypatch):
     calls = _run_with_exit_codes(
         monkeypatch,
         [10053, 0],
-        elapsed_seconds=3,
+        elapsed_seconds=90,
         report_path=report,
         report_on_attempt=2,
     )
@@ -346,9 +429,24 @@ def test_launch_abort_recovers_on_relaunch(client, monkeypatch):
     assert jobs.load_job(job_id)["status"] == "completed"
 
 
-def test_slow_nonzero_exit_is_not_relaunched(client, monkeypatch):
-    """A non-zero exit after the abort window ran long enough to be a real
-    failure; it must fail immediately, not be retried."""
+def test_nonzero_exit_after_the_tester_ran_is_not_relaunched(client, monkeypatch):
+    """A run that reached the tester is a real failure: relaunching it could
+    double a long test, so it fails on the first exit."""
+    job_id = _submit(client)
+    calls = _run_with_exit_codes(
+        monkeypatch,
+        [10053],
+        elapsed_seconds=5,
+        log_since_launch=_TESTER_RAN_LOG.format(job=job_id),
+    )
+
+    handler._execute_job(job_id)
+
+    assert calls["n"] == 1
+    assert jobs.load_job(job_id)["status"] == "failed"
+
+
+def test_nonzero_exit_past_the_backstop_is_not_relaunched(client, monkeypatch):
     job_id = _submit(client)
     calls = _run_with_exit_codes(
         monkeypatch, [1], elapsed_seconds=handler.LAUNCH_ABORT_MAX_SECONDS + 5
