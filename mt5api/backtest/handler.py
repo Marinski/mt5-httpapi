@@ -60,6 +60,15 @@ RELAUNCH_GRACE_SECONDS = 30
 RELAUNCH_MAX_EXIT_SECONDS = 60
 # The report is written just before the terminal exits.
 REPORT_SETTLE_SECONDS = 2
+# A terminal that starts and dies inside this window with a non-zero code and
+# no report aborted before it ran the tester -- MT5's own MCP/MQL5.community
+# startup path is the known one (exit 10053 = WSAECONNABORTED). That abort is
+# transient, so relaunch the same job in place instead of failing it.
+LAUNCH_ABORT_MAX_SECONDS = 25
+LAUNCH_ABORT_MAX_ATTEMPTS = 3
+# Let an aborted terminal finish exiting before relaunching onto the same data
+# folder: MT5 is single-instance per data folder.
+LAUNCH_ABORT_SETTLE_SECONDS = 3
 DIAGNOSTIC_TAIL_CHARS = 4000
 DEFAULT_TOP_PASSES = 50
 MAX_TOP_PASSES = 500
@@ -574,6 +583,48 @@ def _await_self_relaunch(job_id, report_paths, deadline):
     return _any_report_exists(report_paths)
 
 
+def _looks_like_launch_abort(result, start_time, report_paths):
+    """True when a launch died fast with a non-zero code and wrote no report.
+
+    A run that reached the tester takes far longer than the window (tens of
+    seconds just to connect and synchronise), so the window alone separates a
+    startup abort from a genuine failure that ran the tester.
+    """
+    if result.returncode == 0:
+        return False
+    if time.time() - start_time >= LAUNCH_ABORT_MAX_SECONDS:
+        return False
+    return not _any_report_exists(report_paths)
+
+
+def _await_launch_abort_exit():
+    """Give an aborted terminal time to release its data folder before relaunch.
+
+    MT5 is single-instance per data folder; relaunching while the aborted
+    process is still exiting would just abort again.
+    """
+    deadline = time.time() + LAUNCH_ABORT_SETTLE_SECONDS
+    while time.time() < deadline and _terminal_process_alive():
+        time.sleep(0.5)
+
+
+def _launch_terminal(cmd, job):
+    """Run one terminal launch, streaming its output to the job's run.log.
+
+    Returns the CompletedProcess; subprocess.TimeoutExpired propagates to the
+    caller, which owns the timeout policy.
+    """
+    with open(job["logPath"], "w", encoding="utf-8") as log_handle:
+        return subprocess.run(
+            cmd,
+            cwd=TERMINAL_DIR,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            timeout=job["timeoutSeconds"],
+            check=False,
+        )
+
+
 def _parse_top_passes(raw_value):
     raw_value = (raw_value or "").strip()
     if not raw_value:
@@ -763,20 +814,24 @@ def _execute_job(job_id):
             terminal_mcp.apply(DISABLE_TERMINAL_MCP, TERMINAL_DIR, "backtest")
 
             cmd = [TERMINAL_PATH, "/portable", f"/config:{ini_path}"]
+            report_paths = _report_candidates(job)
             log.info(
                 "backtest start broker=%s account=%s job=%s report=%s",
                 BROKER, ACCOUNT, job_id, job["reportName"],
             )
-            with open(job["logPath"], "w", encoding="utf-8") as log_handle:
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        cwd=TERMINAL_DIR,
-                        stdout=log_handle,
-                        stderr=subprocess.STDOUT,
-                        timeout=job["timeoutSeconds"],
-                        check=False,
+            for attempt in range(1, LAUNCH_ABORT_MAX_ATTEMPTS + 1):
+                if DISABLE_TERMINAL_MCP:
+                    # Re-apply before every launch: MT5 rewrites assistant.ini on
+                    # exit, and a relaunch after an abort is a fresh launch.
+                    terminal_mcp.apply(DISABLE_TERMINAL_MCP, TERMINAL_DIR, "backtest")
+                if attempt > 1:
+                    log.warning(
+                        "backtest relaunch after launch abort broker=%s account=%s "
+                        "job=%s attempt=%d",
+                        BROKER, ACCOUNT, job_id, attempt,
                     )
+                try:
+                    result = _launch_terminal(cmd, job)
                 except subprocess.TimeoutExpired:
                     duration = round(time.time() - start_time, 3)
                     # subprocess.run kills the process it started, but not the
@@ -801,6 +856,9 @@ def _execute_job(job_id):
                         finishedAt=jobs.now_iso(),
                     )
                     return
+                if not _looks_like_launch_abort(result, start_time, report_paths):
+                    break
+                _await_launch_abort_exit()
         except Exception as exc:
             log.exception(
                 "backtest crashed broker=%s account=%s job=%s",
@@ -844,7 +902,6 @@ def _execute_job(job_id):
     # A clean exit with no report, fast enough to be an update restart rather
     # than a real run, means MT5 probably relaunched itself — wait for the
     # replacement rather than failing a backtest that is still going to finish.
-    report_paths = _report_candidates(job)
     if duration < RELAUNCH_MAX_EXIT_SECONDS and not _any_report_exists(report_paths):
         _await_self_relaunch(job_id, report_paths, start_time + job["timeoutSeconds"])
         duration = round(time.time() - start_time, 3)

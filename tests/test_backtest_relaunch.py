@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -250,3 +251,110 @@ def test_percent_paren_in_an_ini_value_is_not_a_substitution():
     )
 
     assert parsed["Tester"]["Report"] == "Reports\\%(name)s.htm"
+
+
+# --- launch-abort retry: exit 10053 (WSAECONNABORTED) at startup --------------
+
+
+def _run_with_exit_codes(
+    monkeypatch, codes, *, elapsed_seconds=3, report_path=None, report_on_attempt=None
+):
+    """Stub subprocess.run to return `codes` in order, one launch per call.
+
+    Each launch advances the stubbed clock by `elapsed_seconds`, so the abort
+    window can be crossed without real waiting. `report_on_attempt` writes the
+    report file when that 1-based attempt returns, standing in for a run that
+    got far enough to write output.
+    """
+    real_time = time.time
+    offset = {"value": 0.0}
+    calls = {"n": 0}
+
+    def _clock():
+        return real_time() + offset["value"]
+
+    def _fake_run(*args, **kwargs):
+        i = calls["n"]
+        calls["n"] += 1
+        offset["value"] += elapsed_seconds
+        if report_path is not None and report_on_attempt == i + 1:
+            Path(report_path).write_text("<html>report</html>")
+        code = codes[i] if i < len(codes) else codes[-1]
+        return type("Result", (), {"returncode": code})()
+
+    monkeypatch.setattr(
+        handler, "time", SimpleNamespace(time=_clock, sleep=lambda _s: None)
+    )
+    monkeypatch.setattr(handler.subprocess, "run", _fake_run)
+    monkeypatch.setattr(handler, "_terminal_process_alive", lambda: False)
+    return calls
+
+
+def test_launch_abort_detected_only_for_fast_nonzero_without_report(
+    tmp_path, monkeypatch
+):
+    report = tmp_path / "report.htm"
+    now = {"t": 1000.0}
+    monkeypatch.setattr(
+        handler, "time", SimpleNamespace(time=lambda: now["t"], sleep=lambda _s: None)
+    )
+    monkeypatch.setattr(handler, "LAUNCH_ABORT_MAX_SECONDS", 25)
+    start = 1000.0
+    result = lambda code: type("R", (), {"returncode": code})()  # noqa: E731
+
+    assert handler._looks_like_launch_abort(result(10053), start, [str(report)]) is True
+    assert handler._looks_like_launch_abort(result(0), start, [str(report)]) is False
+
+    now["t"] = start + 60
+    assert handler._looks_like_launch_abort(result(10053), start, [str(report)]) is False
+
+    now["t"] = start
+    report.write_text("x")
+    assert handler._looks_like_launch_abort(result(10053), start, [str(report)]) is False
+
+
+def test_launch_abort_relaunches_then_fails_with_the_exit_code(client, monkeypatch):
+    """A terminal that aborts at startup on every attempt is relaunched the full
+    number of times, then failed with the exit code rather than silently."""
+    job_id = _submit(client)
+    calls = _run_with_exit_codes(monkeypatch, [10053], elapsed_seconds=3)
+
+    handler._execute_job(job_id)
+
+    assert calls["n"] == handler.LAUNCH_ABORT_MAX_ATTEMPTS
+    job = jobs.load_job(job_id)
+    assert job["status"] == "failed"
+    assert job["exitCode"] == 10053
+
+
+def test_launch_abort_recovers_on_relaunch(client, monkeypatch):
+    """The transient case: the first launch aborts, the relaunch runs the tester
+    and writes the report, and the job completes instead of being failed."""
+    job_id = _submit(client)
+    report = jobs.load_job(job_id)["reportPath"]
+    calls = _run_with_exit_codes(
+        monkeypatch,
+        [10053, 0],
+        elapsed_seconds=3,
+        report_path=report,
+        report_on_attempt=2,
+    )
+
+    handler._execute_job(job_id)
+
+    assert calls["n"] == 2
+    assert jobs.load_job(job_id)["status"] == "completed"
+
+
+def test_slow_nonzero_exit_is_not_relaunched(client, monkeypatch):
+    """A non-zero exit after the abort window ran long enough to be a real
+    failure; it must fail immediately, not be retried."""
+    job_id = _submit(client)
+    calls = _run_with_exit_codes(
+        monkeypatch, [1], elapsed_seconds=handler.LAUNCH_ABORT_MAX_SECONDS + 5
+    )
+
+    handler._execute_job(job_id)
+
+    assert calls["n"] == 1
+    assert jobs.load_job(job_id)["status"] == "failed"
