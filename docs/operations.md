@@ -265,6 +265,12 @@ Every API process imports numpy (the MetaTrader5 SDK needs it), and numpy's Open
 
 Each worker logs one `BLAS_RUNTIME` JSON record at startup with its PID, those three environment values and the thread count queried from every loaded OpenBLAS library. It observes the runtime without changing its limits. Inspection failure logs a warning and leaves the trading API running; the live regression test treats that warning as a failed verification.
 
+## Many terminals per VM: the desktop heap
+
+Every window, console and terminal in the VM's logged-on session takes memory from that session's desktop heap. Windows sizes it with the second field of `SharedSection=1024,20480,768` (KB) in `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems\Windows`: 20 MB by default. Each API process runs in its own console and each terminal and tester agent opens windows of its own, so a VM running 20 or more terminals runs out. Windows logs `Win32k` event 243, `A desktop heap allocation failed` (in `windows-events.log`), and every terminal launched after that exits about a second after `started for` with code 10053, before it signs in to the broker or starts the tester. Backtests fail with `terminal64.exe exited with code 10053` in bursts that last as long as the VM stays that full.
+
+`start.bat` runs `scripts/desktop_heap.py` at every boot. It raises the second field to 65536 (64 MB) and leaves the rest of the value as it was. The new size only applies from the next boot, so `start.bat` reboots once through `reboot.bat`; `start.log` shows `desktop heap raised to 65536 KB; reboot to apply` and, on the next boot, `desktop heap ok (>= 65536 KB)`. A marker in `%ProgramData%` stops a second reboot if the value does not survive the first. A value that is already 64 MB or more is left alone.
+
 ## VM recreate and the wickworks sidecar
 
 The wickworks TA sidecar shares a VM's network namespace via compose

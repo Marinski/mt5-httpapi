@@ -35,6 +35,7 @@ COPY scripts/config_helper.py \
     scripts/install.bat \
     scripts/check_health.py \
     scripts/api_runner.bat \
+    scripts/desktop_heap.py \
     scripts/reboot_guard.py \
     scripts/healthcheck.sh \
     scripts/rotate-logs.sh \
