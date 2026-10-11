@@ -173,16 +173,27 @@ if "!PIP_CHANGED!"=="1" (
     exit /b 0
 )
 
-:: -- Desktop heap (opt-in: desktop_heap_kb in config.yaml) ----------------
-:: Every window, console and terminal in this session draws on the session's
-:: desktop heap. At the Windows default (20 MB) a VM running 20+ terminals
-:: runs out: Win32k event 243, then every new terminal aborts at startup with
-:: exit 10053. With desktop_heap_kb set, desktop_heap.py raises the heap to that
-:: size (saving the original value first); `desktop_heap_kb: restore` writes the
-:: original back. Unset leaves Windows alone. A change only applies from the
-:: next boot, so reboot once. The marker (VM-local, not on Shared) stops a
-:: reboot loop if the new value does not survive the reboot.
-set "HEAP_MARKER=%ProgramData%\mt5-httpapi-desktop-heap.reboot"
+:: -- VM memory settings ---------------------------------------------------
+:: Two settings that only apply from the next boot, so set them here and
+:: reboot once if either changed:
+::  - Desktop heap (opt-in: desktop_heap_kb in config.yaml). Every window,
+::    console and terminal in this session draws on the session's desktop
+::    heap. At the Windows default (20 MB) a VM running 20+ terminals runs
+::    out: Win32k event 243, then every new terminal aborts at startup with
+::    exit 10053. desktop_heap.py raises the heap to the configured size
+::    (saving the original first); `desktop_heap_kb: restore` writes the
+::    original back. Unset leaves Windows alone.
+::  - Pagefile. The testers commit far more memory than they touch, so a busy
+::    VM reaches its commit limit (RAM + pagefile) with RAM to spare: "no
+::    memory for ticks generating" (exit 100013), and at worst Windows kills
+::    DWM and the VM powers off. pagefile.py sets a fixed 40 GB C: pagefile.
+:: A change only applies from the next boot, so reboot once. The marker
+:: (VM-local, not on Shared) stops a reboot loop if a value does not survive.
+set "TUNE_MARKER=%ProgramData%\mt5-httpapi-vm-tuning.reboot"
+set "TUNE_REBOOT=0"
+set "TUNE_FAILED=0"
+
+:: Desktop heap (opt-in)
 :: Tempfile read, not for /f ('command'): with python.exe and the script path
 :: both quoted, cmd's quote-stripping mangles the subshell command and it
 :: silently outputs nothing, which here would mean the raise never runs.
@@ -190,27 +201,36 @@ set "HEAP_KB="
 "%PYDIR%\python.exe" "%SCRIPTS%\config_helper.py" desktop_heap_kb > "%TEMP%\mt5_heap_kb.txt" 2>nul
 for /f "usebackq delims=" %%H in ("%TEMP%\mt5_heap_kb.txt") do set "HEAP_KB=%%H"
 del "%TEMP%\mt5_heap_kb.txt" 2>nul
-set "HEAP_EC=0"
+set "TUNE_EC=0"
 if defined HEAP_KB (
     if /i "!HEAP_KB!"=="restore" (
         "%PYDIR%\python.exe" "%SCRIPTS%\desktop_heap.py" --restore >> "%START_LOG%" 2>&1
     ) else (
         "%PYDIR%\python.exe" "%SCRIPTS%\desktop_heap.py" --kb "!HEAP_KB!" >> "%START_LOG%" 2>&1
     )
-    set "HEAP_EC=!errorlevel!"
+    set "TUNE_EC=!errorlevel!"
+    if "!TUNE_EC!"=="3" set "TUNE_REBOOT=1"
+    if not "!TUNE_EC!"=="0" if not "!TUNE_EC!"=="3" set "TUNE_FAILED=1"
 )
-if "!HEAP_EC!"=="3" (
-    if exist "!HEAP_MARKER!" (
-        call :log "%START_LOG%" "WARNING: desktop heap was changed before the last reboot and is off again; not rebooting twice"
+
+:: Pagefile (always)
+"%PYDIR%\python.exe" "%SCRIPTS%\pagefile.py" >> "%START_LOG%" 2>&1
+set "TUNE_EC=!errorlevel!"
+if "!TUNE_EC!"=="3" set "TUNE_REBOOT=1"
+if not "!TUNE_EC!"=="0" if not "!TUNE_EC!"=="3" set "TUNE_FAILED=1"
+
+if "!TUNE_FAILED!"=="1" call :log "%START_LOG%" "WARNING: a VM memory setting check failed, see above; continuing"
+if "!TUNE_REBOOT!"=="1" (
+    if exist "!TUNE_MARKER!" (
+        call :log "%START_LOG%" "WARNING: VM memory settings were changed before the last reboot and are off again; not rebooting twice"
     ) else (
-        echo desktop-heap> "!HEAP_MARKER!"
-        call :log "%START_LOG%" "desktop heap changed, rebooting so it takes effect"
-        call "%SCRIPTS%\reboot.bat" desktop-heap
+        echo vm-tuning> "!TUNE_MARKER!"
+        call :log "%START_LOG%" "VM memory settings changed, rebooting so they take effect"
+        call "%SCRIPTS%\reboot.bat" vm-tuning
         exit /b 0
     )
 ) else (
-    del "!HEAP_MARKER!" 2>nul
-    if not "!HEAP_EC!"=="0" call :log "%START_LOG%" "WARNING: desktop heap step failed (exit !HEAP_EC!), continuing"
+    del "!TUNE_MARKER!" 2>nul
 )
 
 :: -- Start Windows event log tailer (background) ----------------
