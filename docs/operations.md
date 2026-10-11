@@ -248,6 +248,10 @@ Knock-on effects you'll observe:
 
 If you see persistent 503/504 from a single terminal, check `data/shared/logs/api-<broker>-<account>.log` for `TIMEOUT` and `WEDGED` lines. The first `TIMEOUT` names the call that got stuck; `WEDGED` lines are later requests refused because of it.
 
+## Memory per API process
+
+Every API process imports numpy (the MetaTrader5 SDK needs it), and numpy's OpenBLAS starts a worker and sets aside a buffer for every CPU it sees. On a VM with many CPUs and many terminals that adds up before anything runs: ~780 MB committed per idle API process on a 40-vCPU VM, 41 GB for 53 terminals. Commit is what Windows can back with RAM plus pagefile, and tester agents need it too: when it runs out, tests fail with `no memory for ticks generating` and Windows can kill system processes. The API never does heavy linear algebra, so `api_runner.bat` runs it with `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` set to 1, which brought those 53 processes to 3.2 GB.
+
 ## VM recreate and the wickworks sidecar
 
 The wickworks TA sidecar shares a VM's network namespace via compose

@@ -17,6 +17,14 @@ set "LOGDIR=%SHARED%\logs"
 set "AR_LOG=%LOGDIR%\api-!AR_BROKER!-!AR_ACCOUNT!-!AR_INSTANCE!.log"
 set "FULL_LOG=%LOGDIR%\full.log"
 set "PYDIR=C:\Program Files\Python312"
+:: One thread for numpy's BLAS. Unset, OpenBLAS starts a worker and sets
+:: aside a buffer for every CPU of the VM at `import numpy`, in every API
+:: process: ~780 MB committed per idle process on a 40-vCPU VM, 41 GB for 53
+:: terminals, against a commit limit that tester agents also need. The API
+:: never does heavy linear algebra, so one thread costs nothing.
+set "OPENBLAS_NUM_THREADS=1"
+set "OMP_NUM_THREADS=1"
+set "MKL_NUM_THREADS=1"
 
 mkdir "%LOGDIR%" 2>nul
 
