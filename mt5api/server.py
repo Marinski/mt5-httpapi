@@ -37,15 +37,26 @@ def _client_ip():
     return request.remote_addr or "-"
 
 
+#: Paths that write no request log lines. The container healthcheck probes
+#: every port on the VM at the same moment, every 30 s, and each log line takes
+#: full.log's cross-process lock on the Shared folder. Logging those probes
+#: queued ~90 writes on one lock per check: an idle /ping took 1.1 s on a
+#: 45-terminal VM and 5-10 s under load, which the healthcheck counts as a hung
+#: port, and the watchdog then recreated a VM that was only busy.
+UNLOGGED_PATHS = frozenset({"/ping"})
+
+
 @app.before_request
 def _start_request():
     g.req_start = time.monotonic()
     g.req_id = os.urandom(4).hex()
-    log.info(
-        "%s -> %s %s ip=%s ua=%r",
-        g.req_id, request.method, request.full_path,
-        _client_ip(), request.headers.get("User-Agent", "-"),
-    )
+    g.req_logged = request.path not in UNLOGGED_PATHS
+    if g.req_logged:
+        log.info(
+            "%s -> %s %s ip=%s ua=%r",
+            g.req_id, request.method, request.full_path,
+            _client_ip(), request.headers.get("User-Agent", "-"),
+        )
     refusal = _authorize()
     if refusal is not None:
         return refusal
@@ -164,6 +175,8 @@ def _is_file_upload():
 
 @app.after_request
 def _end_request(response):
+    if not getattr(g, "req_logged", True):
+        return response
     start = getattr(g, "req_start", None)
     elapsed_ms = (time.monotonic() - start) * 1000 if start else -1
     req_id = getattr(g, "req_id", "--------")

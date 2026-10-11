@@ -11,6 +11,7 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 ### Fixed
 
 - **API processes no longer commit ~780 MB each for numpy's thread pool.** At `import numpy`, OpenBLAS sets aside a buffer for every CPU of the VM in every API process: 41 GB of commit for 53 terminals on a 40-vCPU VM, before a single backtest ran, and tester agents then ran out of it. `api_runner.bat` now starts the API with `OPENBLAS_NUM_THREADS=1` (and `OMP_NUM_THREADS`, `MKL_NUM_THREADS`), which brought those 53 processes to 3.2 GB. See [docs/operations.md](docs/operations.md#memory-per-api-process).
+- **A busy VM is no longer reported hung because of its own healthcheck.** The healthcheck probes every port at once, and each `/ping` wrote two lines through `full.log`'s lock on the Shared folder, so an idle `/ping` took ~1 s on a 45-terminal VM and 5-10 s under load; past the 3 s probe for 10 checks a port counted as hung and the watchdog recreated the VM with its backtests. `/ping` no longer writes request log lines. The log lock is also released only by the write that took it: after a timed-out acquire it belonged to another process, and removing it let a third writer in. See [docs/operations.md](docs/operations.md#busy-is-not-dead--and-hung-is-not-busy).
 
 ## [v4.28.1]: 2026-10-10
 
