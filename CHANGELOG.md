@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **A busy VM is no longer reported hung because of its own healthcheck.** The healthcheck probes every port at once, and each `/ping` wrote two lines through `full.log`'s lock on the Shared folder, so an idle `/ping` took ~1 s on a 45-terminal VM and 5-10 s under load; past the 3 s probe for 10 checks a port counted as hung and the watchdog recreated the VM with its backtests. `/ping` no longer writes request log lines. The log lock is also released only by the write that took it: after a timed-out acquire it belonged to another process, and removing it let a third writer in. See [docs/operations.md](docs/operations.md#busy-is-not-dead--and-hung-is-not-busy).
+
 ## [v4.28.1]: 2026-10-10
 
 ### Changed

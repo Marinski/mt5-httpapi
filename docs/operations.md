@@ -443,6 +443,8 @@ cheaper first response.
 This complements the in-VM `MT5AutoReboot` scheduled task (see [Scheduled reboots](#scheduled-reboots)); operators who disable that
 task still get crash recovery from the watchdog.
 
+`/ping` writes no request log lines, so a probe never waits on `full.log`. The healthcheck probes every port of the VM at the same moment, and every log line takes that file's cross-process lock on the Shared folder: logging the probes queued about 90 writes on one lock per check, an idle `/ping` took 1.1 s on a 45-terminal VM and 5-10 s under load, and ports that were only busy crossed the hung bound. Every other request still logs its `->` and `<-` lines.
+
 ### Scheduled reboots
 
 The `MT5AutoReboot` task in the VM runs `scripts/reboot.bat scheduled` every `reboot_interval` minutes. Before rebooting, `scripts/reboot_guard.py` asks every API on the VM through `GET /busy` whether it is doing something a reboot would break:

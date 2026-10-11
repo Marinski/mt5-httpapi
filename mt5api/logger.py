@@ -16,12 +16,17 @@ class _LockedFileHandler(logging.FileHandler):
         super().__init__(filename, **kwargs)
 
     def _acquire(self):
+        """Take the lock; False if it stayed held for the whole ~2 s window.
+
+        The write then goes ahead unlocked rather than drop the line.
+        """
         for _ in range(200):
             try:
                 os.mkdir(self._lock_dir)
-                return
+                return True
             except OSError:
                 time.sleep(0.01)
+        return False
 
     def _release(self):
         try:
@@ -32,12 +37,16 @@ class _LockedFileHandler(logging.FileHandler):
     def emit(self, record):
         try:
             msg = self.format(record) + self.terminator
-            self._acquire()
+            # Release only a lock this write took: after a timed-out acquire
+            # the lock belongs to another process, and removing it let a third
+            # writer in alongside that one.
+            locked = self._acquire()
             try:
                 self.stream.write(msg)
                 self.stream.flush()
             finally:
-                self._release()
+                if locked:
+                    self._release()
         except Exception:
             self.handleError(record)
 
