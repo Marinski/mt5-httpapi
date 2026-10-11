@@ -114,6 +114,7 @@ test-live:
 		-e MT5_LIVE_TIMEFRAME -e MT5_LIVE_ALLOW_REAL -e MT5_LIVE_WEBREQUEST \
 		-e MT5_LIVE_RESTART -e MT5_LIVE_WEBREQUEST_URL \
 		-e MT5_LIVE_COMPILE_WORK_DEPTH -e MT5_LIVE_COMPILE_INCLUDE_DEPTH \
+		$(if $(MT5_LIVE_LOG_DIR),-v "$(MT5_LIVE_LOG_DIR):/live-logs:ro" -e MT5_LIVE_LOG_DIR=/live-logs) \
 		$(if $(wildcard $(LIVE_ENV_FILE)),-v "$$PWD/$(LIVE_ENV_FILE):/app/$(LIVE_ENV_FILE):ro") \
 		$$TAG pytest -v -p no:cacheprovider $(LIVE_TESTS) $(LIVE_ARGS); \
 	STATUS=$$?; docker rmi -f $$TAG >/dev/null; exit $$STATUS)

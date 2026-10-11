@@ -6,7 +6,11 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
-## [Unreleased]
+## [v4.28.2]: 2026-10-11
+
+### Added
+
+- **Read-only live regression checks cover the deployed workers.** The health module checks concurrent `/ping` deadlines across configured terminals, bearer authentication, ping log suppression and continued logging on other routes. Each worker now records its actual OpenBLAS thread count at startup, so the live suite verifies native limits rather than only the launcher settings. See [docs/operations.md](docs/operations.md#testing-a-running-stack).
 
 ### Fixed
 

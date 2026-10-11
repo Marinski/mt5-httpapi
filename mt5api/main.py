@@ -10,6 +10,7 @@ from waitress import serve
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from mt5api.backtest import jobs as backtest_jobs
+from mt5api.blas_runtime import log_snapshot
 from mt5api.config import ACCOUNT, API_TOKEN, BROKER, HOST, INSTANCE, MODE, PORT
 from mt5api.handlers import compile as compile_handler
 from mt5api.logger import log
@@ -197,6 +198,7 @@ def _handle_signal(sig, _frame):
 
 
 def main():
+    log_snapshot()
     log.info(
         "Starting — broker=%s account=%s instance=%s port=%d mode=%s",
         BROKER,

@@ -54,6 +54,17 @@ make test-live LIVE_TESTS="tests/live/test_rest.py tests/live/test_mcp.py tests/
 
 `LIVE_ARGS` passes extra pytest arguments, for example `LIVE_ARGS="-k chartctl"`.
 
+For a read-only regression check after deploying, run the health module on the Docker host with access to the deployment's logs:
+
+```bash
+make test-live LIVE_TESTS=tests/live/test_health_regressions.py \
+  MT5_LIVE_LOG_DIR="$PWD/data/shared/logs" LIVE_ARGS="-s"
+```
+
+Use the same `MT5_LIVE_URL`, token, broker and account settings as above. This module sends five concurrent `/ping` probes per configured terminal, requires each to finish inside the healthcheck's three-second deadline, checks missing and incorrect bearer tokens, and verifies that `/ping` leaves no request log lines while `/busy` still logs both directions. Docker mounts `MT5_LIVE_LOG_DIR` read-only. Pass it to `make` or export it in the shell; putting this mount setting only in `tests/live/.env` does not configure Docker. Without log access, the two log-dependent tests explicitly skip. Authentication checks skip only when the target intentionally disables auth. These tests place no orders and do not restart terminals or hold the production log lock.
+
+The same module reads the latest process's `BLAS_RUNTIME` startup record for every configured worker. It checks both the three environment limits and OpenBLAS's native thread-count getter. An absent, failed or stale record fails the test; it does not treat an environment variable as proof of the native limit. Deploy and restart API workers before testing this record on an older installation.
+
 `make test-unit` is the offline suite — it runs inside a throwaway image with
 the MT5 SDK stubbed, so it needs nothing but docker and finishes in seconds.
 
@@ -251,6 +262,8 @@ If you see persistent 503/504 from a single terminal, check `data/shared/logs/ap
 ## Memory per API process
 
 Every API process imports numpy (the MetaTrader5 SDK needs it), and numpy's OpenBLAS starts a worker and sets aside a buffer for every CPU it sees. On a VM with many CPUs and many terminals that adds up before anything runs: ~780 MB committed per idle API process on a 40-vCPU VM, 41 GB for 53 terminals. Commit is what Windows can back with RAM plus pagefile, and tester agents need it too: when it runs out, tests fail with `no memory for ticks generating` and Windows can kill system processes. The API never does heavy linear algebra, so `api_runner.bat` runs it with `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` set to 1, which brought those 53 processes to 3.2 GB.
+
+Each worker logs one `BLAS_RUNTIME` JSON record at startup with its PID, those three environment values and the thread count queried from every loaded OpenBLAS library. It observes the runtime without changing its limits. Inspection failure logs a warning and leaves the trading API running; the live regression test treats that warning as a failed verification.
 
 ## VM recreate and the wickworks sidecar
 
