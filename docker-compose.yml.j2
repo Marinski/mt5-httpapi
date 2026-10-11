@@ -8,6 +8,10 @@ services:
       RAM_CHECK: "N"
       CPU_CORES: "{{ vm.cpu_cores }}"
       DISK_SIZE: "{{ vm.disk_size }}"
+{% if vm.disk2_storage %}
+      # Second disk, for the pagefile (scripts/pagefile-disk.ps1, pagefile.py).
+      DISK2_SIZE: "{{ vm.disk2_size | default('128G') }}"
+{% endif %}
     devices:
       - /dev/kvm
     cap_add:
@@ -24,6 +28,9 @@ services:
     volumes:
 {% if vm.storage %}
       - {{ vm.storage }}:/storage
+{% endif %}
+{% if vm.disk2_storage %}
+      - {{ vm.disk2_storage }}:/storage2
 {% endif %}
       - ./data/oem:/oem
 {% if vm.log_dir %}

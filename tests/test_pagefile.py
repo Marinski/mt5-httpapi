@@ -1,4 +1,4 @@
-"""scripts/pagefile.py: a fixed pagefile big enough for the testers' commit."""
+"""scripts/pagefile.py: fixed pagefiles big enough for the testers' commit."""
 from __future__ import annotations
 
 import importlib.util
@@ -12,7 +12,15 @@ _SPEC = importlib.util.spec_from_file_location(
 pagefile = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(pagefile)
 
-WANTED = [r"C:\pagefile.sys 40960 40960"]
+
+def test_the_layouts():
+    assert pagefile.wanted_paging_files([], pagefile.WITH_DISK) == [
+        r"C:\pagefile.sys 4096 4096",
+        r"P:\pagefile.sys 122880 122880",
+    ]
+    assert pagefile.wanted_paging_files([], pagefile.WITHOUT_DISK) == [
+        r"C:\pagefile.sys 40960 40960"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -20,23 +28,25 @@ WANTED = [r"C:\pagefile.sys 40960 40960"]
     [
         [r"?:\pagefile.sys"],  # Windows manages it (the default)
         [r"C:\pagefile.sys 0 0"],  # system-managed size on C:
-        [r"C:\pagefile.sys 16384 24576"],  # too small
-        [r"C:\pagefile.sys 40960 30000"],  # max below target
-        [],  # no pagefile
+        [r"C:\pagefile.sys 40960 40960"],  # the no-disk layout: C: must shrink
+        [r"P:\pagefile.sys 122880 122880"],  # no C: file
+        [r"C:\pagefile.sys 4096 4096", r"P:\pagefile.sys 65536 65536"],
+        [r"C:\pagefile.sys 4096 4096", r"P:\pagefile.sys 122880 122880", "junk"],
+        [],
         None,
     ],
 )
-def test_anything_short_of_a_fixed_target_file_is_replaced(current):
-    assert pagefile.wanted_paging_files(current, 40960) == WANTED
+def test_anything_but_the_exact_disk_layout_is_rewritten(current):
+    assert pagefile.wanted_paging_files(current, pagefile.WITH_DISK) is not None
 
 
 @pytest.mark.parametrize(
-    "current",
+    "current, layout",
     [
-        [r"C:\pagefile.sys 40960 40960"],
-        [r"c:\PAGEFILE.SYS 65536 65536"],
-        [r"C:\pagefile.sys 40960 40960", r"D:\pagefile.sys 1024 1024"],
+        ([r"C:\pagefile.sys 4096 4096", r"P:\pagefile.sys 122880 122880"], "WITH_DISK"),
+        ([r"p:\PAGEFILE.SYS 122880 122880", r"c:\pagefile.sys 4096 4096"], "WITH_DISK"),
+        ([r"C:\pagefile.sys 40960 40960"], "WITHOUT_DISK"),
     ],
 )
-def test_a_large_enough_fixed_file_is_left_alone(current):
-    assert pagefile.wanted_paging_files(current, 40960) is None
+def test_the_exact_layout_is_left_alone(current, layout):
+    assert pagefile.wanted_paging_files(current, getattr(pagefile, layout)) is None

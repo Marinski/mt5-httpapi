@@ -9,8 +9,10 @@ sat at 85.17 / 90.70 GB with 34 GB of RAM still free; tests failed with
 stopped committing ~780 MB each, both VMs powered off when the limit ran out.
 
 Pages that are committed but never touched are never written, so a larger
-pagefile mostly raises the limit. The VM disks are sparse images on the
-host's root SSD, which bounds how large it may safely be.
+pagefile mostly raises the limit. The system disk is a sparse image on the
+host's root SSD, which bounds how large a C: pagefile may safely be, so with
+a pagefile disk attached (P:, see pagefile-disk.ps1) the large file goes
+there and C: keeps a small one.
 
 Run by start.bat at every boot. Exit codes:
     0  already at least the target, nothing changed
@@ -19,34 +21,44 @@ Run by start.bat at every boot. Exit codes:
 """
 from __future__ import annotations
 
+import os
 import sys
 
 KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
 VALUE = "PagingFiles"
-PAGEFILE = r"C:\pagefile.sys"
-#: 40 GB: commit limit ~112 GB with the VMs' 72 GB of RAM.
-TARGET_MB = 40960
+#: With the pagefile disk (P:, an image on the host's /data drive, see
+#: pagefile-disk.ps1): a small C: file for crash dumps and 120 GB on P:, a
+#: commit limit of ~196 GB with 72 GB of RAM, and the root SSD left alone.
+WITH_DISK = [(r"C:\pagefile.sys", 4096), (r"P:\pagefile.sys", 122880)]
+#: Without it: 40 GB on C:, a commit limit of ~112 GB, capped because the
+#: system disk is a sparse image on the host's root SSD.
+WITHOUT_DISK = [(r"C:\pagefile.sys", 40960)]
 
 
-def wanted_paging_files(current, target_mb=TARGET_MB):
-    """The PagingFiles entries to write, or None when ``current`` is enough.
+def _parse(entry):
+    parts = entry.split()
+    if len(parts) != 3:
+        return None
+    try:
+        return parts[0].lower(), int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
 
-    Enough means a fixed C: pagefile whose initial and maximum size are both
-    at least ``target_mb``. Anything else - Windows managing the size
-    (``?:\\pagefile.sys``, or ``0 0``), a smaller file, no pagefile at all -
-    is replaced with one fixed ``target_mb`` file on C:.
+
+def wanted_paging_files(current, layout):
+    """The PagingFiles entries to write, or None when ``current`` is ``layout``.
+
+    ``layout`` is ``[(path, megabytes), ...]``, each a fixed-size file. The
+    current value must be exactly that set: Windows managing the size
+    (``?:\\pagefile.sys``, ``0 0``), a different size or an extra file are
+    all rewritten, so moving the pagefile off C: also shrinks the C: file.
     """
-    for entry in current or []:
-        parts = entry.split()
-        if len(parts) != 3 or parts[0].lower() != PAGEFILE.lower():
-            continue
-        try:
-            initial, maximum = int(parts[1]), int(parts[2])
-        except ValueError:
-            continue
-        if initial >= target_mb and maximum >= target_mb:
-            return None
-    return [f"{PAGEFILE} {target_mb} {target_mb}"]
+    have = {p for p in (_parse(e) for e in (current or [])) if p is not None}
+    if len(have) == len(current or []) and have == {
+        (path.lower(), mb, mb) for path, mb in layout
+    }:
+        return None
+    return [f"{path} {mb} {mb}" for path, mb in layout]
 
 
 def main():
@@ -65,19 +77,20 @@ def main():
                 current = []
             if isinstance(current, str):
                 current = [current]
-            wanted = wanted_paging_files(current)
+            layout = WITH_DISK if os.path.isdir("P:\\") else WITHOUT_DISK
+            wanted = wanted_paging_files(current, layout)
             if wanted is None:
-                print(f"pagefile ok (>= {TARGET_MB} MB)")
+                print(f"pagefile ok ({', '.join(wanted_paging_files([], layout))})")
                 return 0
             winreg.SetValueEx(key, VALUE, 0, winreg.REG_MULTI_SZ, wanted)
             written, _ = winreg.QueryValueEx(key, VALUE)
     except OSError as exc:
         print(f"pagefile check failed: {exc}")
         return 1
-    if wanted_paging_files(written) is not None:
+    if wanted_paging_files(written, layout) is not None:
         print("pagefile write did not stick")
         return 1
-    print(f"pagefile set to {TARGET_MB} MB fixed (was {current!r}); reboot to apply")
+    print(f"pagefile set to {wanted!r} (was {current!r}); reboot to apply")
     return 3
 
 

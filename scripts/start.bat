@@ -186,12 +186,18 @@ if "!PIP_CHANGED!"=="1" (
 ::  - Pagefile. The testers commit far more memory than they touch, so a busy
 ::    VM reaches its commit limit (RAM + pagefile) with RAM to spare: "no
 ::    memory for ticks generating" (exit 100013), and at worst Windows kills
-::    DWM and the VM powers off. pagefile.py sets a fixed 40 GB C: pagefile.
+::    DWM and the VM powers off. pagefile-disk.ps1 formats an attached data
+::    disk as P: first, then pagefile.py wants 4 GB on C: plus 120 GB on P:
+::    (~196 GB with 72 GB of RAM), or 40 GB on C: without the disk.
 :: A change only applies from the next boot, so reboot once. The marker
 :: (VM-local, not on Shared) stops a reboot loop if a value does not survive.
 set "TUNE_MARKER=%ProgramData%\mt5-httpapi-vm-tuning.reboot"
 set "TUNE_REBOOT=0"
 set "TUNE_FAILED=0"
+
+:: Pagefile disk (P:), prepared before the pagefile step reads its layout.
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPTS%\pagefile-disk.ps1" >> "%START_LOG%" 2>&1
+if !errorlevel! neq 0 set "TUNE_FAILED=1"
 
 :: Desktop heap (opt-in)
 :: Tempfile read, not for /f ('command'): with python.exe and the script path

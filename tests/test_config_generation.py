@@ -591,3 +591,33 @@ def test_desktop_heap_kb_is_opt_in(tmp_path, monkeypatch, capsys, value, printed
     helper.main()
 
     assert capsys.readouterr().out == printed + "\n"
+
+
+def test_generate_compose_attaches_a_pagefile_disk_only_where_asked(tmp_path, monkeypatch):
+    """`disk2_storage` gives that VM dockur's second disk at /storage2 (sized by
+    `disk2_size`, default 128G) for its pagefile; a VM without it gets none."""
+    helper = _load_config_helper_module()
+    config_path = _write_config(
+        tmp_path, [{"broker": "acme", "account": "main", "port": 5001}]
+    )
+    vms = [dict(vm) for vm in TWO_VMS]
+    vms[1]["disk2_storage"] = "/data/mt5-pagefile/bulk"
+    vms[1]["disk2_size"] = "130G"
+    vms_path = _write_vms(tmp_path, vms)
+    outpath = tmp_path / "docker-compose.yml"
+    template_path = Path(__file__).resolve().parents[1] / "docker-compose.yml.j2"
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(helper, "VMS_PATH", str(vms_path))
+    monkeypatch.setattr(helper, "COMPOSE_TEMPLATE_PATH", str(template_path))
+    monkeypatch.setattr(helper, "COMPOSE_OUTPUT_PATH", str(outpath))
+    monkeypatch.setattr("sys.argv", ["config_helper.py", "generate_compose"])
+
+    helper.main()
+
+    services = yaml.safe_load(outpath.read_text(encoding="utf-8"))["services"]
+    with_disk = services[vms[1]["service"]]
+    without = services[vms[0]["service"]]
+    assert with_disk["environment"]["DISK2_SIZE"] == "130G"
+    assert "/data/mt5-pagefile/bulk:/storage2" in with_disk["volumes"]
+    assert "DISK2_SIZE" not in without["environment"]
+    assert not any(v.endswith(":/storage2") for v in without["volumes"])

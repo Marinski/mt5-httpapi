@@ -89,6 +89,7 @@ cp "${DIR}/scripts/check_health.py" "${DIR}/data/shared/scripts/check_health.py"
 cp "${DIR}/scripts/desktop_heap.py" "${DIR}/data/shared/scripts/desktop_heap.py"
 cp "${DIR}/scripts/config_helper.py" "${DIR}/data/shared/scripts/config_helper.py"
 cp "${DIR}/scripts/pagefile.py" "${DIR}/data/shared/scripts/pagefile.py"
+cp "${DIR}/scripts/pagefile-disk.ps1" "${DIR}/data/shared/scripts/pagefile-disk.ps1"
 cp "${DIR}/scripts/webrequest_allowlist_codec.py" "${DIR}/data/shared/scripts/webrequest_allowlist_codec.py"
 
 cp "${DIR}/scripts/event-log-tailer.ps1" "${DIR}/data/shared/scripts/event-log-tailer.ps1"
