@@ -149,8 +149,13 @@ if "!PIP_CHANGED!"=="1" (
 :: next boot, so reboot once. The marker (VM-local, not on Shared) stops a
 :: reboot loop if the new value does not survive the reboot.
 set "HEAP_MARKER=%ProgramData%\mt5-httpapi-desktop-heap.reboot"
+:: Tempfile read, not for /f ('command'): with python.exe and the script path
+:: both quoted, cmd's quote-stripping mangles the subshell command and it
+:: silently outputs nothing, which here would mean the raise never runs.
 set "HEAP_KB="
-for /f "delims=" %%H in ('"%PYDIR%\python.exe" "%SCRIPTS%\config_helper.py" desktop_heap_kb 2^>nul') do set "HEAP_KB=%%H"
+"%PYDIR%\python.exe" "%SCRIPTS%\config_helper.py" desktop_heap_kb > "%TEMP%\mt5_heap_kb.txt" 2>nul
+for /f "usebackq delims=" %%H in ("%TEMP%\mt5_heap_kb.txt") do set "HEAP_KB=%%H"
+del "%TEMP%\mt5_heap_kb.txt" 2>nul
 set "HEAP_EC=0"
 if defined HEAP_KB (
     if /i "!HEAP_KB!"=="restore" (
