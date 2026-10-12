@@ -56,7 +56,7 @@ _SHARED_SECTION_KEY = re.compile(r"SharedSection=", re.IGNORECASE)
 # commas, with optional whitespace around each comma (Microsoft KB 947246 shows
 # "1024, 20480,768"), ending at whitespace or the end of the value. Anything
 # else - "20480oops", "-20480", a trailing comma - does not match.
-_FIELDS = re.compile(r"\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?(?=\s|$)")
+_FIELDS = re.compile(r"\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?(?!\s*,)(?=\s|$)")
 
 
 def _interactive_field(windows_value):
@@ -115,6 +115,7 @@ def _parse_args(argv):
 def _save_original(value, value_type):
     """Keep the pre-change value. The first saved copy is never overwritten."""
     if os.path.exists(BACKUP_PATH):
+        _load_original()
         return
     os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
     tmp = BACKUP_PATH + ".tmp"
@@ -126,7 +127,11 @@ def _save_original(value, value_type):
 def _load_original():
     with open(BACKUP_PATH, encoding="utf-8") as handle:
         saved = json.load(handle)
-    if not isinstance(saved.get("value"), str) or not isinstance(saved.get("type"), int):
+    if (
+        not isinstance(saved, dict)
+        or not isinstance(saved.get("value"), str)
+        or type(saved.get("type")) is not int
+    ):
         raise TypeError(f"{BACKUP_PATH} does not hold a saved value and type")
     return saved["value"], saved["type"]
 
@@ -148,7 +153,7 @@ def _raise(winreg, target_kb):
             _save_original(value, value_type)
             winreg.SetValueEx(key, VALUE, 0, value_type, new_value)
             written, _ = winreg.QueryValueEx(key, VALUE)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         print(f"desktop heap check failed: {exc}")
         return 1
     try:

@@ -181,6 +181,9 @@ def test_main_does_not_write_or_request_reboot_when_already_large_enough(
         "SharedSection=1024,unknown,768",
         "SharedSection=1024,-20480,768",
         "SharedSection=1024,20480oops,768",
+        "SharedSection=1024,20480 ,768oops Windows=On",
+        "SharedSection=1024,20480 , Windows=On",
+        "SharedSection=1024,20480 ,768,999 Windows=On",
     ],
 )
 def test_main_refuses_malformed_heap_values_without_writing(
@@ -319,6 +322,27 @@ def test_no_write_when_the_original_cannot_be_saved(
     assert desktop_heap.main(ENABLE) == 1
 
     registry.SetValueEx.assert_not_called()
+
+
+@pytest.mark.parametrize("contents", ["{broken-json", "{}", "[]", "null"])
+def test_an_unusable_existing_backup_prevents_a_registry_write(
+    registry: SimpleNamespace,
+    backup_path: Path,
+    contents: str,
+) -> None:
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_text(contents, encoding="utf-8")
+    expected = DEFAULT.replace("20480", str(desktop_heap.TARGET_KB))
+    registry.QueryValueEx.side_effect = [
+        (DEFAULT, registry.REG_EXPAND_SZ),
+        (expected, registry.REG_EXPAND_SZ),
+    ]
+
+    result = desktop_heap.main(ENABLE)
+
+    registry.SetValueEx.assert_not_called()
+    assert result == 1
+    assert backup_path.read_text(encoding="utf-8") == contents
 
 
 def test_restore_writes_back_the_saved_value_and_type(

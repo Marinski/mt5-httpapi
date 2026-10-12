@@ -6,10 +6,11 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
-## [Unreleased]
+## [v4.29.0]: 2026-10-12
 
 ### Fixed
 
+- **Desktop-heap changes refuse malformed trailing fields and unusable rollback files.** A spaced comma could let an invalid third field or an extra fourth field be parsed as a valid two-field value, and an existing corrupt backup was accepted without reading it. The helper now rejects both before any registry write and leaves the saved original untouched. Regression tests cover these cases, including non-object JSON backups. See [docs/operations.md](docs/operations.md#many-terminals-per-vm-the-desktop-heap).
 - **Opt-in `desktop_heap_kb` stops terminals aborting at launch with exit code 10053 on a VM running many of them.** Every window, console and terminal in the VM's session takes memory from its desktop heap, which Windows caps at 20 MB. With 20 or more terminals running it ran out (`Win32k` event 243, `A desktop heap allocation failed`), and every terminal launched after that exited about a second after starting, before it signed in or started the tester, so backtests failed with `terminal64.exe exited with code 10053` in bursts. With `desktop_heap_kb` set in `config.yaml` (65536 suggested), `start.bat` raises the interactive desktop heap at boot through `scripts/desktop_heap.py` and reboots once for it to apply. The original registry value is saved on the VM first and `desktop_heap_kb: restore` puts it back; a value the helper cannot parse is refused without writing. Unset, nothing changes. Tested on Windows 11 Pro 22H2 (build 22621). See [docs/operations.md](docs/operations.md#many-terminals-per-vm-the-desktop-heap).
 
 ## [v4.28.2]: 2026-10-11
