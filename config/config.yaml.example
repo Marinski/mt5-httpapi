@@ -38,6 +38,15 @@ reboot_max_postpone: 360
 # terminal entry's `disable_terminal_mcp: false` keeps its own on.
 disable_terminal_mcp: false
 
+# Interactive desktop heap of each VM, in KB (opt-in; unset or 0 leaves Windows
+# alone). Every window, console and terminal in the VM's session draws on it,
+# and at the 20480 KB default a VM running ~20+ terminals runs out: Win32k
+# event 243, then every new terminal exits with code 10053 at startup. A number
+# (20481-131072, 65536 suggested) raises it at boot, after saving the original
+# value on the VM; `restore` writes that original back. Either takes effect
+# after one reboot, which start.bat does. See docs/operations.md.
+# desktop_heap_kb: 65536
+
 # Default Strategy Tester timeout. Accepts the same duration strings as
 # utc_offset ("6h", "30m", "3h30m"). POST /backtest can override per job.
 backtest_timeout: "6h"

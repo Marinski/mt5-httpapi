@@ -8,6 +8,7 @@ startup with exit code 10053.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,9 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 desktop_heap = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(desktop_heap)
+
+#: Arguments start.bat passes when config.yaml sets desktop_heap_kb.
+ENABLE = ["--kb", str(desktop_heap.TARGET_KB)]
 
 #: The value as Windows 11 22H2 ships it.
 DEFAULT = (
@@ -95,6 +99,13 @@ def test_custom_target_changes_only_values_below_it(delta: int) -> None:
     assert raised is None
 
 
+@pytest.fixture(autouse=True)
+def backup_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "ProgramData" / "mt5-httpapi" / "desktop-heap-original.json"
+    monkeypatch.setattr(desktop_heap, "BACKUP_PATH", str(path))
+    return path
+
+
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     key = MagicMock(name="registry_key")
@@ -125,7 +136,7 @@ def test_main_writes_verifies_and_closes_the_registry_key(
         (expected, registry.REG_EXPAND_SZ),
     ]
 
-    assert desktop_heap.main() == 3
+    assert desktop_heap.main(ENABLE) == 3
 
     registry.OpenKey.assert_called_once_with(
         registry.HKEY_LOCAL_MACHINE,
@@ -154,7 +165,7 @@ def test_main_does_not_write_or_request_reboot_when_already_large_enough(
     value = DEFAULT.replace("20480", str(current))
     registry.QueryValueEx.return_value = (value, registry.REG_EXPAND_SZ)
 
-    assert desktop_heap.main() == 0
+    assert desktop_heap.main(ENABLE) == 0
 
     registry.SetValueEx.assert_not_called()
     registry.QueryValueEx.assert_called_once_with(registry.key, desktop_heap.VALUE)
@@ -178,7 +189,7 @@ def test_main_refuses_malformed_heap_values_without_writing(
 ) -> None:
     registry.QueryValueEx.return_value = (value, registry.REG_EXPAND_SZ)
 
-    assert desktop_heap.main() == 1
+    assert desktop_heap.main(ENABLE) == 1
 
     registry.SetValueEx.assert_not_called()
     registry.context.__exit__.assert_called_once()
@@ -202,7 +213,7 @@ def test_registry_failures_never_report_success_or_request_reboot(
             failure,
         ]
 
-    assert desktop_heap.main() == 1
+    assert desktop_heap.main(ENABLE) == 1
 
     if stage in ("open", "read"):
         registry.SetValueEx.assert_not_called()
@@ -219,7 +230,7 @@ def test_readback_below_target_reports_failure_instead_of_reboot(
 ) -> None:
     registry.QueryValueEx.return_value = (DEFAULT, registry.REG_EXPAND_SZ)
 
-    assert desktop_heap.main() == 1
+    assert desktop_heap.main(ENABLE) == 1
 
     registry.SetValueEx.assert_called_once()
     assert registry.QueryValueEx.call_count == 2
@@ -233,9 +244,123 @@ def test_second_invocation_does_not_write_again(registry: SimpleNamespace) -> No
         (expected, registry.REG_EXPAND_SZ),
     ]
 
-    assert desktop_heap.main() == 3
-    assert desktop_heap.main() == 0
+    assert desktop_heap.main(ENABLE) == 3
+    assert desktop_heap.main(ENABLE) == 0
 
     registry.SetValueEx.assert_called_once()
     assert registry.QueryValueEx.call_count == 3
     assert registry.context.__exit__.call_count == 2
+
+
+# --- opt-in, argument validation, backup and restore ---------------------------
+
+
+def test_without_arguments_nothing_is_read_or_written(registry: SimpleNamespace) -> None:
+    """desktop_heap_kb unset: start.bat passes nothing, and Windows keeps its value."""
+    assert desktop_heap.main([]) == 0
+
+    registry.OpenKey.assert_not_called()
+    registry.SetValueEx.assert_not_called()
+
+
+@pytest.mark.parametrize("raw", ["20480", "1024", "0", "-1", "131073", "64MB", "65536.5", ""])
+def test_out_of_range_or_malformed_targets_are_refused(
+    registry: SimpleNamespace, raw: str
+) -> None:
+    assert desktop_heap.main(["--kb", raw]) == 1
+
+    registry.OpenKey.assert_not_called()
+    registry.SetValueEx.assert_not_called()
+
+
+def test_the_original_is_saved_before_the_first_write(
+    registry: SimpleNamespace, backup_path: Path
+) -> None:
+    expected = DEFAULT.replace("20480", str(desktop_heap.TARGET_KB))
+    saved_at_write: list[bool] = []
+    registry.SetValueEx.side_effect = lambda *a: saved_at_write.append(backup_path.exists())
+    registry.QueryValueEx.side_effect = [
+        (DEFAULT, registry.REG_EXPAND_SZ),
+        (expected, registry.REG_EXPAND_SZ),
+    ]
+
+    assert desktop_heap.main(ENABLE) == 3
+
+    assert saved_at_write == [True]
+    saved = json.loads(backup_path.read_text(encoding="utf-8"))
+    assert saved["value"] == DEFAULT
+    assert saved["type"] == registry.REG_EXPAND_SZ
+
+
+def test_a_later_raise_never_overwrites_the_saved_original(
+    registry: SimpleNamespace, backup_path: Path
+) -> None:
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_text(json.dumps({"value": "ORIGINAL", "type": 2}), encoding="utf-8")
+    expected = DEFAULT.replace("20480", "81920")
+    registry.QueryValueEx.side_effect = [
+        (DEFAULT, registry.REG_EXPAND_SZ),
+        (expected, registry.REG_EXPAND_SZ),
+    ]
+
+    assert desktop_heap.main(["--kb", "81920"]) == 3
+
+    assert json.loads(backup_path.read_text(encoding="utf-8"))["value"] == "ORIGINAL"
+
+
+def test_no_write_when_the_original_cannot_be_saved(
+    registry: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object) -> None:
+        raise OSError("ProgramData is read-only")
+
+    monkeypatch.setattr(desktop_heap, "_save_original", refuse)
+
+    assert desktop_heap.main(ENABLE) == 1
+
+    registry.SetValueEx.assert_not_called()
+
+
+def test_restore_writes_back_the_saved_value_and_type(
+    registry: SimpleNamespace, backup_path: Path
+) -> None:
+    raised = DEFAULT.replace("20480", str(desktop_heap.TARGET_KB))
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_text(
+        json.dumps({"value": DEFAULT, "type": registry.REG_EXPAND_SZ}), encoding="utf-8"
+    )
+    registry.QueryValueEx.side_effect = [
+        (raised, registry.REG_EXPAND_SZ),
+        (DEFAULT, registry.REG_EXPAND_SZ),
+    ]
+
+    assert desktop_heap.main(["--restore"]) == 3
+
+    registry.SetValueEx.assert_called_once_with(
+        registry.key, desktop_heap.VALUE, 0, registry.REG_EXPAND_SZ, DEFAULT
+    )
+
+
+def test_restore_is_a_no_op_once_back_at_the_original(
+    registry: SimpleNamespace, backup_path: Path
+) -> None:
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_text(json.dumps({"value": DEFAULT, "type": 2}), encoding="utf-8")
+    registry.QueryValueEx.return_value = (DEFAULT, registry.REG_EXPAND_SZ)
+
+    assert desktop_heap.main(["--restore"]) == 0
+
+    registry.SetValueEx.assert_not_called()
+
+
+def test_restore_without_a_saved_original_writes_nothing(registry: SimpleNamespace) -> None:
+    assert desktop_heap.main(["--restore"]) == 1
+
+    registry.OpenKey.assert_not_called()
+    registry.SetValueEx.assert_not_called()
+
+
+def test_kb_and_restore_are_mutually_exclusive(registry: SimpleNamespace) -> None:
+    assert desktop_heap.main(["--kb", "65536", "--restore"]) == 1
+
+    registry.OpenKey.assert_not_called()

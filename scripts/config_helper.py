@@ -267,6 +267,16 @@ def main():
         val = cfg.get("reboot_interval")
         print(30 if val is None else val)
 
+    elif cmd == "desktop_heap_kb":
+        # Opt-in desktop heap size for start.bat (see scripts/desktop_heap.py):
+        # empty when unset, so Windows keeps its own value; "restore" or a KB
+        # number otherwise. desktop_heap.py validates the number.
+        val = cfg.get("desktop_heap_kb")
+        if val is None or val is False or val == "" or val == 0:
+            print("")
+        else:
+            print(str(val).strip())
+
     elif cmd == "requirements":
         for r in cfg.get("requirements") or []:
             print(r)
