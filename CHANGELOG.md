@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Added FTMO to the README's [recommended brokers and prop firms](README.md#recommended-brokers-and-prop-firms), with its MT4 and MT5 support and simulated trading accounts described.
+
 ## [v4.29.0]: 2026-10-12
 
 ### Fixed

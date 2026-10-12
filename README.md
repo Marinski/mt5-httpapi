@@ -18,7 +18,7 @@ Run multiple brokers, accounts, and cloned terminal instances at the same time. 
 - [API at a glance](#api-at-a-glance)
 - [Development](#development)
 - [Project layout](#project-layout)
-- [Recommended brokers](#recommended-brokers)
+- [Recommended brokers and prop firms](#recommended-brokers-and-prop-firms)
 - [License](#license)
 
 > [!WARNING]
@@ -202,10 +202,11 @@ tests/           unit, contract, integration, and race-test shit
 docs/            all the details that no longer clog up this README
 ```
 
-## Recommended brokers
+## Recommended brokers and prop firms
 
 - [RoboForex](https://my.roboforex.com/en/?a=zswg)
 - [TeleTrade](https://my.teletrade-dj.com/agent_pp.html?agent_pp=26834897)
+- [FTMO](https://join.ftmo.com/uYaZPRmKowRZIKtuXdkE): prop firm with MT4 and MT5 support. Trading accounts use simulated capital.
 
 ## License
 
