@@ -265,6 +265,19 @@ Every API process imports numpy (the MetaTrader5 SDK needs it), and numpy's Open
 
 Each worker logs one `BLAS_RUNTIME` JSON record at startup with its PID, those three environment values and the thread count queried from every loaded OpenBLAS library. It observes the runtime without changing its limits. Inspection failure logs a warning and leaves the trading API running; the live regression test treats that warning as a failed verification.
 
+## Many terminals per VM: the desktop heap
+
+Every window, console and terminal in the VM's logged-on session takes memory from that session's desktop heap. Windows sizes it with the second field of `SharedSection=1024,20480,768` (KB) in `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems\Windows`: 20 MB by default. Each API process runs in its own console and each terminal and tester agent opens windows of its own, so a VM running 20 or more terminals runs out. Windows logs `Win32k` event 243, `A desktop heap allocation failed` (in `windows-events.log`), and every terminal launched after that exits about a second after `started for` with code 10053, before it signs in to the broker or starts the tester. Backtests fail with `terminal64.exe exited with code 10053` in bursts that last as long as the VM stays that full.
+
+Raising it is opt-in: set `desktop_heap_kb` in `config.yaml` (see [installation-and-configuration.md](installation-and-configuration.md)). With it set, `start.bat` runs `scripts/desktop_heap.py --kb <value>` at every boot:
+
+- It raises only the second field, and only when it is below the value; the rest of the registry value, its spacing and its registry type are kept. It never lowers the heap.
+- A value it cannot parse (no `SharedSection`, a field that is not an unsigned integer such as `20480oops`, a missing field) is refused and nothing is written. Whitespace after a comma, as in `SharedSection=1024, 20480,768`, is accepted.
+- Before its first write it saves the whole original value and its type to `%ProgramData%\mt5-httpapi\desktop-heap-original.json` on the VM, and never overwrites that copy. `desktop_heap_kb: restore` writes it back. A registry export (Microsoft's [backup instructions](https://support.microsoft.com/en-us/windows/how-to-back-up-and-restore-the-registry-in-windows) cover Windows 11) is a second way back.
+- A change only applies from the next boot, so `start.bat` reboots once through `reboot.bat`; `start.log` shows `desktop heap raised to 65536 KB (original saved to ...); reboot to apply` and, on the next boot, `desktop heap ok (>= 65536 KB)`. A marker in `%ProgramData%` stops a second reboot if the value does not survive the first.
+
+Microsoft's [desktop heap article (KB 947246)](https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/desktop-heap-limitation-out-of-memory) advises against a second field above 20480 KB; it is written for Windows Server and interactive multi-user sessions. Tested with 65536 on Windows 11 Pro 22H2, build 22621.2283 (the dockur `VERSION: "11"` image), on a VM running about 50 terminals: `desktop_heap.py` raised the stock `SharedSection=1024,20480,768` to 65536 after saving it, left an already raised value alone, refused malformed `--kb` values and a restore with no saved original, and `--restore` wrote the stock value back. Booted from that stock value with `desktop_heap_kb: 65536`, `start.bat` raised it and saved the original, rebooted once, and the next boot logged `desktop heap ok (>= 65536 KB)`. An earlier version of the same 65536 KB change, applied unconditionally and without the backup, has run on two such VMs for about 6,000 backtests with no further 243 events and no 10053 launch aborts. Other Windows builds and values are untested.
+
 ## VM recreate and the wickworks sidecar
 
 The wickworks TA sidecar shares a VM's network namespace via compose

@@ -564,3 +564,30 @@ def test_every_vm_log_dir_in_the_live_topology_is_rotated():
     mounted = {vol.split(":")[0] for vol in rotator["volumes"]}
     log_dirs = {vm.get("log_dir") or SHARED_LOG_DIR for vm in vms}
     assert sorted(log_dirs - mounted) == []
+
+
+@pytest.mark.parametrize(
+    "value, printed",
+    [
+        (None, ""),  # unset: start.bat leaves Windows' desktop heap alone
+        (0, ""),
+        (False, ""),
+        (65536, "65536"),
+        ("65536", "65536"),
+        ("restore", "restore"),
+        (" 40960 ", "40960"),
+    ],
+)
+def test_desktop_heap_kb_is_opt_in(tmp_path, monkeypatch, capsys, value, printed):
+    helper = _load_config_helper_module()
+    cfg = {"api_token": "t", "terminals": []}
+    if value is not None:
+        cfg["desktop_heap_kb"] = value
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(config_path))
+    monkeypatch.setattr("sys.argv", ["config_helper.py", "desktop_heap_kb"])
+
+    helper.main()
+
+    assert capsys.readouterr().out == printed + "\n"
