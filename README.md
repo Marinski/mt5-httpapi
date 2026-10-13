@@ -3,6 +3,7 @@
 [![CI](https://github.com/psyb0t/mt5-httpapi/actions/workflows/pipeline.yml/badge.svg?branch=master)](https://github.com/psyb0t/mt5-httpapi/actions/workflows/pipeline.yml)
 [![version](https://raw.githubusercontent.com/psyb0t/mt5-httpapi/badges/version.svg)](https://github.com/psyb0t/mt5-httpapi/releases)
 [![license](https://raw.githubusercontent.com/psyb0t/mt5-httpapi/badges/license.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/psyb0t/mt5-httpapi)
 
 MetaTrader 5 running inside a real Windows VM (Docker + QEMU/KVM) with REST and MCP APIs slapped on top. No Wine bullshit, no janky compatibility hacks — the real Windows MT5 terminal in portable mode, controllable without clicking through that fucking GUI all day.
 
