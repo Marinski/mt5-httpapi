@@ -5,6 +5,7 @@ import time
 import MetaTrader5 as mt5
 from mt5api.config import INI_FILE
 from mt5api.logger import log
+import mt5api.mt5client as mt5client_module
 from mt5api.mt5client import SESSION_ACQUIRE_TIMEOUT, MT5LockTimeout, MT5Timeout, m, session
 
 CHECK_INTERVAL = 60
@@ -151,6 +152,9 @@ def _monitor_loop():
             with session(bypass_queue_cap=True):
                 try:
                     info = m(mt5.terminal_info, _timeout=15)
+                    if info is not None:
+                        # Cosmetic cache for lock-free readers (POST /webrequest/verify's build).
+                        mt5client_module.LAST_TERMINAL_INFO = info
                 except MT5Timeout:
                     info = None
                 except Exception:

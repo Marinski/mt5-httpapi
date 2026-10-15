@@ -56,12 +56,22 @@ def desired_path(cfg_dir: str) -> str:
 
 
 # ── url hygiene ──────────────────────────────────────────────────────
+# Longest URL accepted. MT5's Options dialog refused a 1120-character URL on
+# build 6230 (the row it kept was shorter, so the apply read it as missing and
+# cancelled), and kept at least 760 characters in the same test, 2026-10-15.
+MAX_URL_LENGTH = 750
+
+
 def _acceptable(u: str) -> bool:
     """An http(s) URL with a host, no whitespace, no ';' (the common.ini blob's
-    delimiter) and no control characters. The Options-dialog driver counts a
-    row as a URL by the same rule (is_url_row): a URL it would not count reads
-    as missing after the apply, and the whole apply is cancelled."""
-    return bool(u) and ";" not in u and not any(ord(c) < 0x20 for c in u) and is_url_row(u)
+    delimiter), no control characters and at most MAX_URL_LENGTH characters.
+    The Options-dialog driver counts a row as a URL by the same rule
+    (is_url_row): a URL it would not count, or that MT5 shortens, reads as
+    missing after the apply, and the whole apply is cancelled."""
+    return (
+        bool(u) and len(u) <= MAX_URL_LENGTH and ";" not in u
+        and not any(ord(c) < 0x20 for c in u) and is_url_row(u)
+    )
 
 
 def clean_urls(urls) -> list[str]:

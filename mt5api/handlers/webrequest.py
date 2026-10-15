@@ -121,8 +121,8 @@ def put_webrequest():
     bad = [u for key in ("urls", "add", "remove") for u in wr.invalid_urls(body.get(key, []))]
     if bad:
         return _error(400, "INVALID_URL",
-                      "only http(s) URLs with a host and no spaces, ';' or control characters "
-                      "are accepted", rejected=bad)
+                      f"only http(s) URLs with a host, at most {wr.MAX_URL_LENGTH} characters "
+                      "and no spaces, ';' or control characters are accepted", rejected=bad)
 
     with wa.APPLY_LOCK:  # save and apply as one step against the background re-apply
         return _put_locked(body, _cfg_dir())

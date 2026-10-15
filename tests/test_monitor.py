@@ -628,3 +628,13 @@ def test_a_restored_list_logs_once_and_resets(stale):
     restored = [m for m in _info_messages(stale["log"]) if "restored" in m]
     assert len(restored) == 1
     assert check == {"since": None, "alerted": False}
+
+
+def test_a_health_pass_caches_terminal_info_for_lock_free_readers(monkeypatch):
+    info = SimpleNamespace(trade_allowed=True, build=6230)
+    monkeypatch.setattr(mc, "LAST_TERMINAL_INFO", None)
+
+    _drive_loop(monkeypatch, [{"terminal_info": info,
+                               "account_info": SimpleNamespace(login=1, server="Fake-Demo")}])
+
+    assert mc.LAST_TERMINAL_INFO is info

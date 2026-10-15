@@ -801,3 +801,12 @@ def test_a_reapply_waits_for_a_patch_and_applies_the_list_it_saved(client, vm, m
 
     assert vm["calls"][-1]["exact"] == [a, b]
     assert vm["urls"] == [a, b]
+
+
+def test_a_url_longer_than_mt5_keeps_is_refused():
+    """MT5 refused a 1120-character URL live (2026-10-15); refuse it at PUT."""
+    long_url = "https://example.org/" + "x" * wr.MAX_URL_LENGTH
+
+    assert wr.clean_urls([long_url]) == []
+    assert wr.invalid_urls([long_url]) == [long_url]
+    assert wr.clean_urls(["https://example.org/" + "x" * 100]) != []

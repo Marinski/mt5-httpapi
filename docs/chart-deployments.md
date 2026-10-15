@@ -245,7 +245,7 @@ curl -X POST "$MT5_API_URL/webrequest/verify" \
 
 - `{"urls": [...]}` makes the terminal's list exactly that, removing every other entry, including ones added by hand in the VM.
 - `{"add": [...], "remove": [...]}` changes only the URLs named. Every other entry the terminal holds stays, and the list read back becomes the stored list, so URLs added by hand survive restarts too.
-- Only `http(s)` URLs with a host and no spaces, `;` or control characters are accepted. Anything else answers 400 `INVALID_URL` with the offending entries under `rejected`, and nothing is stored.
+- Only `http(s)` URLs with a host, at most 750 characters (MT5 refused a 1120-character one) and no spaces, `;` or control characters are accepted. Anything else answers 400 `INVALID_URL` with the offending entries under `rejected`, and nothing is stored.
 - A failed apply answers with a `code`: 409 for a state to wait out (`BACKTEST_RUNNING`, or `TERMINAL_BUSY` when the terminal shows a dialog such as a login), 503 when the terminal is not running (`PID_NOT_FOUND`, `WINDOW_NOT_FOUND`), 500 otherwise. While a backtest runs on the terminal, `PUT` and `verify` answer 409: the tester runs from the same `terminal64.exe`. The background re-apply waits for the run to end.
 - `urls`, `add` and `remove` must be lists; anything else is a 400, never an empty list.
 - `verify` opens the Options dialog for a moment, so a second call within 10 seconds answers 429 with `Retry-After`. Use it to check an apply, not to poll.
