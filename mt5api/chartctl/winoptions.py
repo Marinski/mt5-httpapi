@@ -474,8 +474,14 @@ class _UrlList:
         return int(_send(self.lv, LVM_GETITEMCOUNT))
 
     def _item_texts(self) -> list[str]:
+        n = self.count()
+        if n > _MAX_ROWS + 1:  # + the add row
+            # Reading part of the list would verify, and report OK, on part of it.
+            raise OptionsError(
+                "list_too_long", f"the WebRequest list has more than {_MAX_ROWS} rows", {"rows": n}
+            )
         rows = []
-        for i in range(min(self.count(), _MAX_ROWS)):
+        for i in range(n):
             self.remote.write(0, self.remote.lvitem(text=True))
             self.remote.write(self.remote.TEXT_AT, b"\0\0")
             length = _send(self.lv, LVM_GETITEMTEXTW, i, self.remote.base)
@@ -871,6 +877,10 @@ def apply(
         _post(main, WM_COMMAND, cmd, 0)
         sheet = _wait(lambda: (_sheets(pid) or [0])[0], 10.0)
         if not sheet:
+            # A dialog that opens just after the wait would stay open and make
+            # every later call fail as terminal_busy: look once more, cancel it.
+            for late in _wait(lambda: _sheets(pid), 2.0):
+                _press(late, False)
             raise OptionsError(
                 "options_not_opened", "the Options dialog did not open", {"command": cmd}
             )
@@ -903,11 +913,15 @@ def _session(pid: int, sheet: int, add, remove, exact, partial) -> dict:
                 "rejected": [],
                 "changed": False,
             }
-        if plan["want_enabled"] is not None:
-            _set_box(page, box, plan["want_enabled"])
+        # Tick before adding, untick after removing: MT5 might grey the list out
+        # while the box is unticked.
+        if plan["want_enabled"] is True:
+            _set_box(page, box, True)
         removed_rows = [before[i] for i in plan["remove_idx"]]
         for idx in plan["remove_idx"]:  # descending, so the rows still to go keep their index
             lst.remove(idx)
+        if plan["want_enabled"] is False:
+            _set_box(page, box, False)
         rejected: list[str] = []
         for u in plan["add"]:
             try:

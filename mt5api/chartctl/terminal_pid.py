@@ -159,6 +159,10 @@ def _still_running(generation: tuple[int, float]) -> bool:
     """The cheap check: the same process is still there (microseconds, no lookup)."""
     pid, started = generation
     try:
+        if not started:
+            # Found through WMI with no readable creation time: compare the
+            # pid alone, or every check would run the 30-second WMI lookup.
+            return psutil.pid_exists(pid)
         return float(psutil.Process(pid).create_time()) == started
     except psutil.Error:
         return False

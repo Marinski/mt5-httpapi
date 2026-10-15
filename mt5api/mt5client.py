@@ -543,7 +543,22 @@ def _wait_for_journal(journal_log, offset, max_attempts=60):
     return False
 
 
+# Set while restart_terminal runs. The terminal generation watcher
+# (monitor.py) sees the relaunched process within seconds, but restart_terminal
+# reconnects and re-applies the WebRequest list itself, so the watcher waits.
+RESTART_IN_PROGRESS = threading.Event()
+
+
 def restart_terminal():
+    """Kill terminal, relaunch, wait for journal 'started for', reconnect."""
+    RESTART_IN_PROGRESS.set()
+    try:
+        return _restart_terminal()
+    finally:
+        RESTART_IN_PROGRESS.clear()
+
+
+def _restart_terminal():
     """Kill terminal, relaunch, wait for journal 'started for', reconnect.
 
     Caller must hold the MT5 lock — this blocks the lock for ~minutes

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -92,6 +93,13 @@ def load_status() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+# Held around "read or save the stored list, then apply it": a PUT and a
+# background re-apply would otherwise interleave, and a re-apply that read the
+# old list before a patch saved the new one would undo the patch on the
+# terminal and still record it as applied. Re-entrant because the handlers
+# take it and then call apply_urls, which a re-apply also calls.
+APPLY_LOCK = threading.RLock()
+
 # The terminal process the last successful apply went to, as (pid,
 # create_time); falls back to the status file after the API process restarts.
 _applied_generation: tuple[int, float] | None = None
@@ -133,8 +141,8 @@ def _write_status(
     path = status_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd, tmp = tempfile.mkstemp(prefix=STATUS_NAME, suffix=".tmp", dir=os.path.dirname(path))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(record, f)
         os.replace(tmp, path)
     except OSError as exc:
@@ -168,11 +176,13 @@ def _run(
             err.message,
             json.dumps(err.diag)[:800],
         )
-        _write_status(reason, "FAIL", err.code, [])
+        if reason != REASON_VERIFY:  # a failed read says nothing about the last apply
+            _write_status(reason, "FAIL", err.code, [])
         return f"FAIL:{err.code}", {"error": err.message, "diag": err.diag}
     except Exception:  # noqa: BLE001 - a ctypes or OS failure must answer, not kill the caller
         log.exception("WebRequest apply (%s) failed unexpectedly", reason)
-        _write_status(reason, "FAIL", CODE_INTERNAL, [])
+        if reason != REASON_VERIFY:
+            _write_status(reason, "FAIL", CODE_INTERNAL, [])
         return f"FAIL:{CODE_INTERNAL}", {
             "error": "the apply failed unexpectedly; see the API log",
             "diag": {},
@@ -240,11 +250,12 @@ def _reapply_once(delay_seconds: float, reason: str) -> None:
             continue
         # Read when applying, not when asked: the list may have changed while
         # this pass waited, and the pid is looked up then too (_drive).
-        urls = wr.effective_urls(_cfg_dir())
-        if not urls:
-            return
-        attempt += 1
-        status, _detail = apply_urls(urls, partial=True, reason=reason)
+        with APPLY_LOCK:
+            urls = wr.effective_urls(_cfg_dir())
+            if not urls:
+                return
+            attempt += 1
+            status, _detail = apply_urls(urls, partial=True, reason=reason)
         log.info(
             "WebRequest re-apply (%s) attempt %d: %d url(s) -> %s",
             reason,
@@ -263,21 +274,20 @@ def _reapply_once(delay_seconds: float, reason: str) -> None:
 
 
 def _reapply_loop(delay_seconds: float, reason: str) -> None:
+    """Run passes until no further one was asked for. The running flag is
+    cleared only inside the same locked block that finds nothing more to do,
+    so a request can never land between the two and be lost or doubled."""
     global _reapply_running, _reapply_again
-    try:
-        while True:
-            try:
-                _reapply_once(delay_seconds, reason)
-            except Exception:  # noqa: BLE001 - a daemon thread must log, not die silently
-                log.exception("WebRequest re-apply (%s) failed", reason)
-            with _reapply_lock:
-                if _reapply_again is None:
-                    _reapply_running = False
-                    return
-                (delay_seconds, reason), _reapply_again = _reapply_again, None
-    finally:
+    while True:
+        try:
+            _reapply_once(delay_seconds, reason)
+        except Exception:  # noqa: BLE001 - a daemon thread must log, not die silently
+            log.exception("WebRequest re-apply (%s) failed", reason)
         with _reapply_lock:
-            _reapply_running = False
+            if _reapply_again is None:
+                _reapply_running = False
+                return
+            (delay_seconds, reason), _reapply_again = _reapply_again, None
 
 
 def reapply_in_background(delay_seconds: float, reason: str) -> None:

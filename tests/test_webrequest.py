@@ -310,7 +310,7 @@ def test_a_failed_patch_stores_the_intent_and_answers_500(client, vm):
 
     r = client.put("/webrequest", json={"add": ["https://b.example"]})
 
-    assert r.status_code == 500
+    assert r.status_code == 409  # a dialog the user can close: try again
     assert "win32:FAIL:terminal_busy" in r.get_json()["error"]
     assert wr.load_desired(wr.config_dir(client._term)) == ["https://a.example", "https://b.example"]
     last = client.get("/webrequest").get_json()["last_apply"]
@@ -424,7 +424,7 @@ def test_verify_reports_a_driver_failure_with_its_code(client, vm):
 
     r = client.post("/webrequest/verify")
 
-    assert r.status_code == 500
+    assert r.status_code == 409
     body = r.get_json()
     assert body["live"] is None and body["code"] == "TERMINAL_BUSY"
     assert body["diag"] == {"seen": "login"}
@@ -703,20 +703,101 @@ def test_get_shows_the_running_terminal_and_whether_its_list_is_stale(client, vm
 
     monkeypatch.setattr(client._wa, "_applied_generation", None)
     monkeypatch.setattr(terminal_pid, "find_terminal", lambda *_a: (4242, 123.5))
-    monkeypatch.setattr(terminal_pid, "current_generation", lambda *_a: (4242, 123.5))
+    monkeypatch.setattr(terminal_pid, "last_generation", lambda *_a: (4242, 123.5))
     client.put("/webrequest", json={"urls": REAL_URLS})
 
     fresh = client.get("/webrequest").get_json()
     assert (fresh["terminal_pid"], fresh["terminal_started_at"], fresh["stale"]) == (
         4242, 123.5, False)
 
-    monkeypatch.setattr(terminal_pid, "current_generation", lambda *_a: (5151, 999.0))
+    monkeypatch.setattr(terminal_pid, "last_generation", lambda *_a: (5151, 999.0))
     assert client.get("/webrequest").get_json()["stale"] is True
 
 
 def test_a_terminal_with_no_stored_list_is_never_stale(client, vm, monkeypatch):
     from mt5api.chartctl import terminal_pid
 
-    monkeypatch.setattr(terminal_pid, "current_generation", lambda *_a: (5151, 999.0))
+    monkeypatch.setattr(terminal_pid, "last_generation", lambda *_a: (5151, 999.0))
 
     assert client.get("/webrequest").get_json()["stale"] is False
+
+
+# ── review fixes ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("body", [{"urls": "https://a.example"}, {"urls": None}, {"add": {}}])
+def test_a_url_field_that_is_not_a_list_is_a_400_not_an_empty_list(client, vm, body):
+    """Cleaned, a non-list became [], and {"urls": ...} then removed every row."""
+    wr.save_desired(wr.config_dir(client._term), ["https://keep.example"])
+
+    r = client.put("/webrequest", json=body)
+
+    assert r.status_code == 400 and r.get_json()["code"] == "BAD_REQUEST"
+    assert vm["calls"] == []
+    assert wr.load_desired(wr.config_dir(client._term)) == ["https://keep.example"]
+
+
+def test_a_failed_verify_leaves_the_last_apply_alone(client, vm):
+    from mt5api.chartctl.winoptions import OptionsError
+
+    client.put("/webrequest", json={"urls": REAL_URLS})
+    before = client.get("/webrequest").get_json()["last_apply"]
+    vm["raise"] = OptionsError("terminal_busy", "busy")
+
+    assert client.post("/webrequest/verify").status_code == 409
+
+    assert client.get("/webrequest").get_json()["last_apply"] == before
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [("terminal_busy", 409), ("pid_not_found", 503), ("window_not_found", 503),
+     ("list_not_changed", 500)],
+)
+def test_put_failures_carry_a_code_and_a_fitting_status(client, vm, code, status):
+    from mt5api.chartctl.winoptions import OptionsError
+
+    vm["raise"] = OptionsError(code, "test")
+
+    r = client.put("/webrequest", json={"urls": REAL_URLS})
+
+    assert r.status_code == status
+    assert r.get_json()["code"] == code.upper()
+
+
+def test_a_reapply_waits_for_a_patch_and_applies_the_list_it_saved(client, vm, monkeypatch):
+    """A re-apply that read the stored list while a patch was in its dialog
+    session would apply the old list over it and still record it as applied."""
+    import threading
+
+    from mt5api.chartctl import winoptions
+
+    a, b = "https://a.example", "https://b.example"
+    wr.save_desired(wr.config_dir(client._term), [a])
+    vm["urls"], vm["enabled"] = [a], True
+    gate, inside = threading.Event(), threading.Event()
+    fake = winoptions.apply
+
+    def slow_patch(pid, add, remove, **kwargs):
+        if add:
+            inside.set()
+            assert gate.wait(5)
+        return fake(pid, add, remove, **kwargs)
+
+    monkeypatch.setattr(winoptions, "apply", slow_patch)
+    monkeypatch.setattr(client._wa.time, "sleep", lambda _s: None)
+
+    put = threading.Thread(target=lambda: client.put("/webrequest", json={"add": [b]}))
+    put.start()
+    assert inside.wait(5)
+    reapply = threading.Thread(target=client._wa._reapply_once, args=(0, "terminal restart"))
+    reapply.start()
+    reapply.join(0.3)
+    assert reapply.is_alive() and vm["calls"] == []  # waiting for the patch
+
+    gate.set()
+    put.join(5)
+    reapply.join(5)
+
+    assert vm["calls"][-1]["exact"] == [a, b]
+    assert vm["urls"] == [a, b]

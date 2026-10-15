@@ -47,8 +47,9 @@ def _error(status: int, code: str, message: str, **extra):
 
 
 def get_webrequest():
-    # psutil only: the process last seen is checked, a lookup runs if it is gone.
-    generation = terminal_pid.current_generation() if wa.available() else None
+    # The generation the watcher last saw: never a lookup, which could fall back
+    # to a 30-second WMI query.
+    generation = terminal_pid.last_generation() if wa.available() else None
     return jsonify({
         "urls": wr.effective_urls(_cfg_dir()),
         "last_apply": wa.load_status(),
@@ -67,9 +68,31 @@ def _patched(current, add, remove):
     return new_urls
 
 
+# Driver failure codes that are a state the caller can wait out (409) or a
+# terminal that is not there right now (503); anything else is 500.
+_CONFLICT_CODES = frozenset({wa.CODE_BACKTEST_RUNNING, "terminal_busy"})
+_UNAVAILABLE_CODES = frozenset({"pid_not_found", "window_not_found"})
+
+
+def _failure_code(detail: str) -> str:
+    """The driver's code from "win32:FAIL:<code>" or "FAIL:<code>", or the
+    bare-metal "restart-failed"."""
+    return detail.rsplit(":", 1)[-1] if "FAIL:" in detail else detail
+
+
 def _failure_status(detail: str) -> int:
-    """409 while a backtest runs (try again after it), else 500."""
-    return 409 if detail.endswith(":" + wa.CODE_BACKTEST_RUNNING) else 500
+    code = _failure_code(detail)
+    if code in _CONFLICT_CODES:
+        return 409
+    if code in _UNAVAILABLE_CODES:
+        return 503
+    return 500
+
+
+def _apply_failed(detail: str, urls):
+    return jsonify({"success": False, "error": f"apply failed ({detail})",
+                    "code": _failure_code(detail).upper().replace("-", "_"),
+                    "urls": urls}), _failure_status(detail)
 
 
 def _apply(urls, *, partial=False, reason="put"):
@@ -89,6 +112,11 @@ def put_webrequest():
         return _error(400, "BAD_REQUEST", "JSON body required")
     if "urls" not in body and "add" not in body and "remove" not in body:
         return _error(400, "BAD_REQUEST", "provide 'urls', or 'add'/'remove'")
+    # A non-list would clean to [] and, as "urls", replace the list with nothing.
+    not_lists = [k for k in ("urls", "add", "remove")
+                 if k in body and not isinstance(body[k], list)]
+    if not_lists:
+        return _error(400, "BAD_REQUEST", f"{', '.join(not_lists)} must be a list of URLs")
 
     bad = [u for key in ("urls", "add", "remove") for u in wr.invalid_urls(body.get(key, []))]
     if bad:
@@ -96,7 +124,11 @@ def put_webrequest():
                       "only http(s) URLs with a host and no spaces, ';' or control characters "
                       "are accepted", rejected=bad)
 
-    cfg_dir = _cfg_dir()
+    with wa.APPLY_LOCK:  # save and apply as one step against the background re-apply
+        return _put_locked(body, _cfg_dir())
+
+
+def _put_locked(body, cfg_dir):
     if "urls" in body:
         new_urls = wr.clean_urls(body.get("urls"))
         wr.save_desired(cfg_dir, new_urls)
@@ -113,15 +145,13 @@ def put_webrequest():
             status, _log, live = wa.patch_urls(add, remove)
             ok, detail = status == wa.STATUS_OK, f"win32:{status}"
             if ok and live is not None:
-                new_urls = live
+                new_urls = wr.clean_urls(live)
             wr.save_desired(cfg_dir, new_urls)
         else:
             wr.save_desired(cfg_dir, new_urls)
             ok, detail = _apply(new_urls)
     if not ok:
-        return jsonify(
-            {"success": False, "error": f"apply failed ({detail})", "urls": new_urls}
-        ), _failure_status(detail)
+        return _apply_failed(detail, new_urls)
     return jsonify({"success": True, "urls": new_urls, "applied_via": detail})
 
 
@@ -138,16 +168,15 @@ def apply_webrequest():
             return jsonify({"success": False, "error": str(exc)}), 400
         return jsonify({"script": dev_script, "status": status, "log": txt})
 
-    urls = wr.effective_urls(_cfg_dir())
-    if not urls:
-        return jsonify({"success": True, "urls": [], "note": "nothing to apply"})
-    # Partial, like the boot re-apply: a URL MT5 will not take is reported,
-    # not a reason to leave the terminal with no list.
-    ok, detail = _apply(urls, partial=True, reason="apply")
+    with wa.APPLY_LOCK:
+        urls = wr.effective_urls(_cfg_dir())
+        if not urls:
+            return jsonify({"success": True, "urls": [], "note": "nothing to apply"})
+        # Partial, like the boot re-apply: a URL MT5 will not take is reported,
+        # not a reason to leave the terminal with no list.
+        ok, detail = _apply(urls, partial=True, reason="apply")
     if not ok:
-        return jsonify(
-            {"success": False, "error": f"apply failed ({detail})", "urls": urls}
-        ), _failure_status(detail)
+        return _apply_failed(detail, urls)
     return jsonify({"success": True, "urls": urls, "applied_via": detail,
                     "rejected": (wa.load_status() or {}).get("rejected", [])})
 
@@ -174,8 +203,9 @@ def verify_webrequest():
     desired = wr.effective_urls(_cfg_dir())
     build = getattr(info, "build", None)
     if status != wa.STATUS_OK:
-        code = status.split(":", 1)[-1]
-        return jsonify({"urls": desired, "live": None, "terminal_build": build,
-                        "error": live.get("error"), "code": code.upper(),
-                        "diag": live.get("diag", {})}), _failure_status(status)
+        code = _failure_code(status)
+        return jsonify({"success": False, "urls": desired, "live": None,
+                        "terminal_build": build, "error": live.get("error"),
+                        "code": code.upper(), "diag": live.get("diag", {})}), \
+            _failure_status(status)
     return jsonify({"urls": desired, "live": live, "terminal_build": build})

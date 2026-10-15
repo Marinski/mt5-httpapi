@@ -79,23 +79,32 @@ def _generation_step(state: dict) -> None:
     is reconnected first because after such a restart it can stay attached to
     the dead process: terminal_info() keeps failing and the health monitor
     would kill the freshly started terminal after its dead checks."""
+    from mt5api import mt5client
     from mt5api.backtest.handler import RUN_LOCK
     from mt5api.chartctl import terminal_pid
     from mt5api.chartctl import webrequest_apply as wa
-    from mt5api.mt5client import ensure_initialized
 
     generation = terminal_pid.current_generation()
     if generation is None or generation == state.get("last_seen"):
         return
     if RUN_LOCK.locked():
         return  # the tester's process runs from the same exe; look again after the run
+    if mt5client.RESTART_IN_PROGRESS.is_set():
+        return  # restart_terminal reconnects and re-applies itself; record nothing yet
     previous = state.get("last_seen")
     state["last_seen"] = generation
-    log.warning("Terminal process changed: pid=%d (was %s)", generation[0],
-                previous[0] if previous else None)
+    if previous is None:
+        # The first sighting after the API started: the start-up path connects
+        # and re-applies by itself (main._reapply_webrequest_once).
+        log.info("Terminal process: pid=%d", generation[0])
+        return
+    log.warning("Terminal process changed: pid=%d (was %d)", generation[0], previous[0])
     try:
         with session(bypass_queue_cap=True):
-            reconnected = ensure_initialized()
+            reconnected = mt5client.ensure_initialized()
+    except MT5LockTimeout:
+        log.warning("SDK reconnect after a terminal process change waited too long for the lock")
+        reconnected = False
     except Exception:  # noqa: BLE001 - the re-apply below drives the window, not the SDK
         log.exception("SDK reconnect after a terminal process change failed")
         reconnected = False

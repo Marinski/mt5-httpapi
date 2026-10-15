@@ -513,10 +513,46 @@ def test_a_new_process_whose_list_is_not_stale_only_reconnects(watcher):
 def test_a_pending_reapply_is_not_doubled(watcher):
     watcher["pending"] = True
 
-    monitor._generation_step({"last_seen": None})
+    monitor._generation_step({"last_seen": (41, 50.0)})
 
     assert watcher["reconnects"] == 1
     assert watcher["reapplies"] == []
+
+
+def test_the_first_sighting_after_api_start_is_left_to_the_start_up_path(watcher):
+    seen = {"last_seen": None}
+
+    monitor._generation_step(seen)
+
+    assert seen["last_seen"] == (42, 100.0)
+    assert watcher["reconnects"] == 0 and watcher["reapplies"] == []
+    assert watcher["log"].warning.call_count == 0
+
+
+def test_a_restart_the_api_is_making_is_left_to_restart_terminal(watcher, monkeypatch):
+    seen = {"last_seen": (41, 50.0)}
+    mc.RESTART_IN_PROGRESS.set()
+    try:
+        monitor._generation_step(seen)
+    finally:
+        mc.RESTART_IN_PROGRESS.clear()
+
+    assert watcher["reconnects"] == 0 and watcher["reapplies"] == []
+    assert seen["last_seen"] == (41, 50.0)
+
+
+def test_a_lock_held_by_a_long_restart_is_a_warning_not_a_traceback(watcher, monkeypatch):
+    @contextmanager
+    def held(**_kwargs):
+        raise mc.MT5LockTimeout("held")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(monitor, "session", held)
+
+    monitor._generation_step({"last_seen": (41, 50.0)})
+
+    assert watcher["log"].exception.call_count == 0
+    assert watcher["reapplies"] == [(25, "new terminal process")]
 
 
 @pytest.mark.parametrize("reconnect", [False, RuntimeError("sdk wedged")])

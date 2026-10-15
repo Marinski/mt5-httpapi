@@ -28,13 +28,27 @@ def test_is_url_row(text, is_url):
 
 
 def test_lvitem_head_is_36_bytes_on_64_bit_and_28_on_32_bit():
-    assert len(w.pack_lvitem(False, 0x10000, 512, 1024)) == 36 + 48
-    assert len(w.pack_lvitem(True, 0x10000, 512, 1024)) == 28 + 32
+    import struct
+
+    x64 = w.pack_lvitem(False, 0x10000, 512, 1024, text=True)
+    x86 = w.pack_lvitem(True, 0x10000, 512, 1024, text=True)
+    assert len(x64) == 36 + 48 and len(x86) == 28 + 32
+    # pszText is 8-aligned at 24 and cchTextMax follows at 32 on x64.
+    assert struct.unpack_from("<Q", x64, 24)[0] == 0x10000 + 512
+    assert struct.unpack_from("<i", x64, 32)[0] == 1024
+    assert struct.unpack_from("<I", x86, 20)[0] == 0x10000 + 512
+    assert struct.unpack_from("<i", x86, 24)[0] == 1024
 
 
 def test_nmitemactivate_is_72_bytes_on_64_bit_and_48_on_32_bit():
-    assert len(w.pack_nmitemactivate(False, 0x1234, 7, 3, 10, 20)) == 72
-    assert len(w.pack_nmitemactivate(True, 0x1234, 7, 3, 10, 20)) == 48
+    import struct
+
+    x64 = w.pack_nmitemactivate(False, 0x1234, 7, 3, 10, 20)
+    assert len(x64) == 72 and len(w.pack_nmitemactivate(True, 0x1234, 7, 3, 10, 20)) == 48
+    # NMHDR is 24 bytes (code padded), iItem at 24, ptAction at 44, lParam at 56.
+    assert struct.unpack_from("<i", x64, 16)[0] == w.NM_DBLCLK
+    assert struct.unpack_from("<i", x64, 24)[0] == 3
+    assert struct.unpack_from("<ii", x64, 44) == (10, 20)
 
 
 def test_the_options_command_is_picked_by_its_untranslated_ctrl_o_shortcut():
@@ -262,3 +276,35 @@ def test_a_dialog_still_open_passes(monkeypatch):
     monkeypatch.setattr(w, "_user32", _User32(alive=True))
 
     w._UrlList(lv=13, sheet=10, pid=4242, remote=None)._alive()
+
+
+def test_unticking_happens_after_the_rows_are_removed(session, monkeypatch):
+    order = []
+    monkeypatch.setattr(w, "_set_box", lambda page, box, checked: order.append(("box", checked)))
+
+    class _Recording(_FakeList):
+        def remove(self, idx):
+            order.append(("remove", idx))
+            super().remove(idx)
+
+    def run():
+        state = {"box": True}
+        monkeypatch.setattr(w, "_UrlList", lambda lv, sheet, pid, remote: lst)
+        monkeypatch.setattr(w, "_send", lambda h, m, wp=0, lp=0, timeout_ms=0:
+                            (w.BST_UNCHECKED if order and order[-1] == ("box", False)
+                             else w.BST_CHECKED) if m == w.BM_GETCHECK else 0)
+        return w._session(4242, 10, [], [], [], False), state
+
+    lst = _Recording([A, B])
+    run()
+
+    assert order == [("remove", 1), ("remove", 0), ("box", False)]
+
+
+def test_a_list_longer_than_the_cap_is_refused_not_read_in_part(monkeypatch):
+    lst = w._UrlList(lv=13, sheet=10, pid=4242, remote=None)
+    monkeypatch.setattr(lst, "count", lambda: w._MAX_ROWS + 5)
+
+    with pytest.raises(w.OptionsError) as err:
+        lst.rows()
+    assert err.value.code == "list_too_long"
