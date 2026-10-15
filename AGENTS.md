@@ -14,7 +14,7 @@ mt5-httpapi runs real Windows MetaTrader 5 terminals inside a `dockurr/windows` 
 - **Unified MCP.** `mcpunifier/` is a separate FastAPI + httpx service in its own image (`Dockerfile.mcpunifier`, port 6600) that nginx exposes at `/mcp/`. Every tool takes `broker`, `account` and optional `instance` and proxies over HTTP to the right terminal. It reads the same `config/config.yaml`.
 - **wickworks sidecar.** A pinned `psyb0t/wickworks` container shares the VM container's network namespace and computes the technical analysis behind `POST /symbols/<symbol>/rates/ta`. `scripts/wickworks-healthcheck.py` detects when it is stuck in an orphaned namespace after a VM recreate.
 - **vm-watchdog.** A compose service (`scripts/vm-watchdog.py`, `Dockerfile.watchdog`) that recreates a VM container only after Docker health has stayed unhealthy for a sustained streak, through `scripts/recreate-vm.sh`.
-- **Health monitor.** `mt5api/monitor.py` checks the terminal every 60 seconds inside each API process and restarts it after 5 dead checks.
+- **Health monitor.** `mt5api/monitor.py` checks the terminal every 60 seconds inside each API process and restarts it after 5 dead checks. In the VM a second thread checks every 10 seconds whether `terminal64.exe` is a new process (LiveUpdate, an SDK-started or hand-started terminal); if so it reconnects the SDK and re-applies the WebRequest allowlist.
 
 ### Configuration
 

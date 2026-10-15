@@ -146,3 +146,38 @@ def find_terminal(terminal_path: str = TERMINAL_PATH) -> tuple[int, float]:
             {"pids": [pid for pid, _ in matches]},
         )
     return matches[0]
+
+
+# --- the terminal's generation: which terminal64.exe is running now ------------------------
+# A generation is (pid, create_time). A new one means a new terminal64.exe, and
+# a terminal started with /config: has forgotten its WebRequest allowlist. The
+# creation time guards against Windows reusing a pid.
+_last_generation: tuple[int, float] | None = None
+
+
+def _still_running(generation: tuple[int, float]) -> bool:
+    """The cheap check: the same process is still there (microseconds, no lookup)."""
+    pid, started = generation
+    try:
+        return float(psutil.Process(pid).create_time()) == started
+    except psutil.Error:
+        return False
+
+
+def current_generation(terminal_path: str = TERMINAL_PATH) -> tuple[int, float] | None:
+    """The running terminal's (pid, create_time), or None when it is not running
+    (or cannot be pinned down). The full lookup runs only when the process last
+    seen is gone."""
+    global _last_generation
+    if _last_generation is not None and _still_running(_last_generation):
+        return _last_generation
+    try:
+        _last_generation = find_terminal(terminal_path)
+    except TerminalPidError:
+        _last_generation = None
+    return _last_generation
+
+
+def last_generation() -> tuple[int, float] | None:
+    """The generation the last current_generation() call found, without a lookup."""
+    return _last_generation

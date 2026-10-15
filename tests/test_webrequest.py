@@ -206,14 +206,18 @@ def vm(client, monkeypatch):
                 "changed": before != live["urls"]}
 
     monkeypatch.setattr(client._wa, "available", lambda: True)
-    monkeypatch.setattr(terminal_pid, "find_terminal", lambda: (4242, 1.0))
+    monkeypatch.setattr(client._wa, "_applied_generation", None)
+    monkeypatch.setattr(terminal_pid, "_last_generation", None)
+    monkeypatch.setattr(terminal_pid, "find_terminal", lambda *_a: (4242, 1.0))
     monkeypatch.setattr(winoptions, "apply", fake_apply)
     return live
 
 
 def test_get_empty(client):
     r = client.get("/webrequest")
-    assert r.status_code == 200 and r.get_json() == {"urls": [], "last_apply": None}
+    assert r.status_code == 200 and r.get_json() == {
+        "urls": [], "last_apply": None, "terminal_pid": None, "terminal_started_at": None,
+        "stale": False}
 
 
 def test_put_replace_restarts_and_applies(client):
@@ -528,11 +532,12 @@ def test_config_helper_write_ini_no_desired_no_common_ini(tmp_path, monkeypatch)
 class _SyncThread:
     """threading.Thread stand-in that runs the target when started."""
 
-    def __init__(self, target, **_kwargs):
+    def __init__(self, target, args=(), **_kwargs):
         self._target = target
+        self._args = args
 
     def start(self):
-        self._target()
+        self._target(*self._args)
 
 
 def _reapply_harness(monkeypatch, available, urls, statuses, backtest=None):
@@ -612,3 +617,106 @@ def test_clean_urls_drops_what_the_driver_would_not_count_as_a_row(url):
     assert wr.clean_urls([url]) == []
     assert wr.invalid_urls([url]) == [url]
     assert not (is_url_row(url) and ";" not in url)
+
+
+# ── one re-apply at a time, recorded by terminal generation ──────────
+
+
+def test_a_request_while_a_reapply_runs_adds_one_more_pass_not_a_second_thread(monkeypatch):
+    from mt5api.chartctl import webrequest_apply as wa
+
+    threads = []
+
+    class _HeldThread:
+        """Starts nothing until the test runs it, so the first pass is 'running'."""
+
+        def __init__(self, target, args=(), **_kwargs):
+            self.target, self.args = target, args
+            threads.append(self)
+
+        def start(self):
+            pass
+
+    passes = []
+    monkeypatch.setattr(wa, "available", lambda: True)
+    monkeypatch.setattr(wa.wr, "effective_urls", lambda _cfg: ["https://a.example"])
+    monkeypatch.setattr(wa.threading, "Thread", _HeldThread)
+    monkeypatch.setattr(wa, "_reapply_once", lambda delay, reason: passes.append(reason))
+
+    wa.reapply_in_background(0, "api start")
+    assert wa.reapply_pending() is True
+    wa.reapply_in_background(0, "new terminal process")
+    wa.reapply_in_background(0, "terminal restart")
+
+    assert len(threads) == 1
+    threads[0].target(*threads[0].args)
+    assert passes == ["api start", "terminal restart"]  # one extra pass, the latest ask
+    assert wa.reapply_pending() is False
+
+
+def test_the_reapply_reads_the_stored_list_when_it_applies(monkeypatch):
+    wa, calls, _ = _reapply_harness(monkeypatch, True, ["https://a.example"], ["OK"])
+    stored = iter([["https://a.example"], ["https://b.example"]])
+    monkeypatch.setattr(wa.wr, "effective_urls", lambda _cfg: next(stored))
+
+    wa.reapply_in_background(0, "api start")
+
+    assert calls == [(["https://b.example"], True, "api start")]
+
+
+def test_a_successful_apply_records_the_terminal_generation(client, vm, monkeypatch):
+    from mt5api.chartctl import terminal_pid
+
+    monkeypatch.setattr(client._wa, "_applied_generation", None)
+    monkeypatch.setattr(terminal_pid, "find_terminal", lambda *_a: (4242, 123.5))
+
+    client.put("/webrequest", json={"urls": REAL_URLS})
+
+    assert client._wa.applied_generation() == (4242, 123.5)
+    last = client.get("/webrequest").get_json()["last_apply"]
+    assert (last["pid"], last["pid_started_at"]) == (4242, 123.5)
+
+
+def test_the_recorded_generation_survives_an_api_restart(client, vm, monkeypatch):
+    from mt5api.chartctl import terminal_pid
+
+    monkeypatch.setattr(terminal_pid, "find_terminal", lambda *_a: (4242, 123.5))
+    client.put("/webrequest", json={"urls": REAL_URLS})
+    monkeypatch.setattr(client._wa, "_applied_generation", None)  # a fresh API process
+
+    assert client._wa.applied_generation() == (4242, 123.5)
+
+
+def test_a_failed_apply_and_a_verify_record_no_generation(client, vm, monkeypatch):
+    from mt5api.chartctl.winoptions import OptionsError
+
+    monkeypatch.setattr(client._wa, "_applied_generation", None)
+    client.post("/webrequest/verify")
+    vm["raise"] = OptionsError("terminal_busy", "busy")
+    client.put("/webrequest", json={"urls": REAL_URLS})
+
+    assert client._wa.applied_generation() is None
+
+
+def test_get_shows_the_running_terminal_and_whether_its_list_is_stale(client, vm, monkeypatch):
+    from mt5api.chartctl import terminal_pid
+
+    monkeypatch.setattr(client._wa, "_applied_generation", None)
+    monkeypatch.setattr(terminal_pid, "find_terminal", lambda *_a: (4242, 123.5))
+    monkeypatch.setattr(terminal_pid, "current_generation", lambda *_a: (4242, 123.5))
+    client.put("/webrequest", json={"urls": REAL_URLS})
+
+    fresh = client.get("/webrequest").get_json()
+    assert (fresh["terminal_pid"], fresh["terminal_started_at"], fresh["stale"]) == (
+        4242, 123.5, False)
+
+    monkeypatch.setattr(terminal_pid, "current_generation", lambda *_a: (5151, 999.0))
+    assert client.get("/webrequest").get_json()["stale"] is True
+
+
+def test_a_terminal_with_no_stored_list_is_never_stale(client, vm, monkeypatch):
+    from mt5api.chartctl import terminal_pid
+
+    monkeypatch.setattr(terminal_pid, "current_generation", lambda *_a: (5151, 999.0))
+
+    assert client.get("/webrequest").get_json()["stale"] is False

@@ -23,6 +23,7 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 - **`POST /webrequest/verify`** (MCP `verify_webrequest`) reads the list the running terminal really holds beside the stored one, with `terminal_build`. At most one call per 10 s (429 otherwise).
 - **`GET /webrequest` returns `last_apply`**, the outcome of the latest apply (`Config/webrequest_status.json`).
 - **GUI calls are refused while a backtest runs** on the terminal (409 `backtest_running`); the background re-apply waits for the run to end.
+- **A terminal that restarts on its own gets its WebRequest list back.** A LiveUpdate, a terminal the SDK started after a crash or one started by hand used to keep no allowlist until someone called `POST /webrequest/apply`. A watcher now checks every 10 seconds whether `terminal64.exe` is a new process, reconnects the SDK to it (so the health monitor no longer kills a freshly updated terminal for not answering) and re-applies the list. `GET /webrequest` adds `terminal_pid`, `terminal_started_at` and `stale`, and a list missing for 5 minutes is logged as `!!! WEBREQUEST LIST NOT RESTORED !!!`. See [docs/chart-deployments.md](docs/chart-deployments.md#webrequest-allowlist).
 
 ## [v4.29.0]: 2026-10-12
 

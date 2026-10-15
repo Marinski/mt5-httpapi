@@ -109,3 +109,66 @@ def test_a_failed_wmi_fallback_finds_nothing(monkeypatch):
     monkeypatch.setattr(tp.subprocess, "run", broken)
 
     assert tp.matching_processes(OURS) == []
+
+
+# ── the terminal's generation (re-apply after a restart the API did not make) ─
+
+
+@pytest.fixture
+def generations(monkeypatch):
+    """A terminal whose process the test controls: `state["running"]` is the
+    (pid, create_time) psutil reports, and full lookups are counted."""
+    state = {"running": (42, 100.0), "lookups": 0}
+    monkeypatch.setattr(tp, "_last_generation", None)
+
+    def find_terminal(_path=None):
+        state["lookups"] += 1
+        if state["running"] is None:
+            raise tp.TerminalPidError("pid_not_found", "not running")
+        return state["running"]
+
+    class _Process:
+        def __init__(self, pid):
+            if state["running"] is None or state["running"][0] != pid:
+                raise tp.psutil.NoSuchProcess(pid)
+            self._created = state["running"][1]
+
+        def create_time(self):
+            return self._created
+
+    monkeypatch.setattr(tp, "find_terminal", find_terminal)
+    monkeypatch.setattr(tp.psutil, "Process", _Process)
+    return state
+
+
+def test_the_same_process_needs_no_full_lookup(generations):
+    assert tp.current_generation() == (42, 100.0)
+    assert tp.current_generation() == (42, 100.0)
+
+    assert generations["lookups"] == 1
+    assert tp.last_generation() == (42, 100.0)
+
+
+def test_a_new_pid_is_a_new_generation(generations):
+    tp.current_generation()
+    generations["running"] = (77, 200.0)
+
+    assert tp.current_generation() == (77, 200.0)
+    assert generations["lookups"] == 2
+
+
+def test_a_reused_pid_with_another_start_time_is_a_new_generation(generations):
+    tp.current_generation()
+    generations["running"] = (42, 300.0)
+
+    assert tp.current_generation() == (42, 300.0)
+    assert generations["lookups"] == 2
+
+
+def test_no_running_terminal_is_none_and_the_next_check_looks_again(generations):
+    tp.current_generation()
+    generations["running"] = None
+
+    assert tp.current_generation() is None
+    assert tp.current_generation() is None
+    assert generations["lookups"] == 3

@@ -24,6 +24,7 @@ from flask import jsonify, request
 
 from mt5api import mt5client
 from mt5api.chartctl import autoit_webrequest as autoit
+from mt5api.chartctl import terminal_pid
 from mt5api.chartctl import webrequest as wr
 from mt5api.chartctl import webrequest_apply as wa
 from mt5api.config import TERMINAL_DIR
@@ -46,7 +47,15 @@ def _error(status: int, code: str, message: str, **extra):
 
 
 def get_webrequest():
-    return jsonify({"urls": wr.effective_urls(_cfg_dir()), "last_apply": wa.load_status()})
+    # psutil only: the process last seen is checked, a lookup runs if it is gone.
+    generation = terminal_pid.current_generation() if wa.available() else None
+    return jsonify({
+        "urls": wr.effective_urls(_cfg_dir()),
+        "last_apply": wa.load_status(),
+        "terminal_pid": generation[0] if generation else None,
+        "terminal_started_at": generation[1] if generation else None,
+        "stale": wa.is_stale(generation),
+    })
 
 
 def _patched(current, add, remove):

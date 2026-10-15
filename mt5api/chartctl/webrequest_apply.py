@@ -14,6 +14,11 @@ up after a few attempts and would otherwise only leave a log line.
 
 No GUI call runs while a backtest holds RUN_LOCK: the tester's process runs
 from the same terminal64.exe, so the pid lookup would find it.
+
+Each successful apply records the terminal process it applied to (its
+"generation", terminal_pid.py), so the generation watcher in monitor.py can
+tell a terminal that restarted on its own (LiveUpdate, a crash, an SDK-started
+terminal) and re-apply there too.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ STATUS_OK = "OK"
 STATUS_NAME = "webrequest_status.json"
 CODE_BACKTEST_RUNNING = "backtest_running"
 CODE_INTERNAL = "internal_error"
+REASON_VERIFY = "verify"
 
 _REAPPLY_ATTEMPTS = 3
 _REAPPLY_RETRY_SECONDS = 15
@@ -86,13 +92,43 @@ def load_status() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _write_status(reason: str, status: str, code: str | None, rejected: list[str]) -> None:
+# The terminal process the last successful apply went to, as (pid,
+# create_time); falls back to the status file after the API process restarts.
+_applied_generation: tuple[int, float] | None = None
+
+
+def applied_generation() -> tuple[int, float] | None:
+    if _applied_generation is not None:
+        return _applied_generation
+    status = load_status() or {}
+    if status.get("status") == STATUS_OK and status.get("pid"):
+        return int(status["pid"]), float(status.get("pid_started_at") or 0.0)
+    return None
+
+
+def is_stale(generation: tuple[int, float] | None) -> bool:
+    """The running terminal has a stored list it has not been given: a
+    generation other than the one the last successful apply went to."""
+    if generation is None or not wr.effective_urls(_cfg_dir()):
+        return False
+    return generation != applied_generation()
+
+
+def _write_status(
+    reason: str,
+    status: str,
+    code: str | None,
+    rejected: list[str],
+    generation: tuple[int, float] | None = None,
+) -> None:
     record = {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "reason": reason,
         "status": STATUS_OK if status == STATUS_OK else "FAIL",
         "code": code,
         "rejected": rejected,
+        "pid": generation[0] if generation else None,
+        "pid_started_at": generation[1] if generation else None,
     }
     path = status_path()
     try:
@@ -105,13 +141,15 @@ def _write_status(reason: str, status: str, code: str | None, rejected: list[str
         log.warning("WebRequest: could not write %s (%s)", path, exc)
 
 
-def _drive(add: list[str], remove: list[str], exact: list[str] | None, partial: bool) -> dict:
+def _drive(
+    add: list[str], remove: list[str], exact: list[str] | None, partial: bool
+) -> tuple[dict, tuple[int, float]]:
     if backtest_running():
         raise OptionsError(
             CODE_BACKTEST_RUNNING, "a backtest is running on this terminal; try again after it"
         )
-    pid, _started = terminal_pid.find_terminal()
-    return winoptions.apply(pid, add, remove, exact=exact, partial=partial)
+    generation = terminal_pid.find_terminal()
+    return winoptions.apply(generation[0], add, remove, exact=exact, partial=partial), generation
 
 
 def _run(
@@ -119,8 +157,9 @@ def _run(
 ) -> tuple[str, dict]:
     """(status, detail): status "OK" or "FAIL:<code>"; detail is the driver's
     result on OK, else {"error", "diag"}. Never raises."""
+    global _applied_generation
     try:
-        result = _drive(add, remove, exact, partial)
+        result, generation = _drive(add, remove, exact, partial)
     except (OptionsError, TerminalPidError) as err:
         log.warning(
             "WebRequest apply (%s) failed: %s %s diag=%s",
@@ -148,7 +187,10 @@ def _run(
         len(result.get("removed", [])),
         len(rejected),
     )
-    _write_status(reason, STATUS_OK, None, rejected)
+    if reason == REASON_VERIFY:
+        return STATUS_OK, result  # a read says nothing about the list being applied
+    _applied_generation = generation
+    _write_status(reason, STATUS_OK, None, rejected, generation)
     return STATUS_OK, result
 
 
@@ -169,10 +211,73 @@ def read_live() -> tuple[str, dict]:
     """Read the live list without changing it.
 
     Returns (status, {"enabled", "urls"}) on OK, else (status, {"error", "diag"})."""
-    status, detail = _run("verify", [], [], None, False)
+    status, detail = _run(REASON_VERIFY, [], [], None, False)
     if status != STATUS_OK:
         return status, detail
     return status, {"enabled": detail.get("enabled"), "urls": detail.get("urls", [])}
+
+
+# One re-apply thread per API process. API start, a restart and the
+# generation watcher can all ask at once; a request while one is waiting or
+# running only asks for one more pass after it.
+_reapply_lock = threading.Lock()
+_reapply_running = False
+_reapply_again: tuple[float, str] | None = None
+
+
+def reapply_pending() -> bool:
+    """Whether a re-apply thread is waiting out its delay or applying."""
+    with _reapply_lock:
+        return _reapply_running
+
+
+def _reapply_once(delay_seconds: float, reason: str) -> None:
+    time.sleep(delay_seconds)
+    attempt = 0
+    while attempt < _REAPPLY_ATTEMPTS:
+        if backtest_running():
+            time.sleep(_BACKTEST_POLL_SECONDS)
+            continue
+        # Read when applying, not when asked: the list may have changed while
+        # this pass waited, and the pid is looked up then too (_drive).
+        urls = wr.effective_urls(_cfg_dir())
+        if not urls:
+            return
+        attempt += 1
+        status, _detail = apply_urls(urls, partial=True, reason=reason)
+        log.info(
+            "WebRequest re-apply (%s) attempt %d: %d url(s) -> %s",
+            reason,
+            attempt,
+            len(urls),
+            status,
+        )
+        if status == STATUS_OK:
+            return
+        time.sleep(_REAPPLY_RETRY_SECONDS)
+    log.warning(
+        "WebRequest re-apply (%s) gave up after %d attempts; POST /webrequest/apply retries it",
+        reason,
+        _REAPPLY_ATTEMPTS,
+    )
+
+
+def _reapply_loop(delay_seconds: float, reason: str) -> None:
+    global _reapply_running, _reapply_again
+    try:
+        while True:
+            try:
+                _reapply_once(delay_seconds, reason)
+            except Exception:  # noqa: BLE001 - a daemon thread must log, not die silently
+                log.exception("WebRequest re-apply (%s) failed", reason)
+            with _reapply_lock:
+                if _reapply_again is None:
+                    _reapply_running = False
+                    return
+                (delay_seconds, reason), _reapply_again = _reapply_again, None
+    finally:
+        with _reapply_lock:
+            _reapply_running = False
 
 
 def reapply_in_background(delay_seconds: float, reason: str) -> None:
@@ -183,39 +288,14 @@ def reapply_in_background(delay_seconds: float, reason: str) -> None:
     entry does not leave the terminal with no allowlist at all. No-op off
     Windows (bare metal keeps the list in common.ini) or without a stored list.
     """
-    if not available():
+    global _reapply_running, _reapply_again
+    if not available() or not wr.effective_urls(_cfg_dir()):
         return
-    urls = wr.effective_urls(_cfg_dir())
-    if not urls:
-        return
-
-    def _work():
-        try:
-            time.sleep(delay_seconds)
-            attempt = 0
-            while attempt < _REAPPLY_ATTEMPTS:
-                if backtest_running():
-                    time.sleep(_BACKTEST_POLL_SECONDS)
-                    continue
-                attempt += 1
-                status, _detail = apply_urls(urls, partial=True, reason=reason)
-                log.info(
-                    "WebRequest re-apply (%s) attempt %d: %d url(s) -> %s",
-                    reason,
-                    attempt,
-                    len(urls),
-                    status,
-                )
-                if status == STATUS_OK:
-                    return
-                time.sleep(_REAPPLY_RETRY_SECONDS)
-            log.warning(
-                "WebRequest re-apply (%s) gave up after %d attempts; "
-                "POST /webrequest/apply retries it",
-                reason,
-                _REAPPLY_ATTEMPTS,
-            )
-        except Exception:  # noqa: BLE001 - a daemon thread must log, not die silently
-            log.exception("WebRequest re-apply (%s) failed", reason)
-
-    threading.Thread(target=_work, name="webrequest-reapply", daemon=True).start()
+    with _reapply_lock:
+        if _reapply_running:
+            _reapply_again = (delay_seconds, reason)
+            return
+        _reapply_running = True
+    threading.Thread(
+        target=_reapply_loop, args=(delay_seconds, reason), name="webrequest-reapply", daemon=True
+    ).start()

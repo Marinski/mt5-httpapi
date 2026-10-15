@@ -432,3 +432,163 @@ def test_start_monitor_spawns_a_named_daemon_thread(monkeypatch):
     fake_log.info.assert_called_once()
     assert fake_log.info.call_args.args[0] == "Health monitor started (check every %ds)."
     assert fake_log.info.call_args.args[1] == monitor.CHECK_INTERVAL
+
+
+# --- the terminal generation watcher ---------------------------------------------
+
+
+@pytest.fixture
+def watcher(monkeypatch):
+    """One _generation_step at a time against a scripted terminal process,
+    a recorded SDK reconnect and a recorded re-apply."""
+    import threading
+
+    from mt5api.backtest import handler as backtest
+    from mt5api.chartctl import terminal_pid
+    from mt5api.chartctl import webrequest_apply as wa
+
+    state = {"generation": (42, 100.0), "reconnect": True, "reconnects": 0,
+             "stale": True, "pending": False, "reapplies": [], "sessions": []}
+
+    def ensure_initialized():
+        state["reconnects"] += 1
+        if isinstance(state["reconnect"], Exception):
+            raise state["reconnect"]
+        return state["reconnect"]
+
+    @contextmanager
+    def fake_session(**kwargs):
+        state["sessions"].append(kwargs)
+        yield
+
+    monkeypatch.setattr(terminal_pid, "current_generation", lambda: state["generation"])
+    monkeypatch.setattr(mc, "ensure_initialized", ensure_initialized)
+    monkeypatch.setattr(monitor, "session", fake_session)
+    monkeypatch.setattr(wa, "is_stale", lambda gen: state["stale"])
+    monkeypatch.setattr(wa, "reapply_pending", lambda: state["pending"])
+    monkeypatch.setattr(wa, "gui_settle_seconds", lambda: 25)
+    monkeypatch.setattr(wa, "reapply_in_background",
+                        lambda delay, reason: state["reapplies"].append((delay, reason)))
+    monkeypatch.setattr(backtest, "RUN_LOCK", threading.Lock())
+    fake_log = MagicMock()
+    monkeypatch.setattr(monitor, "log", fake_log)
+    state["log"] = fake_log
+    state["run_lock"] = backtest.RUN_LOCK
+    return state
+
+
+def test_a_new_terminal_process_reconnects_the_sdk_then_reapplies(watcher):
+    monitor._generation_step({"last_seen": (41, 50.0)})
+
+    assert watcher["reconnects"] == 1
+    assert watcher["sessions"] == [{"bypass_queue_cap": True}]
+    assert watcher["reapplies"] == [(25, "new terminal process")]
+
+
+def test_the_same_process_again_does_nothing(watcher):
+    monitor._generation_step({"last_seen": (42, 100.0)})
+
+    assert watcher["reconnects"] == 0
+    assert watcher["reapplies"] == []
+
+
+def test_a_terminal_that_is_not_running_does_nothing(watcher):
+    watcher["generation"] = None
+
+    monitor._generation_step({"last_seen": (41, 50.0)})
+
+    assert watcher["reconnects"] == 0
+    assert watcher["reapplies"] == []
+
+
+def test_a_new_process_whose_list_is_not_stale_only_reconnects(watcher):
+    watcher["stale"] = False  # no stored list, or already applied to this process
+
+    monitor._generation_step({"last_seen": (41, 50.0)})
+
+    assert watcher["reconnects"] == 1
+    assert watcher["reapplies"] == []
+
+
+def test_a_pending_reapply_is_not_doubled(watcher):
+    watcher["pending"] = True
+
+    monitor._generation_step({"last_seen": None})
+
+    assert watcher["reconnects"] == 1
+    assert watcher["reapplies"] == []
+
+
+@pytest.mark.parametrize("reconnect", [False, RuntimeError("sdk wedged")])
+def test_a_failed_reconnect_still_reapplies(watcher, reconnect):
+    watcher["reconnect"] = reconnect
+
+    monitor._generation_step({"last_seen": (41, 50.0)})
+
+    assert watcher["reapplies"] == [(25, "new terminal process")]
+
+
+def test_a_backtest_process_is_neither_acted_on_nor_recorded(watcher):
+    seen = {"last_seen": (41, 50.0)}
+    watcher["run_lock"].acquire()
+    try:
+        monitor._generation_step(seen)
+    finally:
+        watcher["run_lock"].release()
+
+    assert watcher["reconnects"] == 0 and watcher["reapplies"] == []
+    assert seen["last_seen"] == (41, 50.0)  # seen as new once the run is over
+
+    monitor._generation_step(seen)
+    assert watcher["reapplies"] == [(25, "new terminal process")]
+
+
+# --- the WebRequest stale alert -----------------------------------------------------
+
+
+@pytest.fixture
+def stale(monkeypatch):
+    from mt5api.chartctl import terminal_pid
+    from mt5api.chartctl import webrequest_apply as wa
+
+    state = {"stale": True}
+    monkeypatch.setattr(wa, "available", lambda: True)
+    monkeypatch.setattr(terminal_pid, "last_generation", lambda: (42, 100.0))
+    monkeypatch.setattr(wa, "is_stale", lambda gen: state["stale"])
+    monkeypatch.setattr(wa, "load_status",
+                        lambda: {"status": "FAIL", "code": "terminal_busy"})
+    fake_log = MagicMock()
+    monkeypatch.setattr(monitor, "log", fake_log)
+    state["log"] = fake_log
+    return state
+
+
+def test_a_list_stale_for_four_minutes_is_not_an_error_yet(stale):
+    check = {}
+    monitor._webrequest_stale_check(check, 0.0)
+    monitor._webrequest_stale_check(check, 240.0)
+
+    assert _error_messages(stale["log"]) == []
+
+
+def test_a_list_stale_past_five_minutes_is_an_error_on_every_pass(stale):
+    check = {}
+    for now in (0.0, 360.0, 420.0):
+        monitor._webrequest_stale_check(check, now)
+
+    errors = _error_messages(stale["log"])
+    assert len(errors) == 2
+    assert all("WEBREQUEST LIST NOT RESTORED" in e for e in errors)
+
+
+def test_a_restored_list_logs_once_and_resets(stale):
+    check = {}
+    monitor._webrequest_stale_check(check, 0.0)
+    monitor._webrequest_stale_check(check, 360.0)
+    stale["stale"] = False
+    monitor._webrequest_stale_check(check, 420.0)
+    monitor._webrequest_stale_check(check, 480.0)
+
+    restored = [m for m in _info_messages(stale["log"]) if "restored" in m]
+    assert len(restored) == 1
+    assert check == {"since": None, "alerted": False}
