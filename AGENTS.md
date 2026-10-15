@@ -30,7 +30,7 @@ The VM does not see the repo. `run.sh` (what `make up` runs) copies `config/conf
 
 Each is off unless `config.yaml` turns it on, and its routes do not exist when it is off.
 
-- **Chart Deployments** (`chartctl.enabled: true`, live-mode terminals only, `chartctl: false` on a terminal opts it out): upload `.ex5` and `.set` files, declare deployments, and let the loader EA `assets/experts/MT5ChartLoader.mq5` (with `assets/experts/include/ChartControl.mqh`) reconcile charts over a file protocol. Routes in `mt5api/handlers/chartctl_routes.py`, logic in `mt5api/chartctl/`. The WebRequest allowlist routes come with it and are applied through AutoIt (`assets/autoit/`).
+- **Chart Deployments** (`chartctl.enabled: true`, live-mode terminals only, `chartctl: false` on a terminal opts it out): upload `.ex5` and `.set` files, declare deployments, and let the loader EA `assets/experts/MT5ChartLoader.mq5` (with `assets/experts/include/ChartControl.mqh`) reconcile charts over a file protocol. Routes in `mt5api/handlers/chartctl_routes.py`, logic in `mt5api/chartctl/`. The WebRequest allowlist routes come with it and are applied in the terminal's Options dialog with window messages (`mt5api/chartctl/winoptions.py`).
 - **File API** (`files.enabled: true`, `files: false` on a terminal opts it out, any mode): list, read, write, unzip and delete files in the terminal tree (`/files/...`) and the compile tree (`/compile/files/...`). Routes in `mt5api/handlers/files.py`, logic in `mt5api/fileapi/`.
 - **Compile** (`POST /compile`, always registered): MQL5 source in, `.ex5` out, through MetaEditor. Tuned by `compile_api_token`, `compile_timeout`, `compile_max_source_bytes`, `compile_terminal_dir`, `compile_include_dir`, `compile_work_dir`, `compile_local_cache` and `compile_include_digests` (env var of the same name in upper case wins). Code in `mt5api/handlers/compile.py`.
 
@@ -51,12 +51,12 @@ The enable rules live in `chartctl_enabled()` and `files_enabled()` in `mt5api/c
 | `mt5api/symbol_cache.py`, `mt5api/monitor.py` | Persisted broker symbol list; terminal health monitor. |
 | `mt5api/handlers/` | One module per route family: `terminal`, `account`, `symbols` (rates, ticks, TA), `orders`, `positions`, `history`, `compile`, `files`, `chartctl`, `webrequest`, plus `chartctl_routes.py`. |
 | `mt5api/backtest/` | Strategy Tester jobs: INI and set builders, job state on disk (`jobs.py`), report, cache and optimization parsers, the route handlers. |
-| `mt5api/chartctl/` | Chart Deployments: registry, paths, template builder, set parsing, loader commands, WebRequest allowlist (file and AutoIt). No SDK calls. |
+| `mt5api/chartctl/` | Chart Deployments: registry, paths, template builder, set parsing, loader commands, WebRequest allowlist (file, and the Options-dialog and Navigator window-message drivers `winoptions.py`, `winnavigator.py`, with `terminal_pid.py`). No SDK calls. |
 | `mt5api/fileapi/` | File API: path resolution and protection (`tree.py`), operations (`ops.py`), typed errors (`errors.py`), protected paths (`__init__.py`). |
 | `mcpunifier/` | Unified MCP service: `server.py` (FastAPI, auth, request ids, `/health`), `mcp_server.py` (tools and the route catalog), `client.py` (httpx), `config.py`, `constants.py`, `errors.py`, `logging.py` (structured JSON). |
 | `scripts/` | Host glue (`config_helper.py`, `status.sh`, `healthcheck.sh`, `rotate-logs.sh`, `recreate-vm.sh`, `vm-watchdog.py`, `verify_binaries.py`, `lint.sh`) and Windows boot scripts (`install.bat`, `start.bat`, `api_runner.bat`, `reboot.bat`, `reboot_guard.py`, `acquire_lock.ps1`, `event-log-tailer.ps1`, compile helpers). `scripts/defender-remover/` is vendored third party (see `THIRD_PARTY.md`). |
 | `assets/experts/` | `MT5ChartLoader.mq5` and `include/ChartControl.mqh` (loader protocol version `CHARTCTL_VERSION`), `MT5SystemWarmup.mq5` for compile warm-up. |
-| `assets/autoit/` | Vendored `AutoIt3_x64.exe` and the `.au3` scripts that set the WebRequest allowlist and refresh the Navigator. |
+| `assets/autoit/` | Vendored `AutoIt3_x64.exe` and `.au3` scripts, no longer used by the API; kept only for the `?script=` dev hook until they are removed. |
 | `assets/binaries.lock.json` | Provenance and sha256 of every tracked executable. |
 | `clients/go/` | Typed public Go client, its own module (`go 1.26.1`). |
 | `examples/` | Python and shell examples (`examples/python/`, `examples/chartctl/`). |
