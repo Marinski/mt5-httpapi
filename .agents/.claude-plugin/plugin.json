@@ -1,6 +1,6 @@
 {
   "name": "mt5-httpapi",
-  "description": "MetaTrader 5 trading via REST \u2014 market data, orders, positions, history, and server-side technical analysis",
+  "description": "MetaTrader 5 trading via REST: market data, orders, positions, history, and server-side technical analysis.",
   "author": {
     "name": "psyb0t",
     "url": "https://github.com/psyb0t"

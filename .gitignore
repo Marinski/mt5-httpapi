@@ -83,3 +83,6 @@ fuckyeah.md
 
 # Transient export used by the release script's secret scan
 .gitleaks-export/
+
+# Review receipt for the local release script.
+git-update.sh.debot
