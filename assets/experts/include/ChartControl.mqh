@@ -19,7 +19,7 @@
 #property strict
 
 #define CHARTCTL_PROTOCOL   1
-#define CHARTCTL_VERSION    "1.0.4"
+#define CHARTCTL_VERSION    "1.0.5"
 #define CHARTCTL_DIR        "chartctl"          // under MQL5\Files\
 #define CHARTCTL_OWNED_FILE "owned.json"        // chart_id -> deployment_id
 // Experts on the charts MT5 restores at startup load a few seconds after the
@@ -126,6 +126,11 @@ public:
    void     Tick(void);
    void     Deinit(void);
    bool     IsOwner(void) const { return m_owner; }
+   // True once the owner's startup grace has passed, so restored deployment
+   // charts have had their chance to be adopted or re-armed.
+   bool     StartupGraceOver(void) const
+            { return m_owner && GetTickCount64() - m_owner_since_ms >= CHARTCTL_STARTUP_GRACE_MS; }
+   int      CloseLeakedBareCharts(const string symbol, const ENUM_TIMEFRAMES period);
 };
 
 //+------------------------------------------------------------------+
@@ -363,6 +368,70 @@ bool CChartControl::ArmChart(const long cid, const ChartCtlDeployment &dep,
 
 //+------------------------------------------------------------------+
 //| Ownership map: which deployment owns which open chart.           |
+//+------------------------------------------------------------------+
+//| Close bare charts left behind by earlier [StartUp] launches.      |
+//|                                                                   |
+//| mt5start.ini [StartUp] opens a new chart for the loader on every  |
+//| launch, and MT5 saves that chart to the profile on a clean exit   |
+//| without the [StartUp] expert. Each launch then restores one more  |
+//| bare chart on the loader's symbol and timeframe until the         |
+//| terminal hits its chart limit and the loader can no longer open   |
+//| its own chart. Only charts on that symbol and timeframe with no   |
+//| expert, no indicators, no drawn objects and no owning deployment  |
+//| are closed; the caller's own chart is kept.                       |
+//+------------------------------------------------------------------+
+//| True when the chart holds an object someone drew. The arrows and  |
+//| lines MT5 adds for the account's trade history ("autotrade #..."  |
+//| and "#<ticket> ...") do not count: they appear on every chart of  |
+//| a traded symbol.                                                  |
+//+------------------------------------------------------------------+
+bool HasDrawnObjects(const long chart_id)
+{
+   int total = ObjectsTotal(chart_id, -1, -1);
+   for(int i = 0; i < total; i++)
+   {
+      string name = ObjectName(chart_id, i, -1, -1);
+      if(StringFind(name, "autotrade #") == 0 || StringFind(name, "#") == 0)
+         continue;
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+int CChartControl::CloseLeakedBareCharts(const string symbol, const ENUM_TIMEFRAMES period)
+{
+   if(!m_owner)
+      return 0;
+   int closed = 0;
+   long cid = ChartFirst();
+   while(cid >= 0)
+   {
+      long next = ChartNext(cid);
+      if(cid != ChartID()
+         && ChartSymbol(cid) == symbol
+         && ChartPeriod(cid) == period
+         // An expert-less chart reports a NULL name, which is not == "".
+         && StringLen(ChartGetString(cid, CHART_EXPERT_NAME)) == 0
+         && OwnerOf(cid) == ""
+         && !HasDrawnObjects(cid))
+      {
+         bool has_indicators = false;
+         int windows = (int)ChartGetInteger(cid, CHART_WINDOWS_TOTAL);
+         for(int w = 0; w < windows && !has_indicators; w++)
+            if(ChartIndicatorsTotal(cid, w) > 0)
+               has_indicators = true;
+         if(!has_indicators && ChartClose(cid))
+            closed++;
+      }
+      cid = next;
+   }
+   if(closed > 0)
+      PrintFormat("ChartControl: closed %d leaked bare %s %s chart(s)",
+                  closed, symbol, EnumToString(period));
+   return closed;
+}
+
 //+------------------------------------------------------------------+
 string CChartControl::OwnerOf(const long chart_id)
 {

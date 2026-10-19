@@ -17,7 +17,7 @@
 //+------------------------------------------------------------------+
 #property copyright "mt5-httpapi"
 #property link      "https://github.com/psyb0t/mt5-httpapi"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 
 #include <ChartControl.mqh>
@@ -25,6 +25,7 @@
 input int InpLoopSeconds = 1;   // reconcile timer period (seconds)
 
 CChartControl ctl;
+bool          g_leaks_closed = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -44,6 +45,14 @@ int OnInit()
 void OnTimer()
 {
    ctl.Tick();
+   // Once per launch, after restored deployment charts were re-armed: clear
+   // the bare charts earlier [StartUp] launches left on this symbol and
+   // timeframe, so they never pile up to the terminal's chart limit.
+   if(!g_leaks_closed && ctl.StartupGraceOver())
+   {
+      ctl.CloseLeakedBareCharts(_Symbol, (ENUM_TIMEFRAMES)_Period);
+      g_leaks_closed = true;
+   }
 }
 
 //+------------------------------------------------------------------+

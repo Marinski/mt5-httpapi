@@ -191,7 +191,10 @@ any) the loader attributes it to:
 ```
 
 Charts with no deployment (e.g. leftover duplicates) can be closed with
-`POST /charts/<id>/close`.
+`POST /charts/<id>/close`. The standalone loader also cleans up after itself:
+30 seconds after it starts it closes the bare charts earlier launches left on
+its own symbol and timeframe (no expert, no indicators, no drawn objects, no
+owning deployment), so they never pile up to MT5's chart limit.
 
 ### `POST /charts/<chart_id>/screenshot`
 

@@ -6,7 +6,7 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
-## [Unreleased]
+## [v4.30.0]: 2026-10-19
 
 ### Changed
 
@@ -15,6 +15,7 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 - **`PUT /webrequest` refuses a URL it cannot apply.** A URL that is not `http(s)` with a host, at most 750 characters and no spaces, `;` or control characters answers 400 `INVALID_URL` (listed under `rejected`) instead of being dropped silently or failing every later apply.
 - **The boot and restart re-apply, and `POST /webrequest/apply`, skip a URL the terminal will not take** and report it under `rejected`, instead of leaving the terminal with no list.
 - **`POST /experts` reports `ok` only when the expert is in the Navigator.** The refresh now checks the tree under Expert Advisors > Uploaded; a miss is `failed` with a `navigator_error` code, and an expert listed before the refresh adds `already_listed: true`. Translated Navigator labels for a non-English terminal go in `chartctl.navigator_labels`.
+- The agent plugin manifests describe the plugin in the same words as the psyb0t/agents catalog.
 - **Terminal restarts kill only this terminal's process.** `_kill_terminal` and the GUI drivers find `terminal64.exe` by its exact path. With no account configured, a restart used to terminate every terminal of the broker.
 
 ### Added
@@ -24,6 +25,10 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 - **`GET /webrequest` returns `last_apply`**, the outcome of the latest apply (`Config/webrequest_status.json`).
 - **GUI calls are refused while a backtest runs** on the terminal (409 `backtest_running`); the background re-apply waits for the run to end.
 - **A terminal that restarts on its own gets its WebRequest list back.** A LiveUpdate, a terminal the SDK started after a crash or one started by hand used to keep no allowlist until someone called `POST /webrequest/apply`. A watcher now checks every 10 seconds whether `terminal64.exe` is a new process, reconnects the SDK to it (so the health monitor no longer kills a freshly updated terminal for not answering) and re-applies the list. `GET /webrequest` adds `terminal_pid`, `terminal_started_at` and `stale`, and a list missing for 5 minutes is logged as `!!! WEBREQUEST LIST NOT RESTORED !!!`. See [docs/chart-deployments.md](docs/chart-deployments.md#webrequest-allowlist).
+
+### Fixed
+
+- **Chart deployments no longer stop working after enough reboots.** `mt5start.ini` `[StartUp]` opens a new chart for the loader on every terminal launch, and MT5 saves that chart without its expert on a clean exit, so every graceful shutdown (including the idle auto-reboot) left one more bare EURUSD H1 chart. Once a terminal reached MT5's chart limit, the loader could no longer open its own chart and no deployment ever ran. The loader (ChartControl 1.0.5) now closes those leftovers 30 seconds after it starts: bare charts on its own symbol and timeframe with no expert, no indicators, no drawn objects and no owning deployment. MT5's trade-history markers do not count as drawn objects. A terminal that already hit the limit recovers on its next launch.
 
 ## [v4.29.0]: 2026-10-12
 
