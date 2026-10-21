@@ -1,5 +1,6 @@
-AGENTS.md
 CLAUDE.md
+.agents/rules/*.local.md
+.agents/settings.local.json
 CODEX.local.md
 .testing/
 .research_files
@@ -67,7 +68,6 @@ ANUSTIMES.md
 .research_files/
 fuckyeah.md
 .telemetry/
-.claude/
 
 # Isolated env for `make test-integration` (testcontainers on the host).
 .venv-test/
