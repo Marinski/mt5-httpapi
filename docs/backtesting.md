@@ -318,6 +318,16 @@ overwritten with the credentials from `config.yaml` for the request's
 broker/account. The expert path is rewritten to `Uploaded\<basename>` and the
 set file is namespaced per job to avoid collisions.
 
+When the broker's server ships a new MT5 build, a launch of a terminal with
+the update pending starts an updater (`<AppData>\MetaQuotes\Terminal\<hash>\liveupdate\terminal64.exe /update`)
+and exits. If the next test relaunches the terminal before the updater has
+replaced `terminal64.exe`, the updater never finishes. So before every launch
+the API waits up to 120 s for a leftover updater of that terminal to exit,
+then stops it, and a timed-out run's cleanup stops them too. Left alone they
+pile up, each holding about 48 GDI and 36 USER objects, until the Windows
+session runs out (65,536 GDI objects) and every terminal launch fails with
+exit 10053 or 10012 ("not enough handles to start the platform").
+
 ### `GET /backtest/{job_id}`
 
 Status payload. `status` ∈ `queued` `running` `completed` `failed`. When

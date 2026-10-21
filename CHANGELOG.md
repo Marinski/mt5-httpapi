@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Stuck MT5 LiveUpdate updaters no longer pile up until every backtest launch fails.** When a broker's server ships a new build, each launch of a terminal with the update pending starts an updater from `AppData\...\liveupdate\terminal64.exe`; if the next test relaunches the terminal first, that updater never finishes. They run outside the terminal folder, so nothing stopped them: about 1,000 per VM used up the Windows session's GDI objects and every launch on every terminal failed with exit 10053 or 10012 ("not enough handles to start the platform"). Each launch now waits up to 120 s for a leftover updater of its terminal, then stops it, and the timeout cleanup includes them. See [docs/backtesting.md](docs/backtesting.md#post-backtest).
+
 ## [v4.30.0]: 2026-10-19
 
 ### Changed
