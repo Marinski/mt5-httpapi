@@ -42,6 +42,9 @@ def _install_mt5_stub():
         # it here, reaching a success path raises AttributeError on the stub, so
         # no test could assert one.
         "TRADE_RETCODE_DONE",
+        # The other two retcodes that mean the broker accepted an order, used
+        # by the client_order_id dedupe in the orders handler.
+        "TRADE_RETCODE_PLACED", "TRADE_RETCODE_DONE_PARTIAL",
     ]):
         setattr(mt5, name, i)
     # Callable surface — every test that needs real behavior mocks per-call.

@@ -592,6 +592,7 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
         deviation: int = 0,
         comment: str = "",
         magic: int = 0,
+        client_order_id: str = "",
         instance: str = DEFAULT_INSTANCE,
     ) -> dict[str, Any]:
         """Place a market or pending order on one terminal (``POST /orders``).
@@ -601,6 +602,12 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
         required for pending orders; market orders fetch the current tick if
         omitted. ``sl``/``tp`` are optional stop-loss/take-profit prices.
         ``deviation`` is max allowed slippage in points (market orders).
+        ``client_order_id`` (1 to 31 letters, digits or ``._:-``) makes the
+        call safe to retry: it is stored as the order comment, so leave
+        ``comment`` empty, and if an order with that id was already placed
+        nothing is sent and the answer has ``duplicate: true`` with the
+        existing order, position or history entry. Use a fresh id per
+        intended order and reuse it only when retrying that same order.
 
         DESTRUCTIVE: places a real order on a real account — irreversible once
         filled. Only call on explicit user request, and confirm
@@ -621,6 +628,8 @@ def build_mcp_server(settings: Settings, client: TerminalClient) -> FastMCP:
             body["comment"] = comment
         if magic:
             body["magic"] = magic
+        if client_order_id:
+            body["client_order_id"] = client_order_id
         return await call(broker, account, instance, "POST", "/orders", body=body)
 
     @mcp.tool()

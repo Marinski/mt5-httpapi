@@ -1,18 +1,89 @@
-from flask import jsonify, request
+from flask import g, jsonify, request
 
+import re
 import time
 
 import MetaTrader5 as mt5
 
 from mt5api.config import ORDER_TYPE_MAP, TIME_MAP
+from mt5api.logger import log
 from mt5api.mt5client import (
     build_order_request,
     ensure_initialized,
     ensure_symbol,
     m,
     to_dict,
+    utc_seconds_to_broker_dt,
     with_mt5,
 )
+
+# A client_order_id travels in the order comment, which MT5 caps at 31
+# characters. Letters, digits and ._:- survive every broker's comment field
+# and need no escaping in logs.
+CLIENT_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,31}$")
+
+# How far back a retry is matched against sends and the broker's order
+# history. Retries usually come seconds to minutes after a timeout; a week
+# also covers an agent that picks a task up again the next day, without
+# scanning the account's whole history on every order.
+CLIENT_ORDER_ID_LOOKBACK_SECONDS = 7 * 24 * 3600
+
+# The history window ends this far in the future, so a broker clock or a
+# configured utc_offset that is off by up to a day still includes the order
+# that was just placed.
+CLIENT_ORDER_ID_HISTORY_SLACK_SECONDS = 24 * 3600
+
+# Accepted sends by client_order_id: (time sent, trade result). The broker
+# lookup finds an order by its comment, but some brokers rewrite or drop
+# comments; this catches a retry to the same process even then. Only
+# accepted sends are kept: a rejected order was never placed, so a retry with
+# the same id must send again. Guarded by the MT5 lock like every handler.
+_recent_client_orders = {}
+
+
+def _accepted(retcode):
+    return retcode in (
+        mt5.TRADE_RETCODE_DONE,
+        mt5.TRADE_RETCODE_PLACED,
+        mt5.TRADE_RETCODE_DONE_PARTIAL,
+    )
+
+
+def _forget_old_client_orders(now):
+    cutoff = now - CLIENT_ORDER_ID_LOOKBACK_SECONDS
+    for cid in [c for c, (sent, _) in _recent_client_orders.items() if sent < cutoff]:
+        del _recent_client_orders[cid]
+
+
+def _find_client_order(cid):
+    """Return (source, item) for an order already placed with this
+    client_order_id, or (None, None). Checks this process's recent sends,
+    then pending orders, open positions and the order history, all by
+    comment. Not filtered by symbol: the id names one order on the account."""
+    now = time.time()
+    _forget_old_client_orders(now)
+    recent = _recent_client_orders.get(cid)
+    if recent is not None:
+        return "recent_send", recent[1]
+
+    for source, items in (
+        ("pending_order", m(mt5.orders_get)),
+        ("position", m(mt5.positions_get)),
+    ):
+        for item in items or ():
+            if item.comment == cid:
+                return source, to_dict(item)
+
+    history = m(
+        mt5.history_orders_get,
+        utc_seconds_to_broker_dt(now - CLIENT_ORDER_ID_LOOKBACK_SECONDS),
+        utc_seconds_to_broker_dt(now + CLIENT_ORDER_ID_HISTORY_SLACK_SECONDS),
+    )
+    for item in history or ():
+        if item.comment == cid:
+            return "history_order", to_dict(item)
+
+    return None, None
 
 
 @with_mt5
@@ -41,6 +112,34 @@ def create_order():
         valid_types = list(ORDER_TYPE_MAP.keys())
         return jsonify({"error": f"Invalid type: {order_type}. Use: {valid_types}"}), 400
 
+    cid = body.get("client_order_id")
+    if cid is not None:
+        if not isinstance(cid, str) or not CLIENT_ORDER_ID_RE.match(cid):
+            return jsonify({
+                "error": "'client_order_id' must be 1 to 31 letters, digits or ._:-",
+            }), 400
+        if body.get("comment", cid) != cid:
+            return jsonify({
+                "error": "'client_order_id' is stored in the order comment; "
+                "send no 'comment' or the same value",
+            }), 400
+        body["comment"] = cid
+
+        source, existing = _find_client_order(cid)
+        if source is not None:
+            log.info(
+                "%s order not sent: client_order_id already used source=%s",
+                g.req_id, source,
+            )
+            replay = existing if source == "recent_send" else {}
+            return jsonify({
+                **replay,
+                "duplicate": True,
+                "client_order_id": cid,
+                "source": source,
+                "existing": existing,
+            }), 200
+
     is_market = order_type in ("BUY", "SELL")
 
     if not ensure_symbol(body["symbol"]):
@@ -68,8 +167,15 @@ def create_order():
         err = m(mt5.last_error)
         return jsonify({"error": f"order_send failed: {err}"}), 500
 
+    out = to_dict(result)
+    if cid is not None:
+        out["duplicate"] = False
+        out["client_order_id"] = cid
+        if _accepted(result.retcode):
+            _recent_client_orders[cid] = (time.time(), out)
+
     status = 201 if result.retcode == mt5.TRADE_RETCODE_DONE else 200
-    return jsonify(to_dict(result)), status
+    return jsonify(out), status
 
 
 @with_mt5

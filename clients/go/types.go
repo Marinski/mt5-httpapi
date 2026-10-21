@@ -283,6 +283,15 @@ type TradeResult struct {
 	Comment    string  `json:"comment"`
 	RequestID  int64   `json:"request_id"`
 	RetcodeExt int     `json:"retcode_external"`
+
+	// Set by CreateOrder when the request carried a ClientOrderID. A
+	// Duplicate result sent nothing: Source says where the earlier order was
+	// found (recent_send, pending_order, position or history_order) and
+	// Existing holds that order, position or history entry as returned.
+	Duplicate     bool            `json:"duplicate,omitempty"`
+	ClientOrderID string          `json:"client_order_id,omitempty"`
+	Source        string          `json:"source,omitempty"`
+	Existing      json.RawMessage `json:"existing,omitempty"`
 }
 
 type CreateOrderRequest struct {
@@ -299,6 +308,8 @@ type CreateOrderRequest struct {
 	TypeTime    string  `json:"type_time,omitempty"`
 	Expiration  int64   `json:"expiration,omitempty"`
 	StopLimit   float64 `json:"stoplimit,omitempty"`
+	// ClientOrderID makes the call safe to retry; see TradeResult.Duplicate.
+	ClientOrderID string `json:"client_order_id,omitempty"`
 }
 
 type UpdateOrderRequest struct {

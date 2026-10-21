@@ -245,3 +245,114 @@ def test_cancel_of_an_unknown_order_sends_nothing(api_client, orders):
 
     assert resp.status_code == 404
     assert orders.calls_to("order_send") == []
+
+
+# --- client_order_id: a retry must never place a second order ----------------
+
+Live = namedtuple("Live", "ticket comment")
+CID = "agent-run-7"
+
+
+@pytest.fixture(autouse=True)
+def _no_remembered_client_orders(monkeypatch):
+    monkeypatch.setattr(orders_handler, "_recent_client_orders", {})
+
+
+def _buy(**extra):
+    return {"symbol": "EURUSD", "type": "BUY", "volume": 0.1, "price": 1.5, **extra}
+
+
+def test_a_new_client_order_id_is_sent_in_the_comment(api_client, orders):
+    orders.set("order_send", _result())
+
+    resp = api_client.post("/orders", json=_buy(client_order_id=CID))
+
+    assert resp.status_code == 201
+    assert orders.sent_order()["comment"] == CID
+    body = resp.get_json()
+    assert body["duplicate"] is False
+    assert body["client_order_id"] == CID
+
+
+def test_a_retry_after_an_accepted_send_replays_it_without_sending(api_client, orders):
+    orders.set("order_send", _result())
+    first = api_client.post("/orders", json=_buy(client_order_id=CID)).get_json()
+
+    resp = api_client.post("/orders", json=_buy(client_order_id=CID))
+
+    assert resp.status_code == 200
+    assert len(orders.calls_to("order_send")) == 1
+    body = resp.get_json()
+    assert body["duplicate"] is True
+    assert body["source"] == "recent_send"
+    assert body["order"] == first["order"]
+    assert body["retcode"] == mt5.TRADE_RETCODE_DONE
+
+
+@pytest.mark.parametrize(
+    ("sdk_fn", "source"),
+    [
+        ("orders_get", "pending_order"),
+        ("positions_get", "position"),
+        ("history_orders_get", "history_order"),
+    ],
+)
+def test_an_id_already_on_the_account_is_not_sent_again(api_client, orders, sdk_fn, source):
+    """The retry may reach a restarted process that remembers nothing; the
+    broker's own orders, positions and history still carry the id."""
+    orders.set(sdk_fn, [Live(ticket=999, comment="other"), Live(ticket=TICKET, comment=CID)])
+
+    resp = api_client.post("/orders", json=_buy(client_order_id=CID))
+
+    assert resp.status_code == 200
+    assert orders.calls_to("order_send") == []
+    body = resp.get_json()
+    assert body["duplicate"] is True
+    assert body["source"] == source
+    assert body["existing"]["ticket"] == TICKET
+
+
+def test_a_rejected_send_is_not_remembered_so_a_retry_sends(api_client, orders):
+    orders.set("order_send", _result(retcode=-1))
+    api_client.post("/orders", json=_buy(client_order_id=CID))
+
+    orders.set("order_send", _result())
+    resp = api_client.post("/orders", json=_buy(client_order_id=CID))
+
+    assert resp.status_code == 201
+    assert len(orders.calls_to("order_send")) == 2
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"client_order_id": ""},
+        {"client_order_id": "x" * 32},
+        {"client_order_id": "has space"},
+        {"client_order_id": 42},
+        {"client_order_id": CID, "comment": "something else"},
+    ],
+)
+def test_a_bad_client_order_id_is_refused_before_any_lookup(api_client, orders, extra):
+    resp = api_client.post("/orders", json=_buy(**extra))
+
+    assert resp.status_code == 400
+    assert orders.calls == []
+
+
+def test_a_matching_comment_is_accepted_with_the_id(api_client, orders):
+    orders.set("order_send", _result())
+
+    resp = api_client.post("/orders", json=_buy(client_order_id=CID, comment=CID))
+
+    assert resp.status_code == 201
+
+
+def test_without_a_client_order_id_nothing_is_looked_up(api_client, orders):
+    orders.set("order_send", _result())
+
+    resp = api_client.post("/orders", json=_buy())
+
+    assert resp.status_code == 201
+    assert [c["fn"] for c in orders.calls] == ["order_send"]
+    assert "duplicate" not in resp.get_json()

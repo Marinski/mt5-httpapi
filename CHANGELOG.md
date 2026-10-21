@@ -6,6 +6,16 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.31.0]: 2026-10-21
+
+### Added
+
+- **`POST /orders` takes a `client_order_id`, so retrying an order cannot place it twice.** After a timeout or a dropped connection you could not tell whether the order went through, and sending it again could open a second position. With a `client_order_id` (1 to 31 letters, digits or `._:-`, stored as the order comment), the API first looks for that id among the orders this process accepted in the last 7 days, the pending orders, the open positions and the order history of the last 7 days. If it finds one, nothing is sent and the answer is 200 with `"duplicate": true`, where it was found (`source`) and the existing order, position or history entry. The `create_order` tool on both MCP servers and the Go client's `CreateOrderRequest` take it too. See [docs/trading-and-history.md](docs/trading-and-history.md#safe-retries-with-client_order_id).
+
+### Changed
+
+- The rule index moved from `.agents/rules/README.md` into `AGENTS.md`. Every file in `.agents/rules/` is loaded into an agent's context, so that directory now holds rule files only.
+
 ## [v4.30.1]: 2026-10-21
 
 ### Fixed

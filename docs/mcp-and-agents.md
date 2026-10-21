@@ -26,7 +26,7 @@ Every terminal serves `/mcp` beside its REST API. The tools are dedicated and ty
   `get_ticks(symbol, count?, from_?, to?, flags?)`, and
   `get_rates_ta(symbol, timeframe, indicators, count?, from_?, to?)`
 - **Account / positions** — `get_account`, `list_positions`, `get_position`, `modify_position`, `close_position`
-- **Orders** — `list_orders`, `get_order`, `create_order(symbol, type, volume, price?, sl?, tp?)`, `modify_order`, `cancel_order`
+- **Orders** — `list_orders`, `get_order`, `create_order(symbol, type, volume, price?, sl?, tp?, client_order_id?)`, `modify_order`, `cancel_order`
 - **History / terminal / backtest** — `get_history_orders`, `get_history_deals`, `get_terminal`, `terminal_control`, `get_backtest`, `ping`
 - **Chart Deployments**, only on terminals with [chartctl](chart-deployments.md) enabled:
   - artifacts: `upload_expert(filename, content_base64, overwrite?)`, `list_experts`, `delete_expert`, `upload_set(filename, content? | content_base64?)`, `list_sets`, `get_set`, `delete_set`

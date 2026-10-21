@@ -126,12 +126,41 @@ All fields optional. `volume` defaults to full position, `deviation` defaults to
   "deviation": 20,
   "magic": 0,
   "comment": "",
+  "client_order_id": "",
   "type_filling": "IOC",
   "type_time": "GTC"
 }
 ```
 
 Required: `symbol`, `type`, `volume`. Everything else is optional. `price` gets auto-filled for market orders.
+
+### Safe retries with `client_order_id`
+
+A timeout or a dropped connection on `POST /orders` leaves you not knowing whether the order went through. Send a `client_order_id` and a retry can't place it twice:
+
+```json
+{
+  "symbol": "ADAUSD",
+  "type": "BUY",
+  "volume": 1000,
+  "client_order_id": "rebalance-2026-10-21-01"
+}
+```
+
+The id is 1 to 31 letters, digits or `._:-`, and it is stored as the order's `comment` (MT5 has one comment field), so leave `comment` out or send the same value. Before sending, the API looks for that id among the orders this terminal's API process accepted in the last 7 days, the pending orders, the open positions and the order history of the last 7 days. If it finds one, nothing is sent and the answer is 200:
+
+```json
+{
+  "duplicate": true,
+  "client_order_id": "rebalance-2026-10-21-01",
+  "source": "position",
+  "existing": { "ticket": 42094820, "symbol": "ADAUSD", "comment": "rebalance-2026-10-21-01" }
+}
+```
+
+`source` is `recent_send`, `pending_order`, `position` or `history_order`, and `existing` is that object. A `recent_send` answer also repeats the original trade result's fields (`retcode`, `order`, `deal`, ...). A first send answers as usual, plus `"duplicate": false` and the `client_order_id`.
+
+Use a new id for every order you mean to place, and reuse it only to retry that same order. An order the broker rejected is not remembered, so retrying it with the same id sends it again. Some brokers rewrite or drop order comments; then only a retry to the same API process within 7 days is caught, so keep the retry going to the same terminal.
 
 Order types:
 

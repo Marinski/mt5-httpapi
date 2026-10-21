@@ -284,6 +284,7 @@ func TestClient_CreateOrder_OmitEmptyFields(t *testing.T) {
 		for _, tag := range []string{
 			"price", "sl", "tp", "deviation", "magic",
 			"comment", "type_filling", "type_time", "expiration", "stoplimit",
+			"client_order_id",
 		} {
 			ordersAssertJSONFieldAbsent(t, body, tag)
 		}
@@ -659,5 +660,63 @@ func TestClient_CancelOrder_Error(t *testing.T) {
 
 	if !strings.Contains(err.Error(), fmt.Sprintf("%d", ticket)) {
 		t.Fatalf("error %q does not carry ticket context %d", err.Error(), ticket)
+	}
+}
+
+func TestClient_CreateOrder_Duplicate(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			return
+		}
+
+		ordersAssertJSONField(t, body, "client_order_id", "test-cid-1")
+
+		resp := map[string]any{
+			"duplicate":       true,
+			"client_order_id": "test-cid-1",
+			"source":          "position",
+			"existing":        map[string]any{"ticket": 12345},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode duplicate response: %v", err)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	got, err := client.CreateOrder(context.Background(), &CreateOrderRequest{
+		Symbol:        "TESTUSD",
+		Type:          "BUY",
+		Volume:        1.0,
+		ClientOrderID: "test-cid-1",
+	})
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	if !got.Duplicate || got.ClientOrderID != "test-cid-1" || got.Source != "position" {
+		t.Fatalf("unexpected duplicate result: %#v", got)
+	}
+
+	var existing struct {
+		Ticket int64 `json:"ticket"`
+	}
+	if err := json.Unmarshal(got.Existing, &existing); err != nil {
+		t.Fatalf("decode existing: %v", err)
+	}
+
+	if existing.Ticket != 12345 {
+		t.Fatalf("unexpected existing ticket: %d", existing.Ticket)
 	}
 }

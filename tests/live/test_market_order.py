@@ -6,6 +6,8 @@ can purge it even if a test crashes mid-flight.
 """
 from __future__ import annotations
 
+import time
+
 import requests
 
 from tests.live.helpers import find_position_by_magic, wait_until
@@ -116,4 +118,40 @@ def test_position_persists_until_explicit_close(client, config, cleanup_after):
     assert pos1 is not None
     pos2 = find_position_by_magic(client, config["magic"])
     assert pos2 is not None and pos2["ticket"] == pos1["ticket"]
+    assert cleanup_after is None or True
+
+
+def test_a_retried_client_order_id_opens_one_position(client, config, cleanup_after):
+    """The point of client_order_id: a retry after a timeout must not open a
+    second position. The position must also carry the id in its comment, or
+    a retry to a restarted API process could not find it on this broker."""
+    cid = f"livetest-{int(time.time())}"
+    body = {
+        "symbol": config["symbol"],
+        "type": "BUY",
+        "volume": config["volume"],
+        "magic": config["magic"],
+        "deviation": 20,
+        "type_filling": "IOC",
+        "client_order_id": cid,
+    }
+    first = client.post("/orders", json=body)
+    assert first.get("retcode") == RETCODE_DONE, f"order_send failed: {first}"
+    assert first.get("duplicate") is False, first
+    assert first.get("client_order_id") == cid, first
+
+    pos = wait_until(lambda: find_position_by_magic(client, config["magic"]))
+    assert pos is not None, "position did not appear within timeout"
+    assert pos["comment"] == cid, f"broker changed the comment: {pos['comment']!r}"
+
+    retry = client.post("/orders", json=body)
+    assert retry.get("duplicate") is True, f"retry was sent again: {retry}"
+    assert retry.get("source") == "recent_send", retry
+    assert retry.get("order") == first.get("order"), retry
+
+    mine = [p for p in client.get("/positions") or [] if int(p.get("magic", 0)) == config["magic"]]
+    assert len(mine) == 1, f"expected one position, got {len(mine)}"
+
+    close = client.delete(f"/positions/{pos['ticket']}")
+    assert close.get("retcode") == RETCODE_DONE, f"close retcode != DONE: {close}"
     assert cleanup_after is None or True
