@@ -6,11 +6,16 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
-## [Unreleased]
+## [v4.30.1]: 2026-10-21
 
 ### Fixed
 
-- **Stuck MT5 LiveUpdate updaters no longer pile up until every backtest launch fails.** When a broker's server ships a new build, each launch of a terminal with the update pending starts an updater from `AppData\...\liveupdate\terminal64.exe`; if the next test relaunches the terminal first, that updater never finishes. They run outside the terminal folder, so nothing stopped them: about 1,000 per VM used up the Windows session's GDI objects and every launch on every terminal failed with exit 10053 or 10012 ("not enough handles to start the platform"). Each launch now waits up to 120 s for a leftover updater of its terminal, then stops it, and the timeout cleanup includes them. See [docs/backtesting.md](docs/backtesting.md#post-backtest).
+- **Stuck MT5 LiveUpdate updaters no longer pile up until every backtest launch fails.** When a broker's server ships a new build, each launch of a terminal with the update pending starts an updater from `AppData\...\liveupdate\terminal64.exe`; if the next test relaunches the terminal first, that updater never finishes. They run outside the terminal directory, so nothing stopped them: about 1,000 per VM used up the Windows session's GDI objects and every launch on every terminal failed with exit 10053 or 10012 ("not enough handles to start the platform"). Each launch now waits up to 120 s for a leftover updater of its terminal, then stops it, and the timeout cleanup includes them. See [docs/backtesting.md](docs/backtesting.md#post-backtest).
+
+### Changed
+
+- The scheduled issue-mirror pull runs at a staggered time instead of a shared minute.
+- `CLAUDE.md` links to `AGENTS.md` and `.claude` links to `.agents`, so Claude Code loads the project instructions, rules and skills from the same files as other agents.
 
 ## [v4.30.0]: 2026-10-19
 
