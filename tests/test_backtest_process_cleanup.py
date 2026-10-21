@@ -180,3 +180,40 @@ def test_never_kills_in_live_mode(startup, monkeypatch):
     main._run_backtest_startup_cleanup()
 
     assert calls["killed"] == 0
+
+
+class FakeUpdater(FakeProc):
+    def __init__(self, path_arg):
+        super().__init__(
+            "terminal64.exe",
+            "C:\\Users\\Docker\\AppData\\Roaming\\MetaQuotes\\Terminal\\ABC\\liveupdate\\terminal64.exe",
+        )
+        self.info["cmdline"] = [self.info["exe"], "/update", f'/path:"{path_arg}"', "/portable"]
+
+
+def test_kills_this_terminals_liveupdate_updaters_but_not_a_siblings(monkeypatch, terminal_dir):
+    """Updaters run from AppData, outside the terminal folder; stuck ones piled
+    up until the Windows session ran out of handles."""
+    ours = FakeUpdater(terminal_dir)
+    sibling = FakeUpdater(terminal_dir + "2")
+    _install(monkeypatch, [ours, sibling])
+
+    assert handler.kill_terminal_processes() == 1
+    assert ours.terminated and not sibling.terminated
+
+
+def test_a_launch_stops_an_updater_still_alive_after_the_wait(monkeypatch, terminal_dir):
+    stuck = FakeUpdater(terminal_dir)
+    _install(monkeypatch, [stuck])
+    clock = {"t": 0.0}
+    monkeypatch.setattr(handler.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(handler.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+
+    assert handler._clear_stale_updaters(wait_seconds=30) == 1
+    assert stuck.killed
+
+
+def test_a_launch_waits_for_nothing_when_no_updater_runs(monkeypatch, terminal_dir):
+    _install(monkeypatch, [FakeProc("terminal64.exe", f"{terminal_dir}\\terminal64.exe")])
+
+    assert handler._clear_stale_updaters(wait_seconds=30) == 0

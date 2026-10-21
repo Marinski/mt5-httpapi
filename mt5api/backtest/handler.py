@@ -455,13 +455,72 @@ def _terminal_processes(names=TESTER_PROCESS_NAMES):
             continue
 
 
+#: How long a fresh launch waits for a leftover LiveUpdate updater to finish
+#: before stopping it. An updater still alive when the next job starts is
+#: almost always stuck: the relaunch holds the file it needs to replace.
+UPDATER_WAIT_SECONDS = 120
+
+
+def _updater_processes():
+    """MT5 LiveUpdate updaters working on THIS terminal directory.
+
+    When a broker's server ships a new build, a launch of a terminal with the
+    update pending starts `<AppData>\\MetaQuotes\\Terminal\\<hash>\\liveupdate\\
+    terminal64.exe /update /path:"<terminal dir>"` and exits. If the next job
+    relaunches the terminal before the updater has replaced terminal64.exe, the
+    updater can never finish and never exits, and each further launch starts
+    another one. They live outside the terminal folder, so _terminal_processes
+    never saw them. Each holds ~48 GDI and ~36 USER objects; about 1,000 per VM
+    used up the Windows session (65,536 GDI objects) and every terminal launch
+    then failed with exit 10053 or 10012 ("not enough handles to start the
+    platform").
+    """
+    forms = set(_terminal_dir_forms(TERMINAL_DIR))
+    for proc in psutil.process_iter(["name", "exe", "cmdline"]):
+        try:
+            if (proc.info.get("name") or "").lower() != "terminal64.exe":
+                continue
+            if "/liveupdate/" not in _normalize_path(proc.info.get("exe") or ""):
+                continue
+            for arg in proc.info.get("cmdline") or []:
+                if arg.lower().startswith("/path:"):
+                    if _normalize_path(arg[len("/path:"):].strip('"')) in forms:
+                        yield proc
+                    break
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
+def _clear_stale_updaters(wait_seconds=UPDATER_WAIT_SECONDS):
+    """Before a launch: give a leftover updater for this terminal time to
+    finish, then stop it. Returns how many were stopped."""
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if not any(True for _ in _updater_processes()):
+            return 0
+        time.sleep(5)
+    stale = list(_updater_processes())
+    for proc in stale:
+        try:
+            proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if stale:
+        log.warning(
+            "backtest: stopped %d stuck LiveUpdate updater(s) broker=%s account=%s",
+            len(stale), BROKER, ACCOUNT,
+        )
+    return len(stale)
+
+
 def kill_terminal_processes(grace_seconds=10):
-    """Stop this terminal's tester processes. Returns how many were signalled.
+    """Stop this terminal's tester processes and its LiveUpdate updaters.
+    Returns how many were signalled.
 
     Terminate first, then kill whatever is still standing, so MT5 gets the
     chance to release its files cleanly before being shot.
     """
-    victims = list(_terminal_processes())
+    victims = list(_terminal_processes()) + list(_updater_processes())
     if not victims:
         return 0
     for proc in victims:
@@ -744,6 +803,9 @@ def _execute_job(job_id):
                 "backtest start broker=%s account=%s job=%s report=%s",
                 BROKER, ACCOUNT, job_id, job["reportName"],
             )
+            # A launch on top of a stuck updater starts another updater that
+            # cannot finish either (see _updater_processes).
+            _clear_stale_updaters()
             with open(job["logPath"], "w", encoding="utf-8") as log_handle:
                 try:
                     result = subprocess.run(
