@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ---
 
+## [v4.31.1]: 2026-10-21
+
+### Changed
+
+- `AGENTS.md` no longer carries the index of rule files that v4.31.0 moved into it. Agents load every file in `.agents/rules/` anyway, so the index only added to every context; `AGENTS.md` now points at the directory in one line.
+
 ## [v4.31.0]: 2026-10-21
 
 ### Added

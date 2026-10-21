@@ -2,23 +2,7 @@
 
 Guide for coding agents working on this repository. If you only want to call the API from an agent, read [.agents/skills/mt5-httpapi/SKILL.md](.agents/skills/mt5-httpapi/SKILL.md) instead; this file is about changing the code.
 
-The project rules live in [.agents/rules/](.agents/rules/), one file per topic. Read the ones that match what you are about to touch before you edit.
-
-| File | Prefix | Covers |
-| --- | --- | --- |
-| [architecture.md](.agents/rules/architecture.md) | ARC | Process model, where each concern lives, what must stay in sync across components. |
-| [python-code.md](.agents/rules/python-code.md) | PY | Python style as practised here: guard clauses, named constants, logging, typed errors, exception handling. |
-| [api-design.md](.agents/rules/api-design.md) | API | REST surface: snake_case keys and the legacy camelCase twins, error shape, status codes, feature gating, body caps. |
-| [mcp.md](.agents/rules/mcp.md) | MCP | The two MCP servers: tool parity, the route catalog, docstrings as the agent contract, errors. |
-| [testing.md](.agents/rules/testing.md) | TST | Which test layer for what, regression tests, live suite safety and cleanup. |
-| [windows-vm.md](.agents/rules/windows-vm.md) | WIN | Code that runs inside the Windows VM: ASCII only, boot flow, the shared folder, locks. |
-| [security.md](.agents/rules/security.md) | SEC | Credentials, auth tokens, file API and compile protections, live-account safety, supply-chain review. |
-| [docs-and-releases.md](.agents/rules/docs-and-releases.md) | DOC | Docs kept in step with code, prose style, CHANGELOG, versions, tags, CI publishing. |
-| [chat.md](.agents/rules/chat.md) | CHAT | How an agent signs off its chat replies, PR, issue and discussion comments, messages and commit messages. |
-
-Every rule starts with a bold ID: one prefix per file and a number counted from 1 in that file. Cite rules by ID (for example "TST3") in reviews, commits and code comments. IDs are never reused or renumbered: a removed rule's ID stays retired, and a new rule takes the next free number in its file. `.agents/rules/` holds rule files only, because every file in it is loaded into an agent's context; overviews and indexes belong here.
-
-When a rule and the code disagree, the code and its tests win; fix the rule in the same change.
+The project rules live in `.agents/rules/`, one file per topic.
 
 ## What this project is
 
