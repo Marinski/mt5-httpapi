@@ -517,6 +517,10 @@ latest terminal and Strategy Tester journal lines; `lines` defaults to `200`
 and is clamped to `10..1000`. The MCP `get_backtest` tool exposes the same data
 with `part: "tail"`.
 
+`POST /backtest/<job_id>/cancel` stops a queued or running job and marks it
+`cancelled` (a final status). It kills only that terminal's tester processes,
+and only when that job is the one running there; it is safe to repeat.
+
 ### Real backtest runbook — finish the fucking job
 
 When the user asks for a real backtest, do not declare victory after building an
