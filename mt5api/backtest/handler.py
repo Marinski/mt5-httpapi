@@ -789,7 +789,7 @@ def run_backtest():
         jobs.update_job(
             job_id, status="failed", error=WORKER_START_ERROR, finishedAt=jobs.now_iso()
         )
-        return jsonify({"error": WORKER_START_ERROR, "code": "worker_start_failed"}), 503
+        return jsonify({"error": WORKER_START_ERROR, "code": "WORKER_START_FAILED"}), 503
 
     response = jsonify(jobs.public_payload(job))
     response.status_code = 202
@@ -817,6 +817,14 @@ def _raise_if_cancelled(job_id):
 def _worker_active(job_id):
     with _CANCEL_LOCK:
         return job_id in _ACTIVE_WORKERS
+
+
+def active_worker_ids():
+    """Jobs whose worker thread still runs, whatever their status says. A
+    cancelled job's worker can spend up to CANCEL_SETTLE_SECONDS (plus
+    RELAUNCH_GRACE_SECONDS after the lock) killing its tester processes."""
+    with _CANCEL_LOCK:
+        return frozenset(_ACTIVE_WORKERS)
 
 
 @contextlib.contextmanager
@@ -1185,11 +1193,11 @@ def cancel_backtest(job_id):
     """
     job = jobs.load_job(job_id)
     if job is None:
-        return jsonify({"error": f"Backtest job not found: {job_id}", "code": "job_not_found"}), 404
+        return jsonify({"error": f"Backtest job not found: {job_id}", "code": "JOB_NOT_FOUND"}), 404
     if not jobs.owns_job(job):
         return jsonify({
             "error": f"Backtest job {job_id} belongs to another terminal",
-            "code": "job_not_owned",
+            "code": "JOB_NOT_OWNED",
         }), 409
     if job.get("status") in jobs.TERMINAL_STATUSES:
         return jsonify(jobs.public_payload(job))

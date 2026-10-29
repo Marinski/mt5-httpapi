@@ -11,6 +11,7 @@ state write killed the thread before its first `try`, and the job answered
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import threading
 import time
@@ -125,7 +126,7 @@ def test_cancel_of_an_unknown_job_is_404_with_a_code(client):
     resp = _cancel(client, "0" * 32)
 
     assert resp.status_code == 404
-    assert resp.get_json()["code"] == "job_not_found"
+    assert resp.get_json()["code"] == "JOB_NOT_FOUND"
 
 
 def test_cancel_of_a_finished_job_answers_it_unchanged(client, monkeypatch):
@@ -149,7 +150,7 @@ def test_cancel_of_another_terminals_job_is_refused(client, monkeypatch):
     resp = _cancel(client, job_id)
 
     assert resp.status_code == 409
-    assert resp.get_json()["code"] == "job_not_owned"
+    assert resp.get_json()["code"] == "JOB_NOT_OWNED"
     assert jobs.load_job(job_id)["status"] == "queued"
 
 
@@ -341,7 +342,7 @@ def test_a_worker_that_cannot_start_fails_the_job_with_503(client, monkeypatch):
     )
 
     assert resp.status_code == 503
-    assert resp.get_json()["code"] == "worker_start_failed"
+    assert resp.get_json()["code"] == "WORKER_START_FAILED"
     (job,) = jobs.BACKTEST_JOBS.values()
     assert job["status"] == "failed"
     assert job["error"] == handler.WORKER_START_ERROR
@@ -401,3 +402,72 @@ def test_cancel_of_a_job_that_finishes_meanwhile_answers_it_finished(client, mon
     assert resp.get_json()["status"] == "completed"
     assert jobs.load_job(job_id)["status"] == "completed"
     assert job_id not in handler._CANCELLED
+
+
+# --- a cancel the worker notices only after RUN_LOCK ---------------------------
+
+
+def _land_cancel(job_id):
+    """What POST /cancel does to the job and its flag, at a chosen moment."""
+    with handler._CANCEL_LOCK:
+        handler._CANCELLED.add(job_id)
+    jobs.cancel_if_active(job_id, error=handler.CANCEL_ERROR, finishedAt=jobs.now_iso())
+
+
+def test_a_cancel_after_the_terminal_exits_stops_the_run_instead_of_judging_it(
+    client, monkeypatch
+):
+    """The cancel lands between the terminal's exit and the report checks: the
+    worker takes the terminal back and stops whatever is left, and no late
+    "failed" reaches the job."""
+    job_id = _submit(client)
+    monkeypatch.setattr(
+        handler.subprocess, "run", lambda *a, **k: type("Result", (), {"returncode": 1})()
+    )
+    real_lock = handler._run_lock
+
+    @contextlib.contextmanager
+    def _lock_then_cancel(jid):
+        with real_lock(jid):
+            yield
+        _land_cancel(jid)
+
+    monkeypatch.setattr(handler, "_run_lock", _lock_then_cancel)
+    stopped = []
+    monkeypatch.setattr(handler, "_stop_after_lock_released", stopped.append)
+
+    handler._execute_job(job_id)
+
+    assert stopped == [job_id]
+    job = jobs.load_job(job_id)
+    assert job["status"] == "cancelled"
+    assert job["error"] == handler.CANCEL_ERROR
+    assert job.get("exitCode") is None
+    assert job_id not in handler._ACTIVE_WORKERS
+
+
+def test_a_cancel_during_the_self_relaunch_wait_stops_mt5s_replacement(client, monkeypatch):
+    """A clean, fast exit with no report sends the worker to wait for MT5's
+    replacement terminal. A cancel there must stop that terminal, not wait for
+    it or fail the job for a missing report."""
+    job_id = _submit(client)
+    monkeypatch.setattr(
+        handler.subprocess, "run", lambda *a, **k: type("Result", (), {"returncode": 0})()
+    )
+    monkeypatch.setattr(handler, "_any_report_exists", lambda _paths: False)
+
+    def _cancelled_while_waiting(jid, _paths, _deadline):
+        _land_cancel(jid)
+        return False
+
+    monkeypatch.setattr(handler, "_await_self_relaunch", _cancelled_while_waiting)
+    stopped = []
+    monkeypatch.setattr(handler, "_stop_after_lock_released", stopped.append)
+
+    handler._execute_job(job_id)
+
+    assert stopped == [job_id]
+    job = jobs.load_job(job_id)
+    assert job["status"] == "cancelled"
+    assert job["error"] == handler.CANCEL_ERROR
+    assert not handler.RUN_LOCK.locked()

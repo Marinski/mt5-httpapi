@@ -441,8 +441,8 @@ Stop a job and mark it `cancelled`. Safe to repeat.
 
 | Job | What happens | Answer |
 | --- | --- | --- |
-| unknown | nothing | `404`, `code: job_not_found` |
-| another terminal's (asked on the wrong instance) | nothing | `409`, `code: job_not_owned` |
+| unknown | nothing | `404`, `code: JOB_NOT_FOUND` |
+| another terminal's (asked on the wrong instance) | nothing | `409`, `code: JOB_NOT_OWNED` |
 | `completed`, `failed` or `cancelled` | nothing | `200`, the job as it is |
 | `queued` | dropped before it launches; a run already on this terminal is not touched | `200` |
 | `running` | this terminal's `terminal64.exe`, its `metatester64.exe` agents and any stuck LiveUpdate updater are killed; the next job starts only once they are gone | `200`, or `202` if the worker is still stopping after 40 s |
@@ -450,7 +450,8 @@ Stop a job and mark it `cancelled`. Safe to repeat.
 The answer is the job's status payload plus `killed` (processes signalled) and
 `stopped` (the worker has let go of the terminal). `cancelled` is final: a write
 from the worker that is still winding down cannot turn it back into `failed` or
-`completed`. A cancelled job has no report.
+`completed`. A cancelled job has no report. While its worker is still stopping
+the tester processes, `GET /busy` lists it, so a scheduled reboot waits.
 
 A job's worker can no longer die and leave the job `running`: any exception
 outside the run's own error handling fails the job with `Backtest worker crashed

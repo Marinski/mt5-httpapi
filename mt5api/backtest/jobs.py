@@ -47,8 +47,8 @@ CANCEL_KEEPS_FIELDS = frozenset({"status", "error", "finishedAt"})
 
 # os.replace on the VM share fails with WinError 5 while any other handle has
 # the target open (a reader, Defender, an SMB oplock break). It clears within
-# milliseconds, so retry before giving up. 29 Oct 2026, darwinex/live/36: one
-# such failure killed a job's worker before its terminal started.
+# milliseconds, so retry before giving up. On a two-VM install one such
+# failure killed a job's worker before its terminal started.
 REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 # Only state files touched within the last SWEEP_LOOKBACK_SECONDS can be an
